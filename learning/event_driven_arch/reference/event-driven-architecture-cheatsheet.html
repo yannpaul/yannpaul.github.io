@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference · Event-Driven Architecture Cheat Sheet</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Event-Driven Architecture · Reference</p>
+  <h1>EDA / Kafka Cheat Sheet</h1>
+  <p class="subtitle">Compressed from <a href="../lessons/0001-what-is-event-driven-architecture.html">Lessons 1–4</a>. Designed to print on one or two pages — this is what you come back to, not the lessons themselves.</p>
+
+  <h2>Core mechanisms</h2>
+  <table>
+    <thead><tr><th>Term</th><th>What it is</th></tr></thead>
+    <tbody>
+      <tr id="topic"><td><strong>Topic</strong></td><td>A named, durable, append-only log of events. Not deleted on read.</td></tr>
+      <tr id="partition"><td><strong>Partition</strong></td><td>An ordered slice of a topic. Order is guaranteed <em>within</em> a partition only.</td></tr>
+      <tr id="offset"><td><strong>Offset</strong></td><td>A consumer's position in a partition's log — enables resume, rewind, replay.</td></tr>
+      <tr id="producer"><td><strong>Producer</strong></td><td>Publishes events. Never knows who (if anyone) consumes them.</td></tr>
+      <tr id="consumer"><td><strong>Consumer</strong></td><td>Subscribes to and processes events, independently of the producer's lifecycle.</td></tr>
+      <tr id="consumer-group"><td><strong>Consumer group</strong></td><td>A set of consumers splitting a topic's partitions between them — one partition, one consumer per group, at a time.</td></tr>
+      <tr id="isr"><td><strong>In-sync replica (ISR)</strong></td><td>A replica fully caught up with the partition leader; eligible for promotion on leader failure. <code>min.insync.replicas</code> sets how many must ack a write under <code>acks=all</code>.</td></tr>
+      <tr id="rebalance"><td><strong>Rebalance</strong></td><td>Reassigning a consumer group's partitions when membership changes — pauses affected consumption while it runs.</td></tr>
+      <tr id="consumer-lag"><td><strong>Consumer lag</strong></td><td>Gap between the latest offset written and the offset a consumer has processed. The primary "are we falling behind" metric.</td></tr>
+      <tr id="schema-registry"><td><strong>Schema registry</strong></td><td>Stores and enforces event-schema compatibility, so producers/consumers evolve independently without breaking each other.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Concepts</h2>
+  <table>
+    <thead><tr><th>Term</th><th>What it is</th></tr></thead>
+    <tbody>
+      <tr id="eventual-consistency"><td><strong>Eventual consistency</strong></td><td>All consumers converge on the same state eventually — no bound on how long "eventually" takes.</td></tr>
+      <tr id="event-entropy"><td><strong>Event entropy</strong></td><td>Event flows multiplying faster than any team can track their intent, order, and causality, absent deliberate governance.</td></tr>
+      <tr id="saga"><td><strong>Saga</strong></td><td>A cross-service business transaction as a sequence of local transactions, each with a compensating action.</td></tr>
+      <tr id="compensating-action"><td><strong>Compensating action</strong></td><td>An explicit "undo" step for a saga stage that already committed and can't be rolled back transactionally.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Strengths → weaknesses → mitigations, at a glance</h2>
+  <table>
+    <thead><tr><th>Strength</th><th>Shadow weakness</th><th>Mitigation</th><th>Cost of the mitigation</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Decoupled in time &amp; space</td>
+        <td>Eventual consistency, not ACID</td>
+        <td>Idempotent consumers + <a href="#saga">sagas</a> with compensating actions</td>
+        <td>Compensating logic to write and maintain; some actions can't be undone cleanly</td>
+      </tr>
+      <tr>
+        <td>Producer doesn't know consumers</td>
+        <td>Dual-write problem (DB write + publish aren't atomic)</td>
+        <td>Transactional outbox + relay</td>
+        <td>Extra table + relay process; small publish delay</td>
+      </tr>
+      <tr>
+        <td>Parallel scaling via partitions</td>
+        <td>Order guaranteed per-partition only</td>
+        <td>Partition by a stable business key</td>
+        <td>Hot partitions on skewed keys; repartitioning is a migration</td>
+      </tr>
+      <tr>
+        <td>Resilience via consumer-group failover</td>
+        <td>Rebalance pauses consumption</td>
+        <td>Cooperative rebalancing + static membership</td>
+        <td>Real crashes take longer to detect and recover from</td>
+      </tr>
+      <tr>
+        <td>New consumers attach with no coordination</td>
+        <td>No single stack trace across services (event entropy)</td>
+        <td>Correlation IDs, schema registry, lag alerting, dead-letter topics</td>
+        <td>Governance and tooling overhead, owned by someone</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Decision checklist</h2>
+  <div class="callout good">
+    <span class="callout-label">Lean toward EDA when</span>
+    <p>Multiple independent consumers need the same facts (now or later) · producers and consumers release on different schedules · brief inconsistency between services is tolerable for the business process.</p>
+  </div>
+  <div class="callout bad">
+    <span class="callout-label">Lean away from EDA when</span>
+    <p>A single, all-or-nothing, immediately-consistent operation is all you need — a local ACID transaction is simpler and more correct than sagas and outboxes bolted on to fake it back.</p>
+  </div>
+
+  <p class="cite">See <a href="../RESOURCES.md">RESOURCES.md</a> for full source list. Primary references: kafka.apache.org/documentation, docs.confluent.io, microservices.io (Chris Richardson).</p>
+
+  <div class="lesson-nav">
+    <a href="../lessons/0004-mitigation-strategies.html">← Back to Lesson 4</a>
+    <a href="../lessons/0001-what-is-event-driven-architecture.html">Start over: Lesson 1</a>
+  </div>
+</main>
+</body>
+</html>

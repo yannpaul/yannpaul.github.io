@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1 · What Is Event-Driven Architecture</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Event-Driven Architecture · Lesson 1 of 4</p>
+  <h1>What Is Event-Driven Architecture?</h1>
+  <p class="subtitle">And why LinkedIn built Kafka to get one.</p>
+
+  <p class="lede">In a <strong>request-driven</strong> system, a service asks another service for something and waits for the answer. In an <strong>event-driven</strong> system, a service announces that something happened — an <em>event</em> — and doesn't wait for anyone. Whoever cares can listen later, on their own schedule.</p>
+
+  <p>That's the whole idea. Everything in this workspace — the strengths, the weaknesses, the mitigations — falls out of that one shift: from <em>asking</em> to <em>announcing</em>.</p>
+
+  <h2>The problem that forced the shift</h2>
+
+  <p>In 2010, LinkedIn had a concrete problem. Every action on the site — a view, a click, a connection request — needed to reach a growing pile of downstream systems: search indexing, recommendation models, monitoring, offline analytics in Hadoop. The tools available at the time were built for one of two jobs: batch pipelines that moved data in nightly dumps, or message queues that pushed data at a consumer as fast as it arrived, with no memory of what had already been sent.</p>
+
+  <p>Neither fit. Batch was too slow for anything real-time. Queues had no durable record — once a consumer read a message, it was gone, so a new consumer (or a consumer that crashed and restarted) couldn't catch up. LinkedIn's engineers, led by Jay Kreps, Neha Narkhede, and Jun Rao, built Kafka to close that gap: a system that could take a firehose of "this happened" facts and let any number of independent consumers read them, at their own pace, from any point in the past. LinkedIn open-sourced it in 2011.</p>
+
+  <div class="callout">
+    <span class="callout-label">Why the name</span>
+    <p>Kafka was named for Franz Kafka — Kreps has said he thought of it as "a system optimized for writing," a pun that stuck. Whatever the origin story's exact framing, the design goal was concrete: a durable, ordered, replayable log that many independent systems could read from.</p>
+  </div>
+
+  <h2>The core mechanism: the log, not the queue</h2>
+
+  <p>This is the detail that makes Kafka worth using as your example for the whole rest of this workspace: <strong>Kafka doesn't delete a message once it's read.</strong> A <a href="../reference/event-driven-architecture-cheatsheet.html#topic">topic</a> is an append-only log, split into <a href="../reference/event-driven-architecture-cheatsheet.html#partition">partitions</a>. Each consumer just tracks its own position — its <a href="../reference/event-driven-architecture-cheatsheet.html#offset">offset</a> — in that log. Consumers can be added later, replay from the beginning, or fall behind and catch up, all without the producer knowing or caring.</p>
+
+  <p>Compare that to a traditional queue (think early RabbitMQ usage patterns): a message is delivered to one consumer and then it's gone. That's fine for task distribution, but it means a new consumer added next month has no way to see last month's events. Kafka's retained, replayable log is what makes it a backbone for an <em>architecture</em>, not just a messaging library.</p>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Why couldn't LinkedIn's existing queueing systems serve as the backbone for many independent downstream consumers?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Throughput wasn't the stated problem — durability and replay were.">Queues simply could not handle LinkedIn's growing message volume at all.</li>
+      <li data-option="b" data-explain="Ordering wasn't the core complaint in the original motivation — retention was.">Queues delivered messages to consumers in the wrong order every time.</li>
+      <li data-option="c" data-explain="Right. A consumed message was gone, so a new or restarted consumer had no durable record to catch up from — the exact problem an append-only, replayable log solves.">Queues discarded each message right after delivery, leaving late consumers stuck.</li>
+      <li data-option="d" data-explain="Batch systems were the other tool available, not the queues themselves — and batch was too slow, not too fast.">Queues processed data too slowly for any downstream system to use.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Producers and consumers never meet</h2>
+
+  <p>The other half of "event-driven": a <a href="../reference/event-driven-architecture-cheatsheet.html#producer">producer</a> that writes to a topic has zero knowledge of who — if anyone — is consuming it. Add a new <a href="../reference/event-driven-architecture-cheatsheet.html#consumer">consumer</a> tomorrow (a new fraud-detection service, say), and the producer's code doesn't change at all. That decoupling is the seed of Lesson 2's strengths and Lesson 3's weaknesses alike — it's the same design decision cutting both ways.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear here — the log-vs-queue distinction, why LinkedIn specifically needed this, anything else? Ask your teacher (me) before moving on. This lesson is deliberately small; a good question now is worth more than pushing ahead confused.
+  </div>
+
+  <p class="cite">Primary source for this lesson: LinkedIn Engineering, "Kafka: a Distributed Messaging System for Log Processing" and the LinkedIn Engineering blog's account of Kafka's origin (<a href="https://engineering.linkedin.com/kafka">engineering.linkedin.com/kafka</a>) — read this first if you want the founders' own framing of the problem.</p>
+
+  <div class="lesson-nav">
+    <span>Lesson 1 of 4</span>
+    <a href="./0002-strengths-of-event-driven-architecture.html">Next: Strengths →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

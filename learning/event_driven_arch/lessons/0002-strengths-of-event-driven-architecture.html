@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 2 · Strengths of Event-Driven Architecture</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Event-Driven Architecture · Lesson 2 of 4</p>
+  <h1>Four Strengths, Each Tied to a Kafka Mechanism</h1>
+  <p class="subtitle">Not "decoupled and scalable" as slogans — the specific mechanism that earns each claim.</p>
+
+  <p class="lede">Every strength below is a direct consequence of the log-not-queue design from <a href="./0001-what-is-event-driven-architecture.html">Lesson 1</a>. Learn the mechanism, and the strength stops being a marketing word and becomes something you can reason about.</p>
+
+  <h2>1. Decoupling in space <em>and</em> time</h2>
+
+  <p>Request-driven systems decouple in space (a client doesn't need to know a server's implementation) but not in time — both sides must be up simultaneously. Kafka's retained log decouples in time too: a producer can write an event while every consumer is offline, and each consumer reads it whenever it comes back, from wherever its <a href="../reference/event-driven-architecture-cheatsheet.html#offset">offset</a> left off.</p>
+
+  <p>Concretely: LinkedIn could add a new "who's viewed your profile" analytics service years after the original page-view events started flowing, without touching the page-view producer's code at all — because the events were already sitting in a durable, replayable topic.</p>
+
+  <h2>2. Independent, parallel scaling</h2>
+
+  <p>A <a href="../reference/event-driven-architecture-cheatsheet.html#topic">topic</a> is split into <a href="../reference/event-driven-architecture-cheatsheet.html#partition">partitions</a>. A <a href="../reference/event-driven-architecture-cheatsheet.html#consumer-group">consumer group</a> spreads those partitions across its members, so adding a consumer instance adds throughput, up to one consumer per partition. Producers and consumers also scale independently of each other — a burst of writes doesn't force you to scale readers, and vice versa. This is a direct structural consequence of the partition model, not a vague "it scales" claim.</p>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A consumer group has 8 members but the topic has only 4 partitions. What happens to the extra 4 consumers?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Kafka does not split a single partition's reads across multiple consumers in the same group — order within a partition requires one reader.">They receive one-eighth of every partition's messages across the group.</li>
+      <li data-option="b" data-explain="Right. One partition is read by exactly one consumer in a group at a time, so beyond 4 assigned consumers, the rest sit idle until a partition frees up.">They sit idle, since only one consumer reads a partition.</li>
+      <li data-option="c" data-explain="Kafka does not duplicate a partition's stream to multiple consumers within the same group — that would break the group's exactly-once-per-group guarantee.">They all receive a full duplicate copy of every message.</li>
+      <li data-option="d" data-explain="Kafka assigns partitions to existing consumers rather than creating new partitions on the fly to match consumer count.">Kafka automatically creates four more partitions to use them all.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>3. Resilience through durability and replay</h2>
+
+  <p>Because events are retained rather than discarded on read, a consumer that crashes doesn't lose data — it resumes from its last committed <a href="../reference/event-driven-architecture-cheatsheet.html#offset">offset</a>. And because Kafka replicates each partition across multiple brokers (governed by <em>replication factor</em>, <em>acks</em>, and <em>min.insync.replicas</em>), a single broker failure doesn't lose data either, as long as enough <a href="../reference/event-driven-architecture-cheatsheet.html#isr">in-sync replicas</a> exist. A common production setting — replication factor 3, <code>min.insync.replicas=2</code>, <code>acks=all</code> — tolerates one broker going down mid-write and still guarantees the write was durably committed to two replicas before it's acknowledged.</p>
+
+  <p>That's a real, checkable guarantee — not "it's fault tolerant" as an adjective, but a specific number of replicas you chose to trade off against write latency.</p>
+
+  <h2>4. New capabilities without new coordination</h2>
+
+  <p>Because producers never know who's listening, a new team can attach a new consumer to an existing topic — fraud detection, a new recommendation model, an audit log — without a design meeting with the producing team, and without redeploying it. This is the same "producers and consumers never meet" property from Lesson 1, but it's worth naming as a strength on its own: it's an organizational win as much as a technical one, which is part of why event-driven backbones spread inside large, many-team companies like LinkedIn in the first place.</p>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Replication factor 3, min.insync.replicas=2, acks=all. One broker holding a replica goes down. What happens to new writes?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Right. 2 of the 3 replicas are still in sync, which meets min.insync.replicas=2, so acks=all writes keep succeeding — durable, just with one fewer safety margin.">Writes keep succeeding, since 2 in-sync replicas still satisfy the minimum.</li>
+      <li data-option="b" data-explain="min.insync.replicas=2 is satisfied by the 2 remaining in-sync replicas — the cluster does not need all 3 to keep accepting writes.">Writes fail immediately, since just one of three replicas is missing.</li>
+      <li data-option="c" data-explain="Kafka does not silently drop the durability guarantee to keep writes flowing — it enforces min.insync.replicas or rejects the write.">Writes succeed but silently skip replication until the broker recovers fully.</li>
+      <li data-option="d" data-explain="A single broker loss does not take partitions fully offline when enough in-sync replicas remain — the whole point of replication is to survive exactly this.">The whole partition becomes completely unavailable until the broker fully recovers.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Any of these four feel shaky — decoupling, scaling, resilience, or the organizational point? Ask before Lesson 3, where every one of these strengths gets its shadow weakness.
+  </div>
+
+  <p class="cite">Primary source for this lesson: Confluent Documentation, "Kafka Replication" and the min.insync.replicas / acks configuration reference (<a href="https://docs.confluent.io/kafka/design/replication.html">docs.confluent.io/kafka/design/replication.html</a>).</p>
+
+  <div class="lesson-nav">
+    <a href="./0001-what-is-event-driven-architecture.html">← Back: What Is EDA</a>
+    <a href="./0003-weaknesses-and-failure-modes.html">Next: Weaknesses →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

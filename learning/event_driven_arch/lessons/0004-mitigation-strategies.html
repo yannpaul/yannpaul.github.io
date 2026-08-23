@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 4 · Mitigation Strategies</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Event-Driven Architecture · Lesson 4 of 4</p>
+  <h1>Paying the Cost on Purpose</h1>
+  <p class="subtitle">A named mitigation for each Lesson 3 weakness — and what each mitigation costs you in return.</p>
+
+  <p class="lede">None of these mitigations make a weakness disappear. Each one <em>trades</em> the original problem for a smaller, chosen one. That trade is the actual engineering decision — not "use EDA" or "don't," but "which of these five trades am I willing to make, and where."</p>
+
+  <h2>1. Eventual consistency → design consumers to be idempotent, and use Sagas for cross-service transactions</h2>
+
+  <p>You can't get atomicity back across services. What you can do is stop needing it: make every consumer <strong>idempotent</strong> (processing the same event twice produces the same result as once), and for a business process that spans services — "place order" touching inventory, payment, and shipping — use a <a href="../reference/event-driven-architecture-cheatsheet.html#saga">saga</a>: a sequence of local transactions, each with a <a href="../reference/event-driven-architecture-cheatsheet.html#compensating-action">compensating action</a> to explicitly undo it if a later step fails. If payment fails after inventory was reserved, the saga runs "release inventory reservation" — not a database rollback, a real business action.</p>
+
+  <div class="callout">
+    <span class="callout-label">The trade</span>
+    <p>You write compensating logic for every step that can be undone — and some things genuinely can't be un-done cleanly (an email already sent, a payment already settled with the card network). Sagas make failure handling <em>explicit code you maintain</em>, in exchange for not needing distributed transactions.</p>
+  </div>
+
+  <h2>2. Dual-write problem → transactional outbox</h2>
+
+  <p>Write the event to an <em>outbox</em> table in the <strong>same local database transaction</strong> as the business update — now it's one atomic write, not two. A separate relay process (polling the outbox table, or using change-data-capture like Debezium) then publishes rows from the outbox to Kafka asynchronously, retrying until it succeeds, and marks them sent.</p>
+
+  <div class="callout">
+    <span class="callout-label">The trade</span>
+    <p>You've added a table and a relay process to every service that publishes events — more moving parts, another thing to monitor. And publishing is no longer instantaneous with the database commit: there's a small, usually sub-second lag while the relay catches up. You've traded "might silently lose the event" for "the event is delayed by a bounded, monitorable amount." That's a much better trade, but it's still a trade, and Chris Richardson is explicit that this is a rule to follow, not an optional optimization.</p>
+  </div>
+
+  <h2>3. Cross-entity ordering → partition by a stable business key</h2>
+
+  <p>If order 42's events must process in order, key every event for order 42 to the same partition (Kafka hashes the key to a partition deterministically). Now ordering is guaranteed for everything that shares a key, with no coordination needed beyond picking the right key.</p>
+
+  <div class="callout">
+    <span class="callout-label">The trade</span>
+    <p>A skewed key (one giant customer generating far more events than everyone else) creates a "hot partition" — one consumer instance doing most of the work while others sit idle, since a partition can't be split across multiple consumers in a group. You've traded an ordering bug for a load-balancing problem, and changing the key later means a live repartitioning migration, not a config flag.</p>
+  </div>
+
+  <h2>4. Rebalance pauses → cooperative rebalancing and static membership</h2>
+
+  <p>Modern Kafka consumer groups default to a <em>cooperative</em> rebalancing strategy: only the partitions that actually need to move are paused and reassigned, not the whole group. Pairing that with <em>static group membership</em> (a consumer keeps its identity across a restart, for a configurable window) avoids triggering a rebalance at all for a quick pod restart — the common case in a Kubernetes deployment.</p>
+
+  <div class="callout">
+    <span class="callout-label">The trade</span>
+    <p>Static membership means Kafka waits out a timeout window before reassigning a truly-dead consumer's partitions, so real failures take slightly longer to recover from. You've traded "every restart, however brief, pauses the whole group" for "a real crash takes a bit longer to notice" — worth it for typical rolling deploys, worse if your consumers fail hard and often.</p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A team adopts static group membership to avoid rebalances on routine pod restarts. What's the direct cost of that choice?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Static membership is about consumer identity across restarts, not about which rebalancing algorithm runs — it does not force eager rebalancing.">The consumer group is forced back onto eager rebalancing.</li>
+      <li data-option="b" data-explain="Right. Kafka now waits out a timeout window before treating a missing consumer as truly dead and reassigning its partitions — routine restarts skip that wait, but real failures take longer to recover from.">A genuinely crashed consumer's partitions take longer to reassign.</li>
+      <li data-option="c" data-explain="Static membership affects group-coordinator behavior on the consumer side — it has no effect on the topic's own replication factor.">The topic's replication factor must be lowered to compensate.</li>
+      <li data-option="d" data-explain="Static membership does not touch ordering guarantees — those remain scoped to the partition regardless of consumer identity handling.">Message ordering guarantees are dropped for that consumer group.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>5. Untraceable flows → correlation IDs, schema governance, and lag alerting</h2>
+
+  <p>Three concrete practices close most of the observability gap: (a) generate a correlation ID at the start of a business flow and thread it through every event and log line downstream, so a trace tool can reconstruct the whole path; (b) put a <a href="../reference/event-driven-architecture-cheatsheet.html#schema-registry">schema registry</a> in front of every topic, enforcing backward-compatible changes so producers and consumers can evolve without a coordinated deploy; (c) alert on <a href="../reference/event-driven-architecture-cheatsheet.html#consumer-lag">consumer lag</a> per consumer group, and route unprocessable messages to a dead-letter topic instead of blocking the partition behind them.</p>
+
+  <div class="callout">
+    <span class="callout-label">The trade</span>
+    <p>This is governance overhead, plainly: someone has to review schema changes, someone owns the tracing backend, someone triages the dead-letter topic. Skipping it doesn't remove the complexity of a many-service event flow — it just makes that complexity invisible until an incident forces you to reconstruct it by hand. You're trading upfront process cost for bounded incident cost.</p>
+  </div>
+
+  <h2>Deciding whether EDA is the right call</h2>
+
+  <p>Put together, the pattern across all five mitigations is the same: EDA trades upfront coordination cost (a shared transaction, a synchronous call, a single stack trace) for ongoing engineering discipline (idempotency, outboxes, careful keys, governance). That trade is worth making when:</p>
+
+  <ul>
+    <li>Multiple independent consumers genuinely need the same facts, now or in the future (LinkedIn's original problem)</li>
+    <li>Producers and consumers have different, independently-changing release cadences</li>
+    <li>Temporary inconsistency between services is tolerable for the business process involved</li>
+  </ul>
+
+  <p>And it's the wrong call when a process needs a strict, immediate, all-or-nothing guarantee — a single service with an ACID database transaction will always be simpler and more correct for that case than an event-driven one bolted on top with sagas and outboxes to fake atomicity back in.</p>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">A single service needs to debit one account and credit another in the same database, atomically, with no other service involved. What does this lesson's framework say?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Right. A single-service, single-database, all-or-nothing operation is exactly the case a local ACID transaction handles natively — introducing events and sagas here adds cost for a guarantee you already had for free.">A plain local database transaction is simpler and correct here.</li>
+      <li data-option="b" data-explain="Sagas exist to fake atomicity back in for multi-service flows — they add compensating-action complexity with no benefit when one database transaction already does the job.">A saga with a compensating action is the safer choice.</li>
+      <li data-option="c" data-explain="The transactional outbox pattern solves the dual-write problem for a service that also needs to publish an event — it is not a general substitute for a plain transaction with no event involved.">A transactional outbox is required to make this operation safe.</li>
+      <li data-option="d" data-explain="Kafka's guarantees only matter once events cross a partition boundary — a single local transaction is not a Kafka concern at all.">Kafka's partition-level ordering guarantee alone makes this safe by default.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Try applying this framework to a real system you work on or are designing — walk me through it, and I'll push back where I think the trade doesn't hold. That's the exercise that actually tests whether this stuck (a learning record gets written once you've done it, not just read this).
+  </div>
+
+  <p class="cite">Primary sources for this lesson: Chris Richardson, "Pattern: Saga" and "Pattern: Transactional outbox" (microservices.io); Confluent, "Kafka Rebalancing Explained" on cooperative rebalancing and static membership; Confluent Documentation, "Schema Evolution and Compatibility."</p>
+
+  <div class="lesson-nav">
+    <a href="./0003-weaknesses-and-failure-modes.html">← Back: Weaknesses</a>
+    <a href="../reference/event-driven-architecture-cheatsheet.html">Reference: Cheat Sheet →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

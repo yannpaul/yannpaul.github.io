@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 3 · Weaknesses and Failure Modes</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Event-Driven Architecture · Lesson 3 of 4</p>
+  <h1>The Shadow Side of Every Strength</h1>
+  <p class="subtitle">Each weakness here is the same design decision from Lesson 2, seen from the other side.</p>
+
+  <p class="lede">Decoupling, scale, and durability weren't free in Lesson 2 — they were traded for something. This lesson names exactly what.</p>
+
+  <h2>1. You traded ACID for eventual consistency</h2>
+
+  <p>In a request-driven system, one database transaction can update several related rows atomically. In an event-driven system spanning services, there is no such transaction — each service reacts to an event on its own schedule. The system is only <a href="../reference/event-driven-architecture-cheatsheet.html#eventual-consistency">eventually consistent</a>: correct once every consumer has caught up, with no promised bound on when "eventually" arrives.</p>
+
+  <p>Concretely: a payment service publishes "payment succeeded," but the order service hasn't consumed it yet. For some window of real time, the order genuinely looks unpaid to anyone who checks — and that window has no fixed ceiling.</p>
+
+  <h2>2. The dual-write problem</h2>
+
+  <p>A service usually needs to do two things when something happens: update its own database, <em>and</em> publish an event about it. Those are two separate operations against two separate systems — they are not atomic. If the database commit succeeds but the publish fails (network blip, broker unavailable), every downstream consumer never learns the change happened at all. Silent, hard-to-detect data drift is the result.</p>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">A service commits a database write, then the process crashes before it publishes the corresponding event. What's the direct consequence?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Kafka has no visibility into a service's local database at all — it cannot roll back a write it never saw.">Kafka rolls back the database write to stay consistent.</li>
+      <li data-option="b" data-explain="Kafka's replication protects data already inside Kafka — it cannot recover an event that was never published in the first place.">Kafka's replication reconstructs the missing event from broker logs.</li>
+      <li data-option="c" data-explain="A crash before publish is a hard failure of the publish step, not a delay — retrying alone does not happen automatically without new logic.">The event publishes automatically on the next database write.</li>
+      <li data-option="d" data-explain="Right. The database now reflects a change no downstream consumer will ever hear about — this is the dual-write problem, and it's the specific gap the outbox pattern in Lesson 4 closes.">Every downstream consumer silently never learns the change occurred.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>3. Ordering is per-partition, not per-topic</h2>
+
+  <p>Kafka guarantees order only within a single <a href="../reference/event-driven-architecture-cheatsheet.html#partition">partition</a>. Two events for the same entity (say, two updates to order 42) will be processed in order <em>only</em> if they're routed — by key — to the same partition. Get the partitioning key wrong, or need order across entities, and events can be processed out of sequence with no error raised anywhere. This is invisible until it causes a bug: "the shipment event was processed before the order-creation event" is a class of failure with no stack trace.</p>
+
+  <h2>4. Rebalancing pauses the thing it's protecting</h2>
+
+  <p>Lesson 2's resilience story — a crashed consumer gets its partitions picked up by others — runs on a mechanism called <a href="../reference/event-driven-architecture-cheatsheet.html#rebalance">rebalance</a>. But a rebalance briefly pauses consumption for the affected partitions while assignments are recalculated. In the older "eager" rebalancing strategy, that pause hits the <em>whole group</em>, not just the changed partitions — so a single flaky consumer restarting can spike <a href="../reference/event-driven-architecture-cheatsheet.html#consumer-lag">consumer lag</a> across an entire group, on every restart.</p>
+
+  <h2>5. Debugging a flow you can't see end-to-end</h2>
+
+  <p>In a request-driven call chain, a stack trace shows you the path. In an event-driven system, an event can trigger a consumer, which publishes another event, which triggers another consumer — a chain with no single process holding the whole picture. Without deliberate work (correlation IDs threaded through every event, distributed tracing, dead-letter monitoring), a production incident becomes "which of our 40 services touched this event, and in what order?" This effect compounds with scale — practitioners call the resulting sprawl of hard-to-track flows <a href="../reference/event-driven-architecture-cheatsheet.html#event-entropy">event entropy</a>.</p>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Order-creation and shipment events for the same order end up on different partitions and are processed out of order downstream. What does Kafka do about it?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Kafka's ordering guarantee is explicitly scoped to a single partition — it makes no promise across partitions of the same topic.">Kafka reorders them automatically to match creation time.</li>
+      <li data-option="b" data-explain="Kafka has no concept of cross-partition causal relationships between distinct events — nothing raises an alert here.">Kafka raises an ordering-violation alert for the consumer.</li>
+      <li data-option="c" data-explain="Right. Kafka's ordering guarantee only covers a single partition. Getting related events onto the same partition is the producer's job, via a consistent partition key.">Nothing: cross-partition order was never a guarantee here.</li>
+      <li data-option="d" data-explain="Consumer group rebalancing redistributes partition ownership among consumers — it has no role in event ordering across partitions.">The consumer group rejects the out-of-order shipment event.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="callout bad">
+    <span class="callout-label">The pattern across all five</span>
+    <p>None of these are bugs in Kafka. They're the honest cost of the design in Lesson 1: decoupled, asynchronous, partition-parallel systems give up the single-transaction, single-call-stack guarantees a monolith gets for free. Lesson 4 is about paying that cost deliberately instead of discovering it in production.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    If any of these feels abstract — especially the dual-write problem or partition ordering — ask for a walk-through with concrete service names before Lesson 4. The mitigations only make sense once the failure they're patching is vivid.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: Chris Richardson (microservices.io), "Pattern: Transactional outbox," on the dual-write problem; Confluent, "Kafka Rebalancing Explained," on rebalance pause behavior and eager vs. cooperative strategies.</p>
+
+  <div class="lesson-nav">
+    <a href="./0002-strengths-of-event-driven-architecture.html">← Back: Strengths</a>
+    <a href="./0004-mitigation-strategies.html">Next: Mitigations →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
