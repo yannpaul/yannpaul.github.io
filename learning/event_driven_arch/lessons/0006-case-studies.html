@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 6 · Case Studies</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Event-Driven Architecture · Lesson 6 of 6</p>
+  <h1>Case Studies: Successes and Failures</h1>
+  <p class="subtitle">Real systems, real postmortems — each tied back to a strength, weakness, or mitigation from Lessons 2–4.</p>
+
+  <p class="lede">Every claim in this workspace so far has pointed at a mechanism. This lesson points at outcomes: companies that made event-driven architecture work at real scale, and public failures that show exactly what happens when a Lesson 3 weakness goes unmitigated.</p>
+
+  <h2>Successes</h2>
+
+  <h3>Netflix Keystone — the backbone, not a side project</h3>
+  <p>Every interaction a Netflix member generates — plays, pauses, searches, row scrolls — flows through Keystone, Netflix's Kafka-and-Flink event pipeline, which grew from roughly 1 trillion events/day in 2017 to over 2 trillion today. Thousands of Kafka topics carry the traffic, all schema-registered, feeding over 20,000 Flink jobs. The detail worth noting for this workspace: Netflix later added a Streaming SQL layer on top so teams outside the data-infrastructure org could build their own pipelines — over 1,200 SQL processors were built by other teams in its first year. That's Lesson 2's "new consumers attach with no coordination" strength, realized at organizational scale: self-service, not a bottleneck through one platform team.</p>
+
+  <h3>Shopify — decoupled scaling as the actual point</h3>
+  <p>Shopify runs checkout, payments, and inventory through Kafka, peaking around 66 million messages/second, and handled roughly 967,000 requests/second with $4.6M in sales per minute during a recent Black Friday/Cyber Monday. The architectural payoff is exactly Lesson 2's "independent, parallel scaling": checkout traffic spiking 10x doesn't force inventory or notifications to scale in lockstep, because they're decoupled by the event backbone rather than wired together by synchronous calls.</p>
+
+  <h3>Uber Chaperone — paying the observability cost on purpose</h3>
+  <p>Uber didn't just adopt Kafka; they built and open-sourced <strong>Chaperone</strong>, an audit system that counts messages at every stage of the pipeline specifically to catch data loss, lag, and duplication automatically, across a multi-datacenter, high-volume Kafka deployment. This is Lesson 4's fifth mitigation — correlation IDs, lag alerting, dead-letter handling — made concrete: Uber treated "we can't see where an event got dropped" as a problem worth its own dedicated system, rather than discovering gaps during an incident.</p>
+
+  <h3>Segment/Twilio — designing for duplicates instead of fighting them</h3>
+  <p>Segment's engineering blog is unusually candid with numbers: roughly 0.6% of events arriving at their ingestion API in a four-week window were duplicates, caused by client-side retries. Rather than chase unreachable exactly-once delivery, they built explicit deduplication — tracking message IDs in a sliding window (guaranteed 24 hours, in practice around 170 days) and dropping anything already seen. This is Lesson 4's idempotent-consumer mitigation in production, with the actual measured duplicate rate that makes the mitigation worth its cost.</p>
+
+  <h2>Failures</h2>
+
+  <h3>Knight Capital, August 1, 2012 — dead code woken by a live event</h3>
+  <p>Not a Kafka system, but the canonical cautionary tale for reacting to events without knowing what code is actually listening. During a deployment, new order-routing logic was copied to 7 of 8 production servers; the 8th kept a dormant feature from 2003 called "Power Peg." A reused flag in the order-event format — meant to trigger the new logic — instead reactivated the old dead code path on that one server. Normal market events, flowing exactly as designed, drove that stale handler into placing millions of unintended trades: roughly $460 million lost in 45 minutes, no peer review or deployment checklist caught it beforehand. Map this directly to Lesson 3: an implicit, un-versioned event contract (what does this flag mean, and who's still listening for the old meaning?) is <a href="../reference/event-driven-architecture-cheatsheet.html#event-entropy">event entropy</a> with the stakes turned all the way up. Lesson 4's schema-registry-and-governance mitigation exists precisely to make "which consumers still expect the old shape" a checkable question, not a discovery made in production.</p>
+
+  <h3>PagerDuty — when the mitigation itself wasn't tested</h3>
+  <p>In a postmortem PagerDuty published on their own engineering blog, a Kafka/ksqlDB incident caused delayed notifications and duplicate webhook deliveries for customers. Their own account is specific about the root cause: runbooks for critical ksqlDB stream operations lacked clear verification and error-handling steps, and the backfill scripts needed to recover lost data hadn't been recently exercised — so recovery took longer than it should have, and a second incident recurred hours later. The lesson isn't "Kafka failed" — it's that a Lesson 4 mitigation (dead-letter/backfill tooling) only pays off if someone keeps it exercised. An untested runbook is not a mitigation; it's a belief about a mitigation.</p>
+
+  <h3>Trendyol Tech — the outbox pattern's own retry can duplicate</h3>
+  <p>A Trendyol engineering write-up documents a subtler failure: a network timeout made their service <em>believe</em> a publish to Kafka had failed, so it retried via the outbox relay — except the original publish had actually succeeded before the timeout was raised. Result: duplicate events downstream, from the very mechanism Lesson 4 recommends to fix the dual-write problem. This is worth sitting with: the transactional outbox solves atomicity between the database write and "an event will eventually be sent" — it does not, by itself, solve at-least-once delivery producing duplicates on the way out. You still need idempotent consumers downstream of an outbox, not instead of one.</p>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">The Trendyol case: the outbox pattern was correctly implemented, but duplicates still reached consumers. What does that show?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The write-up describes the outbox pattern working as designed for its actual job — atomicity between the database write and eventual publish, not delivery-count guarantees.">The transactional outbox pattern was implemented incorrectly there.</li>
+      <li data-option="b" data-explain="Kafka's own idempotent producer setting deduplicates retries from one producer session, but a fresh outbox-relay retry after a perceived failure is a new send, which that setting does not catch.">Kafka's idempotent producer setting was left turned off.</li>
+      <li data-option="c" data-explain="Right. The outbox pattern solves the dual-write problem, not at-least-once delivery — a retry after an ambiguous failure can still duplicate, so downstream idempotency is still required alongside it.">Outbox fixes dual writes, not delivery-count duplicates entirely.</li>
+      <li data-option="d" data-explain="Consumer-group rebalancing was not the trigger described — a network timeout on the producer side, not a partition reassignment, caused the retry.">A consumer-group rebalance mid-publish caused the duplicate send.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="callout">
+    <span class="callout-label">The pattern across every case here</span>
+    <p>The successes didn't avoid the Lesson 3 weaknesses — they paid the Lesson 4 mitigation costs deliberately and kept paying them (Uber's Chaperone, Segment's measured dedup window). The failures happened where a weakness went either unmitigated (Knight Capital's ungoverned event contract) or mitigated on paper but not in practice (PagerDuty's untested runbooks, an outbox with no downstream idempotency). Same lesson, said one more way: event-driven architecture doesn't remove the weaknesses from Lesson 3 — it just makes how seriously you treat Lesson 4 the actual variable that decides the outcome.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Want to go deeper on any one of these — read the actual postmortem, or work through how you'd have caught it with the mitigations from Lesson 4? Ask, and we can make that the next thing you dig into.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: Netflix Tech Blog, "Keystone Real-time Stream Processing Platform"; Shopify Engineering, "How we prepare Shopify for BFCM"; Uber Engineering Blog, "Introducing Chaperone: How Uber Engineering Audits Apache Kafka End-to-End"; Segment/Twilio, "Delivering billions of messages exactly once"; PRMIA, "The Knight Capital Algorithmic Trading Case Study"; PagerDuty Engineering Blog, Kafka outage postmortem; Trendyol Tech (Medium), "How We Solved Kafka Event Loss Problem."</p>
+
+  <div class="lesson-nav">
+    <a href="./0005-log-as-source-of-truth.html">← Back: Log as Source of Truth</a>
+    <a href="../reference/event-driven-architecture-cheatsheet.html">Reference: Cheat Sheet →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

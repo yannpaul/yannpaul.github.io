@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 5 · The Log as Source of Truth</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Event-Driven Architecture · Lesson 5 of 6</p>
+  <h1>Flipping the Outbox: When the Topic Is the Truth</h1>
+  <p class="subtitle">Yes, people build it this way — but the consistency is not the same, and here's precisely why.</p>
+
+  <p class="lede">In <a href="./0004-mitigation-strategies.html">Lesson 4</a>, the database was the source of truth and the outbox got events out of it reliably. This lesson answers a sharper question: what if you flip that — the topic is the source of truth, and a service's own database is just a materialized view it builds by consuming its own topic, exactly like every other consumer?</p>
+
+  <h2>Yes — this is a real, named pattern</h2>
+
+  <p>It's not exotic. It's the combination of <a href="../reference/event-driven-architecture-cheatsheet.html#event-sourcing">event sourcing</a> (an entity's true state is the sequence of events that happened to it, not a row that gets overwritten) with <a href="../reference/event-driven-architecture-cheatsheet.html#cqrs">CQRS</a> (the write path and the read path are different things, connected by the log). Kafka Streams formalizes it directly: a <code>KTable</code> is state built by folding a topic, and Kafka's own internal-data-management documentation is explicit about which side is authoritative — <em>"the changelog topic is the source of truth for the state ... RocksDB is used as a (non-fault-tolerant) cache."</em> The local database is the cache. The log is the record.</p>
+
+  <p>The clearest articulation of this as a general architecture — not just a Kafka Streams implementation detail — is Martin Kleppmann's "Turning the Database Inside Out," built around Apache Samza (LinkedIn's own stream processor, a sibling to Kafka). His framing: make changes in one place — the log — and treat every database, index, or cache as a <a href="../reference/event-driven-architecture-cheatsheet.html#materialized-view">materialized view</a> derived from it. There can be many such views (a key-value store, a search index, a graph index), and critically, a service consuming its own topic to build its local view is not a special case — it's just one more derived view, architecturally identical to any dependent's.</p>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">In the reversed pattern, what does a service's local database actually contain?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Right. The log is authoritative; the local database is a materialized view, rebuildable at any time by replaying the topic from the start.">A derived, rebuildable view folded from replaying its own topic.</li>
+      <li data-option="b" data-explain="That's the outbox model from Lesson 4, not this one — here the local database is not where the durable commit happens.">The authoritative record, with the topic as a side effect.</li>
+      <li data-option="c" data-explain="Two independent copies with no defined relationship is not what either pattern describes — one side is always derived from the other.">An independent copy, entirely unrelated to the topic's own state.</li>
+      <li data-option="d" data-explain="Consumer groups only cover topics with more than one partition needing distribution — a materialized view still gets built regardless of partition count.">Nothing at all, since single-partition topics need no local view.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>So is the consistency the same? No — and here's the specific reason</h2>
+
+  <p>Walk through what changes for the <em>writer itself</em>, since that's where the asymmetry lives:</p>
+
+  <p><strong>Outbox (Lesson 4):</strong> the service writes to its own database and inserts the outbox row in one local transaction. That database write is synchronous and immediate. The service — and anyone querying its database a moment later — sees the change instantly. Only <em>downstream</em> consumers wait on the relay, bounded by its lag.</p>
+
+  <p><strong>Log-as-truth (this lesson):</strong> there is no separate synchronous database write anymore. The only durable commit is the produce to the topic. The service's own local materialized view is populated by consuming that topic back — on the same consumer machinery, with the same lag characteristics, as every other consumer. The service has lost its special status. It is now just another eventually-consistent reader of its own write.</p>
+
+  <p>This is a known, named problem, not a hypothetical: practitioners call it the <a href="../reference/event-driven-architecture-cheatsheet.html#read-your-writes">read-your-writes problem</a> in Kafka-backed event-sourced systems. One well-documented critique of using Kafka this way puts the fix bluntly: <em>"make the producer a consumer of its own events and block until the event is committed and available"</em> — and notes that doing so "would have severe impact on performance." That's the trade laid bare: you can get read-your-writes back, but only by paying for it explicitly, per request.</p>
+
+  <div class="callout bad">
+    <span class="callout-label">The direct answer to your question</span>
+    <p>No, it would not be the same. Durability is arguably better in the reversed pattern — there's only one system of record, so the dual-write problem doesn't just get mitigated, it's structurally impossible (nothing to desynchronize from). But per-request consistency for the writer gets <em>worse</em>: the outbox pattern gives the writer free, instant read-your-own-writes; the reversed pattern demotes the writer to eventual consistency along with everyone else, unless you deliberately re-engineer that guarantee back in.</p>
+  </div>
+
+  <h2>Getting read-your-writes back, if you need it</h2>
+
+  <ul>
+    <li><strong>Block until caught up</strong> — after producing, wait until the local consumer's offset passes the produced offset before responding to the caller. Correct, but adds latency proportional to consumer lag, which is exactly the cost the quote above warns about.</li>
+    <li><strong>Optimistic local apply</strong> — update an in-memory or provisional view immediately on produce, before the log round-trip confirms it, and reconcile if the eventual replay disagrees. Fast, but now you're maintaining two notions of "current state" during the gap.</li>
+    <li><strong>Accept it in the UI</strong> — show the write as pending/processing rather than pretending it's instantly final. Cheapest to build, and honest about what actually happened, but it's a product decision as much as an engineering one.</li>
+  </ul>
+
+  <p>None of these are free. That's the same shape of trade-off as every mitigation in Lesson 4: you're not eliminating the cost, you're choosing which cost you pay.</p>
+
+  <h2>Why most CRUD services still don't do this</h2>
+
+  <p>Two costs keep the plain outbox pattern more common than log-as-truth for ordinary services: the read-your-writes cost above, and the loss of ad-hoc querying — a relational database answers a new filter or join today; a log-as-truth system needs a purpose-built materialized view (a new <code>KTable</code>, a new index) for each query shape you didn't already plan for. Log-as-truth earns its keep where the audit trail <em>is</em> the product (financial ledgers, event-sourced domain aggregates) or where a stream-processing platform (Kafka Streams, ksqlDB) is already doing the folding for you as infrastructure, not bespoke code per service.</p>
+
+  <div class="ask-your-teacher">
+    If you're weighing this for a specific service you're designing, tell me what it needs to query and how fresh a write needs to look to the person who just made it — that's usually enough to tell which side of this trade-off you're on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: Apache Kafka Wiki, "Kafka Streams Internal Data Management," on the changelog topic as source of truth; Martin Kleppmann, "Turning the Database Inside Out with Apache Samza" (Strange Loop 2014 / Confluent blog); DZone, "Apache Kafka Is Not for Event Sourcing," on the read-your-writes trade-off.</p>
+
+  <div class="lesson-nav">
+    <a href="./0004-mitigation-strategies.html">← Back: Mitigations</a>
+    <a href="./0006-case-studies.html">Next: Case Studies →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
