@@ -10,7 +10,7 @@
 <main>
   <p class="eyebrow">Event-Driven Architecture · Reference</p>
   <h1>EDA / Kafka Cheat Sheet</h1>
-  <p class="subtitle">Compressed from <a href="../lessons/0001-what-is-event-driven-architecture.html">Lessons 1–6</a>. Designed to print on one or two pages — this is what you come back to, not the lessons themselves.</p>
+  <p class="subtitle">Compressed from <a href="../lessons/0001-what-is-event-driven-architecture.html">Lessons 1–7</a>. Designed to print on one or two pages — this is what you come back to, not the lessons themselves.</p>
 
   <h2>Core mechanisms</h2>
   <table>
@@ -41,6 +41,8 @@
       <tr id="materialized-view"><td><strong>Materialized view</strong></td><td>A derived, rebuildable read model (a database table, an index, a Kafka Streams state store) folded from replaying a log. The log is authoritative; the view is a cache.</td></tr>
       <tr id="cqrs"><td><strong>CQRS</strong></td><td>Write path and read path are different things, connected by the log — writes append events, reads query a materialized view built from them.</td></tr>
       <tr id="read-your-writes"><td><strong>Read-your-writes problem</strong></td><td>When the writer's own local view is just another consumer of the log, it no longer sees its own write instantly — it waits on the same lag as everyone else.</td></tr>
+      <tr id="aggregate"><td><strong>Aggregate (entity)</strong></td><td>The largest unit that can be updated atomically — one service, one local transaction. Called an "entity" in Pat Helland's distributed-systems framing; never atomically updated across another aggregate.</td></tr>
+      <tr id="activity"><td><strong>Activity</strong></td><td>Coordination between separate aggregates/entities, necessarily via at-least-once messaging (retries, dedup, out-of-order arrival) since no transaction can span them.</td></tr>
     </tbody>
   </table>
 
@@ -94,7 +96,7 @@
   <p class="cite">See <a href="../RESOURCES.md">RESOURCES.md</a> for full source list. Primary references: kafka.apache.org/documentation, docs.confluent.io, microservices.io (Chris Richardson).</p>
 
   <div class="lesson-nav">
-    <a href="../lessons/0006-case-studies.html">← Back to Lesson 6</a>
+    <a href="../lessons/0007-where-the-line-actually-is.html">← Back to Lesson 7</a>
     <a href="../lessons/0001-what-is-event-driven-architecture.html">Start over: Lesson 1</a>
   </div>
 </main>

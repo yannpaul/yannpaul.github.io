@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 7 · Where the Line Actually Is</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Event-Driven Architecture · Lesson 7 of 7</p>
+  <h1>Where the Line Actually Is</h1>
+  <p class="subtitle">Your three instincts, named properly — and why none of them are wrong.</p>
+
+  <p class="lede">You raised three things at once: whether a transactional string of actions should ever be EDA, how load-bearing Flink and ksqlDB really are, and a "no free lunch" suspicion that every architecture just relocates the same irreducible work. They're the same insight, seen from three angles. This lesson names it.</p>
+
+  <h2>1. Your instinct about transactional chains is exactly right — here's the theory that says so</h2>
+
+  <p>You asked: if a string of actions must be processed transactionally, does EDA make sense? No — and there's a precise reason, not just a hunch. Pat Helland's classic paper, "Life Beyond Distributed Transactions: An Apostate's Opinion," gives the vocabulary: an <strong>entity</strong> is the largest unit that can be updated atomically — in practice, one aggregate, one service, one database transaction. Entities can never be atomically updated across each other. Coordination between entities happens through <a href="../reference/event-driven-architecture-cheatsheet.html#activity"><strong>activities</strong></a>, and activities are necessarily built on <em>at-least-once messaging</em> — retries, out-of-order arrival, deduplication — because nothing stronger is available once you've crossed the boundary.</p>
+
+  <p>That maps directly onto what you already sensed: "outside your core business responsibility, you want to enable growth in a decoupled way" is, in this vocabulary, <em>crossing an entity boundary into an activity</em>. Chris Richardson's microservices guidance says the same thing from the DDD side: each service transaction updates a single <a href="../reference/event-driven-architecture-cheatsheet.html#aggregate">aggregate</a>, and events exist specifically to maintain consistency <em>between</em> aggregates — because two-phase commit across services isn't viable at any real scale. So: reserving inventory and creating the order row, if they're the same aggregate in the same database, is a transaction — not an event. Notifying shipping, fraud detection, and analytics that the order happened is crossing into other entities entirely — that's where EDA belongs, and where <a href="./0004-mitigation-strategies.html">Lesson 4's saga</a> earns its keep: not as a stylistic choice, but because Helland's boundary makes real cross-entity atomicity structurally unavailable, whatever technology you reach for.</p>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A service must reserve inventory and create the order row together, all-or-nothing, in its own database. Per Helland's framing, what is this?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="An activity is specifically the cross-entity case, coordinated by at-least-once messaging — this operation never leaves one entity at all.">An activity — cross-service coordination via retried at-least-once event messaging.</li>
+      <li data-option="b" data-explain="Right. Both writes stay inside one atomically-updatable unit — Helland's entity, Richardson's aggregate — so a plain local transaction is the correct tool, no event required.">A single entity update — local transaction is correct here.</li>
+      <li data-option="c" data-explain="A saga exists precisely for when atomicity is unavailable across entities — but this operation hasn't left one entity, so there's no atomicity to fake back with compensation.">A saga, since compensating actions are always the safest default.</li>
+      <li data-option="d" data-explain="Nothing in this scenario involves two independent storage systems that could disagree — there's one entity and one transaction, not a dual write.">The dual-write problem, which requires an outbox to stay correct.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>2. How critical are Flink and ksqlDB, really? Less than the case studies suggest</h2>
+
+  <p>Not critical to EDA at all, structurally. Kafka alone — topics, producers, plain consumers — is a complete event-driven system; <a href="./0005-log-as-source-of-truth.html">Lesson 5</a>'s materialized-view pattern works with nothing but a consumer loop writing to a database. Flink, Kafka Streams, and ksqlDB are optional accelerators <em>for that same pattern</em> when the derived view gets complicated: windowed joins, multi-stream aggregation, continuous SQL. Kafka Streams is a library you embed in a JVM service you already own — no separate cluster. ksqlDB puts a SQL interface over Kafka Streams so a team without deep stream-processing expertise can express the same logic. Flink is a genuinely separate, heavier engine, and it earns that weight specifically when you're consuming from sources beyond Kafka, need state and scale past what partition-per-consumer parallelism gives you, or have a dedicated platform team to run it. None of the three are a prerequisite for "doing EDA" — they're what you reach for once the <em>read side</em> gets hard, not before.</p>
+
+  <p>Your second suspicion — that "we use Flink" hides an enormous amount of company-specific glue — is also correct, and it has a name: Oz Nova's essay "You Are Not Google" describes organizations copying "the visible artefacts of successful architectures... without replicating the organisational size, team structure, traffic scale, and operational maturity that made those choices rational in the first place." You've already seen the evidence for this in <a href="./0006-case-studies.html">Lesson 6</a> without me naming the pattern: Uber didn't just "use Kafka" — they built and open-sourced Chaperone, a dedicated audit system, because the plain technology didn't give them loss/duplication detection for free. Netflix didn't just "use Flink" — they built an entire internal Streaming SQL layer specifically so teams outside the data-infrastructure org could use it at all. The named technology in a blog post is the visible tip; the submerged mass is a platform team, years of internal tooling, and hard-won operational conventions that rarely make it into the post's title.</p>
+
+  <div class="callout">
+    <span class="callout-label">A heuristic for reading the next case study</span>
+    <p>Don't ask "what technology did they use." Ask "what team owns it, and what did they build beyond the technology's default behavior." If a case study can't answer that second question, it's a marketing artifact, not an architecture you can safely copy at your own scale.</p>
+  </div>
+
+  <h2>3. The "no free lunch" instinct — this is the actual law underneath everything in this workspace</h2>
+
+  <p>You're describing conservation of complexity, and Helland's boundary explains <em>why</em> it holds: once two things can fail independently, someone has to handle that gap, no matter which technology sits at the boundary. There is no version of "call the next service" that makes the gap disappear — only versions that move where the cost lands:</p>
+
+  <table>
+    <thead><tr><th>Where you pay it</th><th>Synchronous call across the boundary</th><th>Event across the boundary</th></tr></thead>
+    <tbody>
+      <tr><td>Failure handling</td><td>Retry/backoff logic, timeout tuning, circuit breaking, owned by the caller</td><td>Consumer-side idempotency, dead-letter handling, owned by the consumer</td></tr>
+      <tr><td>Availability coupling</td><td>Caller's own uptime is now bounded by the callee's</td><td>Producer stays up independent of any consumer's health</td></tr>
+      <tr><td>Consistency</td><td>Immediate, if the call succeeds — but "if" is now load-bearing</td><td>Eventual, within a window you must define and monitor</td></tr>
+      <tr><td>Duplicate/out-of-order risk</td><td>Usually low, but retried calls can still double-fire non-idempotent endpoints</td><td>Expected by default — dedup and partition keys are not optional</td></tr>
+    </tbody>
+  </table>
+
+  <p>This is exactly <a href="./0004-mitigation-strategies.html">Lesson 4</a>'s "trade, not elimination" argument, generalized past individual mitigations to the whole architecture decision: EDA doesn't remove the cost of crossing an entity boundary, and neither does a direct call. Each just names a different specific cost and hands it to a different owner. The engineering judgment isn't "which approach is simpler" — across a real entity boundary, neither is — it's "which specific list of costs do I want on my team's plate, and which am I comfortable handing to whoever consumes what I publish."</p>
+
+  <div class="callout good">
+    <span class="callout-label">The three-question version, for next time you're deciding</span>
+    <p><strong>1.</strong> Does this need to be atomic with what I just did? If yes: same aggregate, one transaction, no event required for the atomicity itself. <strong>2.</strong> If not — am I leaving my own entity? If yes: you've already lost atomicity, regardless of mechanism; the only choice left is which non-atomic coordination cost (a synchronous call's coupling, or an event's eventual-consistency/dedup burden) you'd rather own. <strong>3.</strong> Is what's on the other side of that boundary complex enough — multiple steps needing compensation, or a derived view needing real aggregation — to justify a saga or a stream-processing layer? If it's a single fact one other team needs to know, a plain event is enough; don't reach for Flink to replace a consumer loop.</p>
+  </div>
+
+  <h2>A closing note: it's not just Kafka</h2>
+
+  <p>Everything in this workspace has used Kafka as its worked example, per the mission's own constraint — but Kafka is one implementation of the durable-log primitive from <a href="./0001-what-is-event-driven-architecture.html">Lesson 1</a>, not a synonym for it. <strong>Apache Pulsar</strong>, built at Yahoo in 2013 and donated to the Apache Software Foundation in 2016, is a structurally different implementation of the same core idea, and it's worth knowing precisely how it differs — not just that it exists.</p>
+
+  <p>Kafka binds a partition to a specific broker: that broker holds the data, and losing it (or rebalancing away from it) means physically moving data between brokers. Pulsar disaggregates storage from serving: brokers are stateless, and the durable data lives in segmented ledgers on a separate layer, Apache BookKeeper. A topic's segments spread across BookKeeper nodes independently of which broker is currently serving it. The practical effect: scaling storage in Pulsar means adding BookKeeper nodes, not reassigning partitions across brokers — a different answer to the exact rebalancing cost discussed in <a href="./0003-weaknesses-and-failure-modes.html">Lesson 3</a>, not an elimination of it. That disaggregation is also what lets Pulsar offer, built in, several things Kafka needs separate tooling for: native multi-tenancy (isolated namespaces per team, out of the box), geo-replication configured at the namespace level rather than run via an external tool, tiered storage that ages segments off to S3/GCS automatically, and Pulsar Functions — a lightweight processing layer playing a role similar to Kafka Streams, built into the platform rather than bolted on.</p>
+
+  <p>This isn't hypothetical elsewhere: Splunk ran Kafka in production for years and moved their new data processor to Pulsar, citing lower cost and better latency from the layered architecture; Tencent rebuilt its billing platform on Pulsar specifically for near-zero data loss processing over 10 billion transactions a day. Real, load-bearing, public decisions — not a toy comparison.</p>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">A Pulsar topic's partition needs to move to relieve a hot broker. What has to happen to the durable message data itself?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That's Kafka's model — a partition's log lives on the broker that owns it, so moving it means copying broker-resident data.">It must be copied from the old broker to the new one.</li>
+      <li data-option="b" data-explain="Pulsar has no per-partition replica set pinned to specific brokers the way Kafka's ISR model does — the broker layer is stateless by design.">A new in-sync replica set must first be elected on different brokers.</li>
+      <li data-option="c" data-explain="Segments already live on BookKeeper independent of any one broker — there is no dormant copy sitting on the old broker waiting to sync.">It stays on the old broker until a background sync catches up.</li>
+      <li data-option="d" data-explain="Right. The data already lives in BookKeeper, independent of any broker — reassigning the partition to a different broker is a serving-layer change, not a data-movement one.">Nothing — the data already lives on BookKeeper, independent of any broker.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <p>None of this makes Pulsar strictly "better" — it's a different set of trades, and this workspace hasn't taught its specifics the way it has Kafka's. But it does matter for everything else you've learned here: the <em>architectural</em> lessons — decoupling, the dual-write problem, sagas, the entity/activity boundary, the "no free lunch" table above — are broker-agnostic. What's Kafka-specific is the exact vocabulary and mechanics (ISR, <code>min.insync.replicas</code>, partition-to-broker binding). If you ever evaluate Pulsar seriously, the transferable skill from this workspace is knowing which of your conclusions were about event-driven architecture in general, and which were really about Kafka's particular implementation of it.</p>
+
+  <div class="ask-your-teacher">
+    Bring a real boundary from something you're designing — I'll help you run it through these three questions and see where it actually lands, rather than staying abstract.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: Pat Helland, "Life Beyond Distributed Transactions: An Apostate's Opinion" (CIDR 2007 / ACM), on entities and activities; Chris Richardson, "Developing Transactional Microservices Using Aggregates, Event Sourcing and CQRS" (InfoQ); Oz Nova, "You Are Not Google" (Bradfield); Confluent-affiliated comparisons of Kafka Streams, ksqlDB, and Apache Flink on when each is actually warranted.</p>
+
+  <div class="lesson-nav">
+    <a href="./0006-case-studies.html">← Back: Case Studies</a>
+    <a href="../reference/event-driven-architecture-cheatsheet.html">Reference: Cheat Sheet →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
