@@ -238,6 +238,33 @@ th {
 
 .quiz-feedback.visible { display: block; }
 
+/* --- Think-first reveal (open-ended application questions) --- */
+details.reveal {
+  background: var(--paper-raised);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 1rem 1.2rem;
+  margin: 1.4rem 0;
+}
+
+details.reveal summary {
+  cursor: pointer;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--accent);
+  list-style: revert;
+}
+
+details.reveal[open] summary {
+  margin-bottom: 0.8rem;
+  padding-bottom: 0.8rem;
+  border-bottom: 1px dashed var(--rule);
+}
+
+details.reveal .reveal-body > :first-child { margin-top: 0; }
+details.reveal .reveal-body > :last-child { margin-bottom: 0; }
+
 .lesson-nav {
   margin-top: 3.5rem;
   padding-top: 1.4rem;

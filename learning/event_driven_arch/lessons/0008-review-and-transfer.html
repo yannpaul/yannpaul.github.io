@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 8 · Review and Transfer</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Event-Driven Architecture · Lesson 8 of 8</p>
+  <h1>Review and Transfer</h1>
+  <p class="subtitle">Two different tests, on purpose: recall across all seven lessons, then applying it somewhere new.</p>
+
+  <p class="lede">This lesson has two parts, and they test different things. Part 1 is quick, interleaved recall across every lesson — a fluency check. Part 2 is one new scenario, in a domain this workspace never touched, with no multiple choice — think through each question yourself before revealing how it maps to what you've learned. Fluency without transfer is an illusion of mastery; this lesson is designed so you can tell the difference.</p>
+
+  <h2>Part 1: Quick Recall</h2>
+  <p>Seven questions, one per lesson, deliberately out of lesson order.</p>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">A topic has 6 partitions and a consumer group has 3 members. One member crashes. What happens to its 2 partitions?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Kafka doesn't delete a partition's data to keep a group balanced — durability doesn't depend on how many consumers are alive.">Kafka permanently deletes those two partitions' stored topic data instead.</li>
+      <li data-option="b" data-explain="A crashed member's partitions don't wait for its own restart — the group rebalances to the members still alive.">They stay unread until the crashed member restarts itself again.</li>
+      <li data-option="c" data-explain="Right. A rebalance reassigns the crashed member's partitions to the two survivors, who each end up with 3 of the 6.">They're promptly reassigned to the two remaining members via rebalance.</li>
+      <li data-option="d" data-explain="Kafka doesn't halt an entire group over one crashed member — rebalancing exists precisely so the rest keep going.">The whole consumer group stops consuming until someone intervenes manually.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">A service updates its own database, then crashes before publishing the corresponding event. What's the resulting risk, by name?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Right. The database changed but no downstream consumer will ever hear about it — the exact gap the outbox pattern closes.">The dual-write problem — consumers silently never learn the change.</li>
+      <li data-option="b" data-explain="Nothing in this scenario reassigns partitions between consumers — a crash in a producing service isn't a consumer-group event.">A rebalance pause, triggered by the crash's partition reassignment process.</li>
+      <li data-option="c" data-explain="One extra consumer isn't what's being described — the problem here is a missing publish, not too many readers.">Event entropy, since far too many services read this topic.</li>
+      <li data-option="d" data-explain="Read-your-writes is about the writer's own visibility into an already-published event — this failure happened before anything was even published.">The read-your-writes problem, since that local write never fully committed.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Why does a transactional outbox add a small publish delay compared to an unsafe, direct publish?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Kafka has no such fixed cooldown between acknowledgments — throughput is governed by replication settings, not a mandatory pause.">Kafka enforces a mandatory cooldown between every broker's acknowledgment step.</li>
+      <li data-option="b" data-explain="The outbox row is written in the same local transaction as the business update — that transaction isn't meaningfully slower.">The local database transaction itself now commits noticeably more slowly.</li>
+      <li data-option="c" data-explain="Rebalancing is triggered by consumer-group membership changes, not by writes to an unrelated outbox table.">Consumer-group rebalancing runs automatically after every single outbox table write.</li>
+      <li data-option="d" data-explain="Right. The write is instant; it's the separate relay process, reading the outbox and sending to Kafka, that adds the small lag.">A separate relay must read and send that outbox row.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">In the log-as-source-of-truth pattern, why does the writer lose instant read-your-own-writes?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Kafka doesn't block reads pending full replication — acks=all governs when a write is durable, not when it's readable elsewhere.">Kafka blocks every read until all replicas fully acknowledge writes.</li>
+      <li data-option="b" data-explain="Right. There's no separate synchronous database write anymore — the writer's local view is populated by consuming its own topic, with the same lag as any other consumer.">Its local view is just another consumer, with equal lag.</li>
+      <li data-option="c" data-explain="Nothing about this pattern rolls back the write itself — the event is durably committed the moment it's produced.">The writer's own transaction gets rolled back after each publish.</li>
+      <li data-option="d" data-explain="Schema registry checks compatibility at publish time, not by delaying delivery pending human review of every write.">Schema registry validation delays writes until a human approves them.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">What did Uber build specifically to make their Kafka pipeline trustworthy at scale?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Right. Chaperone counts messages at every stage of the pipeline specifically to catch loss, lag, and duplication automatically.">Chaperone — an audit system counting messages at each stage.</li>
+      <li data-option="b" data-explain="Uber's account describes an audit layer on top of their existing Kafka deployment, not a parallel redundant cluster.">A second, fully redundant Kafka cluster running in shadow mode.</li>
+      <li data-option="c" data-explain="Chaperone is a separate auditing system, not a modification to Kafka's own replication internals.">A custom fork of Kafka replacing its default replication protocol.</li>
+      <li data-option="d" data-explain="Nothing about Chaperone restricts how many topics a service may publish — it observes existing traffic, it doesn't limit it.">An internal ban on services publishing more than one topic.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Two services need their writes to succeed or fail together, atomically, right now. Per Helland's framing, what should this be?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="An activity is the cross-entity case, coordinated by retried messaging — but atomic-right-now is exactly what an activity can't give you.">An activity, coordinated across two services via retried at-least-once messages.</li>
+      <li data-option="b" data-explain="A saga fakes atomicity back in with compensation precisely because real atomicity isn't available — it's the tool for when you've already left one entity.">A saga, with a compensating action ready for each step.</li>
+      <li data-option="c" data-explain="Two independent entities kept in sync by a topic are still eventually consistent, not atomic — a topic doesn't grant cross-entity atomicity.">Two entities, kept in sync by a shared Kafka topic.</li>
+      <li data-option="d" data-explain="Right. Atomic, right now, across both writes means they belong in one entity — one local database transaction, not a cross-service coordination pattern at all.">One entity — handled entirely inside a single local transaction.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Why couldn't LinkedIn's original queueing systems serve as a backbone for many independent, potentially-future consumers?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Ordering wasn't the stated complaint in Kafka's original motivation — retention of already-delivered messages was the actual gap.">Queues delivered every message to consumers in the wrong order.</li>
+      <li data-option="b" data-explain="Kafka's founding motivation was about retention and replay, not raw throughput — plain queues weren't described as too slow to keep up.">Queues simply couldn't handle the sheer growing message volume involved.</li>
+      <li data-option="c" data-explain="Right. Once a queue delivered a message it was gone, so a consumer added later — or one that crashed and restarted — had no durable record to catch up from.">Queues discarded each message right after delivery, leaving nothing behind.</li>
+      <li data-option="d" data-explain="Batch systems were the other tool available at the time — the queues themselves weren't described as the slow option.">Queues processed each message far too slowly for real use.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Part 2: Apply It — A New Scenario</h2>
+
+  <p>A hospital is building a bedside vitals-monitoring platform. Each bed's monitor emits a vitals event (heart rate, SpO2, blood pressure) roughly once a second. Three things need to happen: <strong>(1)</strong> a nurse-facing dashboard must raise an alert within seconds if a vital crosses a dangerous threshold; <strong>(2)</strong> a research database and a separate ML team both want to consume the same vitals stream independently, without coordinating with the platform team first; <strong>(3)</strong> a billing service must produce an accurate, auditable record of which monitoring services were rendered per patient stay, reconciled against the hospital's financial system, with zero tolerance for silently missing an event.</p>
+
+  <p>Nothing here is Kafka, LinkedIn, or e-commerce — that's deliberate. Think through each question before opening it. Write down an actual answer, even a rough one; comparing a real attempt against the reveal is what makes this exercise worth doing.</p>
+
+  <details class="reveal">
+    <summary>1. Which piece of this system is a transactional aggregate, and which pieces are Helland-style activities? Sketch the boundary first.</summary>
+    <div class="reveal-body">
+      <p>The billing ledger for one patient stay is the aggregate: charge line items should be created and reconciled atomically against that stay's account, in a local transaction — not an event, because "this charge is now billed" needs to be atomic with nothing else. Everything downstream of the bedside monitor is an activity: the alert dashboard, the research database, the ML pipeline, and even billing's own <em>ingestion</em> of vitals events, because none of them can be atomic with the monitor's act of measuring a vital sign — monitor, dashboard, and billing are all independently-failable systems. The boundary isn't "billing vs. everything else"; it's "inside one stay's ledger" versus "everyone reacting to a fact that already happened."</p>
+    </div>
+  </details>
+
+  <details class="reveal">
+    <summary>2. The alert must not silently miss a critical threshold breach. Which specific mechanisms from Lessons 2–4 would you reach for, and why?</summary>
+    <div class="reveal-body">
+      <p>Durability first: replication factor and <code>min.insync.replicas</code>/<code>acks=all</code> (Lesson 2), so a broker failure can't lose the event before anyone reads it. Then delivery: Kafka is at-least-once by default, so the alerting consumer needs to be idempotent (Lesson 4) — a duplicated read shouldn't double-fire an alarm, since a barrage of duplicate alerts trains nurses to ignore them, which is its own failure mode. Finally, observability (Lesson 4's fifth mitigation): alert on consumer lag for the alerting service specifically, because a silently lagging alert consumer is functionally identical to a missed alert — publishing the event guarantees nothing about whether anyone saw it in time.</p>
+    </div>
+  </details>
+
+  <details class="reveal">
+    <summary>3. Billing needs to reconcile "service rendered" against actual vitals events weeks later, with zero silent loss. Outbox (Lesson 4) or log-as-truth (Lesson 5) for billing's ledger? Does read-your-writes matter here?</summary>
+    <div class="reveal-body">
+      <p>Outbox, not log-as-truth, for the ledger itself. Billing's charge-creation is the transactional core from Question 1 — it needs an immediate, synchronous local write it can act on right away, which is exactly what outbox preserves (the database write stays synchronous; only the publish is relayed asynchronously). Log-as-truth would hand billing the read-your-writes problem for no benefit — billing doesn't need to be "just another consumer" of the charges it just created. Where log-as-truth does fit: the reconciliation job itself, replaying the vitals topic from any point to independently rebuild "what actually happened" and check it against billing's ledger — that's Lesson 2's replay strength, and read-your-writes doesn't apply because a reconciliation job isn't the writer, it's an auditor.</p>
+    </div>
+  </details>
+
+  <details class="reveal">
+    <summary>4. The ML team starts consuming the vitals topic without telling the platform team. What strength made that possible, and what should the platform team now worry about?</summary>
+    <div class="reveal-body">
+      <p>The strength is Lesson 2's fourth one, directly: producers don't know who's listening, so a new consumer attaches with zero coordination or redeploy. The worry is Lesson 3's event-entropy and schema-evolution risk: the vitals event's shape is now an implicit contract with a team the platform group doesn't know exists. If a field's meaning changes later — say SpO2 moves from a percentage to a fraction — nothing breaks loudly; the ML model just silently degrades on bad input. This is exactly why Lesson 4's schema-registry mitigation matters most precisely where it's least visible: the unplanned consumer you don't know about is the one a breaking change hurts first.</p>
+    </div>
+  </details>
+
+  <div class="ask-your-teacher">
+    Pick whichever of these four you answered least confidently and tell me your actual reasoning, not just whether you got it "right" — that's the conversation worth having, and it's exactly the kind of moment a learning record gets written from.
+  </div>
+
+  <div class="lesson-nav">
+    <a href="./0007-where-the-line-actually-is.html">← Back: Where the Line Actually Is</a>
+    <a href="../reference/event-driven-architecture-cheatsheet.html">Reference: Cheat Sheet →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
