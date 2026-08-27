@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 3 · CIDR, Route Tables, and Traffic Direction</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Internet Networking Stack · Lesson 3 of 11</p>
+  <h1>CIDR, Route Tables, and Traffic Direction</h1>
+  <p class="subtitle">Lesson 2 used <code>10.0.0.0/16</code> and route tables without fully unpacking them. Here's the mechanism.</p>
+
+  <p class="lede">Lesson 2 drew a VPC as public and private subnets and said a subnet is public "if its route table sends internet-bound traffic to an internet gateway." This lesson makes that precise: what the <code>/16</code> in an address actually means, exactly how a route table picks a target when more than one route could match, and why a single request can be allowed one way but silently dropped on the way back if you get its <em>direction</em> wrong.</p>
+
+  <h2>CIDR notation: reading an address block</h2>
+
+  <p>Every address range you've seen so far — <code>10.0.0.0/16</code>, <code>0.0.0.0/0</code>, <code>192.168.1.0/24</code> — is <strong>CIDR notation</strong> (Classless Inter-Domain Routing): an IP address, a slash, and a number. That number is the <strong>prefix length</strong>: how many of the address's 32 bits are fixed as the "network" part. Whatever bits are left over can vary, and every value they can take is one address inside the block.</p>
+
+  <div class="callout">
+    <span class="callout-label">The rule that matters</span>
+    <p>Fewer bits fixed (a <em>smaller</em> number after the slash) means <em>more</em> bits free to vary, which means a <em>bigger</em> block. <code>/16</code> is a bigger network than <code>/24</code>, which is bigger than <code>/32</code> (one single address, no bits free at all).</p>
+  </div>
+
+  <table>
+    <thead><tr><th>CIDR block</th><th>Free bits</th><th>Addresses it covers</th><th>Typical use</th></tr></thead>
+    <tbody>
+      <tr><td><code>10.0.0.0/16</code></td><td>16</td><td>65,536</td><td>A whole VPC</td></tr>
+      <tr><td><code>10.0.2.0/24</code></td><td>8</td><td>256</td><td>One subnet inside that VPC</td></tr>
+      <tr><td><code>203.0.113.10/32</code></td><td>0</td><td>1</td><td>One specific host</td></tr>
+      <tr><td><code>0.0.0.0/0</code></td><td>32</td><td>every address that exists</td><td>"Anywhere on the internet" — the default route</td></tr>
+    </tbody>
+  </table>
+
+  <p>Working out a block's actual range: <code>10.0.2.0/24</code> fixes the first 24 bits (<code>10.0.2</code>) and leaves the last 8 free, so it spans every address from <code>10.0.2.0</code> to <code>10.0.2.255</code> — 256 addresses, matching Lesson 2's Kubernetes-node example exactly.</p>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Which covers more addresses: <code>10.0.0.0/16</code> or <code>10.0.2.0/24</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A /24 has fewer free bits (8) than a /16 (16 free bits) — it's the smaller block, not the bigger one.">10.0.2.0/24 — the higher number after the slash means more addresses.</li>
+      <li data-option="b" data-explain="Right. /16 leaves 16 bits free (65,536 addresses); /24 leaves only 8 free (256 addresses). Smaller number after the slash, bigger block — this is the single fact CIDR arithmetic reduces to.">10.0.0.0/16 — fewer fixed bits means more addresses can vary.</li>
+      <li data-option="c" data-explain="They're not equal — a /16 and a /24 differ by 8 bits, which is a factor of 256 in size, not a coincidence of notation.">They're the same size — the /16 vs /24 is just a labeling convention.</li>
+      <li data-option="d" data-explain="Reachability isn't determined by block size — a /24 private range is exactly as unreachable from the internet as a /16 one; see Lesson 2's route-table rule.">Neither — reachability depends on public vs. private, not the slash number.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Route tables: where "public vs. private" actually gets decided</h2>
+
+  <p>A <strong>route table</strong> is a list of rules, each one a <code>(destination CIDR block → target)</code> pair. Every subnet is associated with exactly one route table — its own, or the VPC's default one if it wasn't given a specific one. When something in that subnet sends a packet, the VPC's router checks the packet's destination address against every row in the table and picks a target.</p>
+
+  <p>Here's what a public subnet's route table and a private subnet's route table typically look like, side by side — same VPC, same first row, one crucial difference in the second:</p>
+
+  <table>
+    <thead><tr><th>Subnet</th><th>Destination</th><th>Target</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="2">Public</td><td><code>10.0.0.0/16</code></td><td><code>local</code> (stay inside the VPC)</td></tr>
+      <tr><td><code>0.0.0.0/0</code></td><td>Internet gateway</td></tr>
+      <tr><td rowspan="2">Private</td><td><code>10.0.0.0/16</code></td><td><code>local</code> (stay inside the VPC)</td></tr>
+      <tr><td><code>0.0.0.0/0</code></td><td>NAT gateway</td></tr>
+    </tbody>
+  </table>
+
+  <p>Both tables have a row for "anywhere" (<code>0.0.0.0/0</code>) — that's the fallback for any address that isn't inside the VPC's own range. Whether that fallback points at an internet gateway or a NAT gateway is the single fact Lesson 2 was describing as "public vs. private."</p>
+
+  <h3>Longest prefix match: what happens when two rows could both apply</h3>
+
+  <p>A packet headed to <code>10.0.5.100</code> technically matches <em>both</em> rows in the private table above — it's inside <code>10.0.0.0/16</code>, and it's also inside <code>0.0.0.0/0</code> (everything is). The router doesn't pick arbitrarily: it always takes the <strong>most specific</strong> matching route — the one with the longest prefix, i.e. the largest number after the slash. <code>/16</code> beats <code>/0</code>, so VPC-internal traffic goes <code>local</code>, and only traffic that <em>doesn't</em> match the more specific row falls through to the <code>0.0.0.0/0</code> catch-all. This is also why you can add a narrow, specific route (say, a <code>/24</code> to a VPC peering connection) that overrides the broader default without editing the default row at all — the more specific route simply wins for the addresses it covers.</p>
+
+  <details class="reveal">
+    <summary>Think first: a route table gets a new row, <code>10.0.5.0/24 → peering connection</code>, added to the private subnet's table above. Does this change where traffic to <code>10.0.5.100</code> goes? What about traffic to <code>10.0.9.50</code>?</summary>
+    <div class="reveal-body">
+      <p><code>10.0.5.100</code> now matches three rows: <code>/16</code> (local), <code>/24</code> (peering), and <code>/0</code> (NAT gateway). Longest prefix match picks the <code>/24</code> — the most specific — so this traffic now goes over the peering connection instead of staying local. <code>10.0.9.50</code> isn't inside <code>10.0.5.0/24</code> at all, so it still only matches the <code>/16</code> local route: unaffected.</p>
+    </div>
+  </details>
+
+  <h2>Ingress vs. egress: direction is relative to the thing you're describing</h2>
+
+  <p><strong>Ingress</strong> means traffic coming <em>into</em> something; <strong>egress</strong> means traffic going <em>out of</em> it. That's the whole definition — but it only means something once you say what the "it" is. A response leaving your Pod is egress from the Pod's point of view and, a moment later, ingress to whatever's receiving it. Every rule you'll meet that mentions ingress or egress is scoped to one specific thing: an instance, a subnet, a Pod.</p>
+
+  <p>The reason this needs its own lesson, rather than being a one-line aside, is that <strong>not every layer treats a request and its response as linked</strong> — and that distinction has broken more than one person's first deployment.</p>
+
+  <h3>Stateful vs. stateless: why ingress allowed doesn't always mean egress allowed</h3>
+
+  <table>
+    <thead><tr><th></th><th>Security group (instance-level)</th><th>Network ACL (subnet-level)</th></tr></thead>
+    <tbody>
+      <tr><td>Tracks connection state?</td><td><strong>Stateful</strong></td><td><strong>Stateless</strong></td></tr>
+      <tr><td>Allow inbound on port 443</td><td>Return traffic is automatically allowed — no separate outbound rule needed</td><td>Return traffic is <em>not</em> automatic — needs its own explicit outbound rule</td></tr>
+      <tr><td>Rules can</td><td>Only allow (no explicit deny)</td><td>Allow <em>and</em> explicitly deny, evaluated in rule-number order</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout warn">
+    <span class="callout-label">The gotcha this explains</span>
+    <p>A stateless NACL requires an <strong>ingress</strong> rule allowing the inbound request <em>and a separate egress rule</em> allowing the reply back out — typically on the high, unpredictable "ephemeral" ports operating systems use for return traffic, not the port the request came in on. Miss the egress rule, and the request arrives at your server just fine (ingress was allowed), the server sends a perfectly good response — and it never leaves the subnet. No error, no log on your server; from the client's side it just looks like a timeout. A security group never has this failure mode, because it's stateful: allowing the inbound request is enough, and the matching reply is let out automatically without needing a rule of its own.</p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">A client's HTTPS request reaches your server — the TCP handshake completes and your app logs the request. But the client never receives a response, with no error on either side. The subnet's NACL allows inbound (ingress) on port 443 but has no matching outbound (egress) rule for the ephemeral return port. What's happening?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A stateful security group wouldn't cause this — it lets matching replies out automatically. This symptom specifically points at a stateless layer with a one-sided rule set.">The security group is blocking the request before it reaches the server, so the app should never have logged it.</li>
+      <li data-option="b" data-explain="If DNS failed, the client's browser wouldn't reach the server at all — there'd be no TCP handshake and no server-side log entry, both of which happened here.">DNS resolved to the wrong IP address, so the request silently went to a different server.</li>
+      <li data-option="c" data-explain="The scenario says the app did log the request — the server received it and presumably tried to answer. The failure is on the way back out, not on arrival.">The application crashed while handling the request, before it could send any response.</li>
+      <li data-option="d" data-explain="Right. This is the stateless-NACL trap exactly: ingress was allowed so the request arrived and got logged, but with no matching egress rule for the response's return port, the reply is silently dropped on the way out. Nothing on the server side ever sees an error — it sent the response and moved on.">The NACL let the request in but has no egress rule allowing the response back out, so the reply is silently dropped at the subnet boundary.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h3>The same direction split, one layer up</h3>
+
+  <p>Once a request is inside your Kubernetes cluster, the identical ingress/egress split reappears at the Pod level via a <strong>NetworkPolicy</strong>: an <code>ingress</code> section lists what's allowed to send <em>to</em> a Pod, an <code>egress</code> section lists what that Pod is allowed to send <em>to</em>. With no NetworkPolicy at all, a Pod allows all traffic both ways by default — the restrictive behavior only turns on once at least one policy selects that Pod. And Pod-to-Pod traffic needs both sides to agree: A can only reach B if A's egress rules allow sending to B <em>and</em> B's ingress rules allow receiving from A — this comes back in Lesson 6, once Services and Pods have been covered properly.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — longest prefix match, the stateful/stateless split, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: AWS VPC documentation, <a href="https://docs.aws.amazon.com/vpc/latest/userguide/route-tables-priority.html">"How route priority works"</a> (longest prefix match) and its network-security docs distinguishing stateful security groups from stateless network ACLs — read these for the routing-priority and rule-evaluation details this lesson compresses. Kubernetes' own <a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/">NetworkPolicy documentation</a> covers the Pod-level ingress/egress model in full once you're ready to go deeper than this lesson's preview.</p>
+
+  <div class="lesson-nav">
+    <a href="./0002-ip-addresses-and-the-vpc.html">← Lesson 2: IP Addresses and the VPC</a>
+    <a href="../index.html">Course overview — Lessons 4+ coming next →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
