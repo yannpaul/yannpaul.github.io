@@ -1,0 +1,43 @@
+<!-- Mirrored to yannpaul.github.io/learning/internet_networking_stack/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Internet Networking Stack</title>
+<link rel="stylesheet" href="./assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Learning · The Internet Networking Stack</p>
+  <h1>The Internet Networking Stack</h1>
+  <p class="subtitle">How a request actually gets from a browser to your code and back — Cloudflare, Kong, Kubernetes, and service-mesh auth — from the operator's side of a SaaS company.</p>
+
+  <p class="lede">Ten short lessons, each a self-contained page with a quick retrieval-practice check. Start at Lesson 1 and work through in order — each one zooms into one hop of the map the first lesson draws, or one concern (auth, error codes, caching) that cuts across all of them.</p>
+
+  <h2>Lessons</h2>
+  <ol>
+    <li><a href="./lessons/0001-the-map-one-request-six-hops.html">The Map: One Request, Six Hops</a> — the whole path at a glance: DNS → Cloudflare edge → origin load balancer → Kong → Kubernetes Service → Pod, and why it's split into pieces at all</li>
+    <li><a href="./lessons/0002-ip-addresses-and-the-vpc.html">IP Addresses and the VPC</a> — public vs. private address space, what a VPC and its subnets are, and why only the load balancer (not Kong, not your Pods) has an internet-reachable address</li>
+  </ol>
+
+  <h2>Coming up</h2>
+  <p class="subtitle">Planned, not yet written — each will zoom into one hop from Lesson 1 or one concern that cuts across the whole stack.</p>
+  <ol start="3">
+    <li><strong>Cloudflare at the Edge</strong> — anycast routing to the nearest point of presence, DDoS mitigation, the WAF, TLS termination, and what gets cached at the edge vs. forwarded on</li>
+    <li><strong>TLS and Certificates</strong> — the handshake, why it matters exactly where it terminates, and the certificate-chain vocabulary Lesson 7's mTLS will reuse</li>
+    <li><strong>API Gateways and Kong</strong> — what an API gateway is for that a plain load balancer isn't, Kong's Routes/Services/plugins model, and where end-user authentication gets enforced</li>
+    <li><strong>Kubernetes Networking: Service → kube-proxy → Pod</strong> — ClusterIP/NodePort/LoadBalancer Services, how kube-proxy and the CNI actually deliver a packet to one Pod, and where an Ingress controller (Kong, again) fits in</li>
+    <li><strong>The Service Mesh and Citadel</strong> — sidecar proxies, mTLS between Pods, SPIFFE service identities issued by Istio's Citadel (now folded into <code>istiod</code>) — authentication between your own services, not end users</li>
+    <li><strong>AuthN vs. AuthZ, End to End</strong> — tying the edge, the gateway, the mesh, and the app together: who's proven who they are (authentication) vs. who's allowed to do what (authorization), and why static assets skip most of this entirely</li>
+    <li><strong>Error Codes Across the Stack</strong> — a diagnostic map from a single status code (401, 403, 404, 429, 500, 502, 503, 504, or a Cloudflare 52x) back to the one hop that produced it</li>
+    <li><strong>Capstone: Trace a Real Request</strong> — two full traces side by side (a static asset load vs. an authenticated API call) end to end, then a new scenario to test whether it transfers</li>
+  </ol>
+
+  <div class="lesson-nav">
+    <a href="../">← All topics</a>
+    <a href="./lessons/0001-the-map-one-request-six-hops.html">Start: Lesson 1 →</a>
+  </div>
+</main>
+</body>
+</html>

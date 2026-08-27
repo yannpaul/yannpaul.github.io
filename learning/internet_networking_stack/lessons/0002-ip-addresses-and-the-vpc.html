@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 2 · IP Addresses and the VPC</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Internet Networking Stack · Lesson 2 of 10</p>
+  <h1>IP Addresses and the VPC</h1>
+  <p class="subtitle">Why Kong and your Pods aren't directly reachable from the internet — and Cloudflare is.</p>
+
+  <p class="lede">Lesson 1 ended on a claim worth justifying properly: only <em>some</em> of the six hops have an address the public internet can reach at all. This lesson gives you the vocabulary — public vs. private IP addresses, and the VPC that groups them — to see exactly where that line falls, and why it falls there on purpose.</p>
+
+  <h2>What an IP address actually is</h2>
+
+  <p>An IP address is a number that identifies one network interface — <code>203.0.113.10</code> in the common (IPv4) format, four bytes written as dotted decimal. Every hop in Lesson 1's chain has one. The question this lesson answers is: <strong>which of those addresses can a stranger on the internet actually send a packet to?</strong></p>
+
+  <h2>Public vs. private address space</h2>
+
+  <p>Not every IP address is globally reachable. A set of address ranges was set aside specifically to <em>never</em> be routed on the public internet — routers everywhere are configured to drop or ignore them. Anyone can reuse these ranges internally, which is exactly why your home router, your company's office network, and a stranger's office network can all have a device at <code>192.168.1.5</code> without conflict: none of those addresses ever needs to be globally unique, because none of them is ever routed past your own network's edge.</p>
+
+  <div class="callout">
+    <span class="callout-label">The private ranges (RFC 1918)</span>
+    <table>
+      <thead><tr><th>Range</th><th>Typical use</th></tr></thead>
+      <tbody>
+        <tr><td><code>10.0.0.0/8</code></td><td>Large networks — this is what most cloud VPCs use</td></tr>
+        <tr><td><code>172.16.0.0/12</code></td><td>Medium networks; also Docker's default bridge range</td></tr>
+        <tr><td><code>192.168.0.0/16</code></td><td>Small networks — most home routers</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Everything outside those ranges is, in principle, a <strong>public</strong> address — globally unique, and routable by the internet's backbone. Cloudflare's anycast addresses from Lesson 1 are public. Your company's actual servers, more often than not, are not — and that's a choice, not an accident.</p>
+
+  <h2>The VPC: your own private network, carved up</h2>
+
+  <p>A <strong>VPC (Virtual Private Cloud)</strong> is an isolated slice of a cloud provider's network that a company controls — its own private address space, its own routing rules, walled off from every other customer's VPC. Inside it, the company divides addresses into <strong>subnets</strong>, and — this is the part people get wrong first — <em>a subnet isn't "public" or "private" because of a label someone picked</em>. It's public or private because of what its route table says:</p>
+
+  <ul>
+    <li>A subnet is <strong>public</strong> if its route table sends internet-bound traffic (<code>0.0.0.0/0</code>) to an <strong>internet gateway</strong> — a direct door to the public internet.</li>
+    <li>A subnet is <strong>private</strong> if it has no such route. Traffic destined for the internet instead goes to a <strong>NAT gateway</strong>, which sits in a public subnet and translates outbound traffic on the private instance's behalf — letting it call out to the internet (say, to pull a container image) without ever being reachable from it.</li>
+  </ul>
+
+  <div class="callout warn">
+    <span class="callout-label">The gotcha worth knowing cold</span>
+    <p>An instance in a private subnet can technically still <em>have</em> a public IP address assigned to it — and still be unreachable from the internet, because the subnet's route table has no path to an internet gateway for inbound traffic to travel back on. "Private subnet" is a statement about routing, not about which addresses happen to be attached to a machine.</p>
+  </div>
+
+  <h2>Placing Lesson 1's hops on the map</h2>
+
+  <p>Here's a typical shape for a SaaS company's own infrastructure — everything <em>after</em> Cloudflare, which isn't in this VPC at all; it's part of Cloudflare's own network, sitting in front of it.</p>
+
+  <div class="vpc-diagram">
+    <span class="vpc-label">Company VPC — 10.0.0.0/16</span>
+    <div class="subnet-row">
+      <div class="subnet public">
+        <span class="subnet-label">Public subnet — route to Internet Gateway</span>
+        <div class="subnet-item">Origin load balancer <span class="ip-tag">public IP</span></div>
+        <div class="subnet-item">NAT gateway <span class="ip-tag">public IP</span></div>
+      </div>
+      <div class="subnet private">
+        <span class="subnet-label">Private subnet — route to NAT Gateway</span>
+        <div class="subnet-item">Kong gateway <span class="ip-tag">10.0.2.11</span></div>
+        <div class="subnet-item">Kubernetes worker nodes <span class="ip-tag">10.0.2.x</span></div>
+        <div class="subnet-item">Pods (CNI-assigned) <span class="ip-tag">10.0.3.x</span></div>
+      </div>
+    </div>
+  </div>
+
+  <p>Only the load balancer has an address the internet can dial directly — and in practice, even that's usually locked down to accept traffic only from Cloudflare's published IP ranges, not the whole internet. Kong, the Kubernetes nodes, and every Pod live on private addresses one or two layers further in. A Pod's IP, assigned by the cluster's CNI plugin, is typically private even relative to the node it runs on — reachable from other things inside the cluster's network, and from nowhere else. (You'll meet the CNI properly in Lesson 6.)</p>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A Kubernetes worker node in a private subnet has a public IP address attached to it by mistake, but its subnet's route table still only routes internet-bound traffic to a NAT gateway. Can a stranger on the internet reach it directly?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A public IP by itself doesn't create a return path. Without a route to an internet gateway, inbound traffic has no way in even if the address looks public.">Yes — any machine with a public IP address is reachable from the internet.</li>
+      <li data-option="b" data-explain="Right. Public-vs-private is a routing fact, not an address fact. With no route to an internet gateway, the subnet has no inbound path from the internet, regardless of what IP is attached to the machine.">No — the subnet's route table has no path from the internet gateway, so the address being public doesn't matter.</li>
+      <li data-option="c" data-explain="NAT gateways handle outbound traffic initiated from inside the private subnet; they don't create a general inbound path for strangers to reach in.">Yes, but only through the NAT gateway, which forwards inbound connections to it.</li>
+      <li data-option="d" data-explain="Kong sits at a different hop; it isn't the thing that decides whether the internet's packets reach this node's network interface at all.">It depends on whether Kong is configured to allow it.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <details class="reveal">
+    <summary>Think first: why put the load balancer in a public subnet at all, instead of hiding everything behind Cloudflare and a NAT gateway?</summary>
+    <div class="reveal-body">
+      <p>Something has to be the one thing with a real, stable, internet-reachable address for Cloudflare to forward traffic <em>to</em> — a NAT gateway only handles outbound traffic initiated from inside the VPC, it doesn't accept inbound connections from the internet at all. The load balancer is that one deliberately-exposed door; everything behind it — Kong, the cluster, your Pods — stays on private addresses precisely because nothing past that door needs to be reachable any other way.</p>
+    </div>
+  </details>
+
+  <div class="callout">
+    <span class="callout-label">Answering Lesson 1's open thread</span>
+    <p>This is why Lesson 1's quiz ruled out "Kong" and "the Kubernetes Service" as the address DNS could hand back: neither has a public, internet-routable address at all. Only Cloudflare's edge (outside the VPC entirely) and, one hop further in, the load balancer (the one deliberately public resource inside it) do.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear — public vs. private ranges, why NAT gateways exist, how this maps to GCP/Azure if that's your cloud, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: AWS VPC documentation, <a href="https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Internet_Gateway.html">"Enable internet access for a VPC using an internet gateway"</a> and <a href="https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html">"NAT gateways"</a> — read these for the routing-table-level definitions this lesson compresses. The concepts carry over directly to GCP (VPC networks, Cloud NAT) and Azure (VNets, NAT Gateway) even though this lesson used AWS's terms.</p>
+
+  <div class="lesson-nav">
+    <a href="./0001-the-map-one-request-six-hops.html">← Lesson 1: The Map</a>
+    <a href="../index.html">Course overview — Lessons 3+ coming next →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

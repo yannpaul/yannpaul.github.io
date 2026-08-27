@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1 · The Map: One Request, Six Hops</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Internet Networking Stack · Lesson 1 of 10</p>
+  <h1>The Map: One Request, Six Hops</h1>
+  <p class="subtitle">Before any single piece gets a deep dive, see the whole shape of the thing.</p>
+
+  <p class="lede">Say you've built a SaaS app and someone types <code>app.example.com</code> into their browser, already logged in, and lands on their dashboard. From your side of the fence — the company running the service — that one request crosses a chain of systems before a single line of your application code runs, and the response retraces the same chain backward. This lesson is just the map. Every hop on it gets its own lesson later; today, learn the shape.</p>
+
+  <h2>The six hops</h2>
+
+  <p>Here's the path for <code>GET https://app.example.com/dashboard</code>, at the altitude you'll use for the rest of this course:</p>
+
+  <div class="hop-flow">
+    <div class="hop edge">
+      <span class="hop-name">1. DNS</span>
+      <span class="hop-detail">Browser asks "what's the address for app.example.com?"</span>
+    </div>
+    <div class="hop-arrow">→</div>
+    <div class="hop edge">
+      <span class="hop-name">2. Cloudflare edge</span>
+      <span class="hop-detail">Nearest point of presence: security checks, maybe a cached answer</span>
+    </div>
+    <div class="hop-arrow">→</div>
+    <div class="hop">
+      <span class="hop-name">3. Origin load balancer</span>
+      <span class="hop-detail">Entry point into your company's own infrastructure</span>
+    </div>
+    <div class="hop-arrow">→</div>
+    <div class="hop">
+      <span class="hop-name">4. Kong gateway</span>
+      <span class="hop-detail">Checks the request, decides which internal service should handle it</span>
+    </div>
+    <div class="hop-arrow">→</div>
+    <div class="hop internal">
+      <span class="hop-name">5. Kubernetes Service</span>
+      <span class="hop-detail">Picks one healthy Pod out of possibly many</span>
+    </div>
+    <div class="hop-arrow">→</div>
+    <div class="hop internal">
+      <span class="hop-name">6. Your Pod</span>
+      <span class="hop-detail">Your application code finally runs</span>
+    </div>
+  </div>
+
+  <p>"Six" is a teaching simplification, not a law — real deployments add or fold together hops (a service mesh sidecar in front of the Pod, a CDN cache that answers before Cloudflare's security logic even runs, multiple internal services chained together). But this shape — <strong>edge → gateway → cluster → Pod</strong> — is the one that recurs across nearly every SaaS company's architecture, and it's the skeleton the rest of this course hangs off.</p>
+
+  <h2>Why it's split into pieces at all</h2>
+
+  <p>A reasonable question: why not just point DNS straight at your server and skip the rest? Because each hop exists to solve one specific problem, and solving all of them in your own application code would be its own multi-year project:</p>
+
+  <table>
+    <thead><tr><th>Hop</th><th>Problem it exists to solve</th></tr></thead>
+    <tbody>
+      <tr><td>Cloudflare edge</td><td>Absorb attacks and abuse before they ever reach your infrastructure; serve cacheable content from close to the user</td></tr>
+      <tr><td>Origin load balancer</td><td>Spread traffic across more than one entry point into your infrastructure; give you one stable address to put behind DNS</td></tr>
+      <tr><td>Kong gateway</td><td>Enforce cross-cutting rules (who's allowed in, how fast they can call) in one place instead of in every service</td></tr>
+      <tr><td>Kubernetes Service</td><td>Give a moving target — Pods that get created, destroyed, and rescheduled constantly — one stable address</td></tr>
+      <tr><td>Your Pod</td><td>Run your actual business logic, and nothing else</td></tr>
+    </tbody>
+  </table>
+
+  <p>Notice the pattern: everything before your Pod exists so that your Pod's code can stay simple. That's the throughline for the whole course — each layer takes on one job so the layers behind it don't have to.</p>
+
+  <div class="callout">
+    <span class="callout-label">The detail that surprises people first</span>
+    <p>When Cloudflare sits in front of your site, the IP address DNS hands back for <code>app.example.com</code> is <strong>not your server's address</strong> — it's one of Cloudflare's own anycast addresses, shared by hundreds of Cloudflare data centers worldwide. Your server's real address is hidden behind it. Lesson 3 explains exactly how that routing works and why it doubles as a security feature.</p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">A browser resolves <code>app.example.com</code> and gets back an IP address. When Cloudflare sits in front of the site, whose address is that?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Close, but Kong isn't reachable directly from the public internet at all in this model — it sits behind the origin load balancer, inside the company's own network.">The company's Kong API gateway, since that's the first thing that inspects the request.</li>
+      <li data-option="b" data-explain="The origin server's real address is deliberately hidden once Cloudflare is in front of it — that's part of the point.">The company's actual origin server, since DNS always points straight at the real backend.</li>
+      <li data-option="c" data-explain="Right. Cloudflare answers with one of its own anycast addresses, shared across many of its data centers. The real origin address is hidden behind it, which is exactly why an attacker who only has your domain name can't just aim traffic straight at your server.">One of Cloudflare's own addresses, shared across its edge network — not the company's server at all.</li>
+      <li data-option="d" data-explain="Kubernetes Service IPs are only reachable from inside the cluster's own network — nothing on the public internet ever resolves to one.">The Kubernetes Service IP inside the company's cluster.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>The return trip</h2>
+
+  <p>Every hop above is two-way. Your Pod builds a response, which travels back through the Kubernetes Service, back through Kong, back through the origin load balancer, back through Cloudflare's edge (which may now cache it, if it's cacheable — more in Lesson 3), and finally back to the browser. When something breaks, it breaks at exactly one of these hops, and later — in the lesson on error codes — you'll use the specific error you see to figure out which one.</p>
+
+  <div class="callout warn">
+    <span class="callout-label">Where this course is going</span>
+    <p>Lesson 2 is a detour that's worth taking before going any further: IP addresses, public vs. private, and what a VPC is. Every hop above lives on one side or the other of a public/private boundary, and that boundary is the reason Kong and your Pods aren't directly reachable from the internet at all — only Cloudflare and the load balancer are. After that, Lessons 3–10 each zoom into one hop or one cross-cutting concern (TLS, auth, error codes, static-vs-restricted resources) in depth.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear here — why the split exists, what "hop" means precisely, anything else? Ask your teacher (me) before moving on. This lesson is deliberately just the skeleton; the next nine lessons put flesh on it.
+  </div>
+
+  <p class="cite">Primary source for this lesson: Cloudflare Fundamentals, <a href="https://developers.cloudflare.com/fundamentals/concepts/how-cloudflare-works/">"How Cloudflare works"</a> — read this first for Cloudflare's own account of sitting between every client and every origin as a reverse proxy.</p>
+
+  <div class="lesson-nav">
+    <span>Lesson 1 of 10</span>
+    <a href="./0002-ip-addresses-and-the-vpc.html">Next: IP Addresses and the VPC →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
