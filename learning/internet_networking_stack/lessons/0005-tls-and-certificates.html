@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 5 · TLS and Certificates</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Internet Networking Stack · Lesson 5 of 11</p>
+  <h1>TLS and Certificates</h1>
+  <p class="subtitle">The mechanism behind the padlock, and why <em>where</em> it terminates matters as much as whether it's there.</p>
+
+  <p class="lede">Every hop so far has been waved at as "encrypted" without saying how. This lesson opens that box just enough to make one fact land precisely: encryption between the browser and Cloudflare says nothing at all about what happens between Cloudflare and your origin — that's a separate, configurable decision, and getting it wrong quietly undoes most of the point.</p>
+
+  <h2>The handshake, in one pass</h2>
+
+  <p>Before a browser and a server exchange any real data, TLS runs a handshake that ends with both sides holding the same secret key, without ever sending that key across the network in the clear:</p>
+
+  <table>
+    <thead><tr><th>Step</th><th>What happens</th></tr></thead>
+    <tbody>
+      <tr><td><strong>ClientHello</strong></td><td>The client proposes: which TLS versions and cipher suites it supports, plus a random value.</td></tr>
+      <tr><td><strong>ServerHello + certificate</strong></td><td>The server picks a cipher suite from the client's list and sends its digital certificate — its claimed identity.</td></tr>
+      <tr><td><strong>Key exchange</strong></td><td>Both sides derive a shared secret using asymmetric cryptography, without ever transmitting the secret itself.</td></tr>
+      <tr><td><strong>Session key</strong></td><td>That shared secret becomes a symmetric key, used to encrypt every byte of the actual conversation from here on.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <span class="callout-label">Why two kinds of cryptography</span>
+    <p>Asymmetric cryptography (a public/private key pair) is what makes it possible for two strangers to agree on a secret over an open connection without ever sending the secret itself — but it's computationally expensive. Symmetric cryptography (one shared key both sides already have) is fast enough for the actual data. TLS uses the slow, safe method for a few milliseconds just to bootstrap the fast one.</p>
+  </div>
+
+  <h2>The certificate chain</h2>
+
+  <p>The certificate a server presents isn't self-certifying — trusting it means trusting whoever signed it. Browsers and operating systems ship with a built-in list of <strong>root certificate authorities (CAs)</strong> they trust unconditionally. A server's certificate (the <strong>leaf</strong>, issued for one specific domain) is typically signed by an <strong>intermediate CA</strong>, which is itself signed by one of those trusted roots — a chain of signatures the client can walk and verify without ever needing to trust the leaf directly.</p>
+
+  <h2>Where termination happens — and why it's a choice, not a given</h2>
+
+  <p>Lesson 1 said Cloudflare "terminates TLS" without saying what that costs or configures. Terminating TLS means Cloudflare is the one actually running the handshake above with the browser, decrypting the request, and deciding what to do next — which means the browser-to-Cloudflare leg and the Cloudflare-to-origin leg are two <em>separate</em> encrypted (or not!) connections, not one continuous encrypted tunnel. Cloudflare gives you four choices for that second leg:</p>
+
+  <table>
+    <thead><tr><th>Mode</th><th>Cloudflare → origin</th><th>Origin cert validated?</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Flexible</strong></td><td>Plain HTTP — unencrypted</td><td>n/a</td></tr>
+      <tr><td><strong>Full</strong></td><td>HTTPS — encrypted</td><td>No — any certificate is accepted, even an expired or self-signed one</td></tr>
+      <tr><td><strong>Full (Strict)</strong></td><td>HTTPS — encrypted</td><td>Yes — must be valid, unexpired, and from a trusted CA (public or Cloudflare's own Origin CA)</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout bad">
+    <span class="callout-label">The trap in "Flexible"</span>
+    <p>A visitor sees the padlock and a valid <code>https://</code> URL — because their connection to Cloudflare really is encrypted. But under Flexible mode, the Cloudflare-to-origin leg (Lesson 2's load balancer, sitting in a public subnet, potentially crossing the open internet to reach it) is plain HTTP. Anything sensitive in that request — a session cookie, a password on login — travels that second leg in the clear. The padlock is telling the truth about one hop and saying nothing about the other.</p>
+  </div>
+
+  <details class="reveal">
+    <summary>Think first: Full mode encrypts the Cloudflare-to-origin leg but doesn't validate the origin's certificate. Is that actually safe against an attacker sitting on the network path between Cloudflare and your origin?</summary>
+    <div class="reveal-body">
+      <p>No — encryption without validation only stops a passive eavesdropper from reading the traffic. It doesn't stop an active attacker from presenting <em>their own</em> certificate and impersonating your origin, since Cloudflare in Full mode will accept any certificate at all, expired or self-signed included. Full (Strict) closes exactly this gap by requiring the certificate to be valid and from a trusted CA — which is why it's the mode worth actually running, not just "Full."</p>
+    </div>
+  </details>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">A site runs Cloudflare in Flexible mode. A visitor's browser shows a secure padlock. Is the request encrypted all the way to the application code running in the origin's Kubernetes Pod?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The padlock reflects the browser-to-Cloudflare leg only. Flexible mode specifically means the next leg, Cloudflare to origin, is plain HTTP.">Yes — the padlock means the whole path is encrypted end to end.</li>
+      <li data-option="b" data-explain="TLS termination and re-encryption happen at Cloudflare's edge, not inside the Kubernetes cluster — Kong and the Service/Pod hops aren't a TLS boundary by default at all.">No — encryption stops at Kong, since that's where the request enters the private subnet.</li>
+      <li data-option="c" data-explain="Right. Flexible mode encrypts only the browser-to-Cloudflare leg. Everything from Cloudflare onward — the origin load balancer, Kong, the Kubernetes Service, the Pod — receives this request as plain HTTP under Flexible mode.">No — Flexible mode only encrypts the browser-to-Cloudflare leg; everything past Cloudflare is unencrypted.</li>
+      <li data-option="d" data-explain="Flexible mode is specifically the one mode where the Cloudflare-to-origin leg is not encrypted at all — that's what distinguishes it from Full and Full (Strict).">Yes, but only if the origin's Kubernetes cluster has its own separate certificate installed.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>A preview: what if both sides need to prove who they are?</h2>
+
+  <p>Everything above is <em>one-way</em> authentication — the client verifies the server's identity via its certificate, but the server has no cryptographic proof of who the client is (that's what login credentials are for, separately, at the application layer). <strong>Mutual TLS (mTLS)</strong> is the same handshake with both sides presenting a certificate, so each end cryptographically proves its identity to the other. This isn't hypothetical or exotic — it's already running inside this exact stack: Kong's own control-plane and data-plane nodes authenticate to each other via mTLS, and Lesson 8 will show it as the mechanism Istio's Citadel uses to give every Pod a verifiable identity. Same handshake as above; the difference is nobody skips the certificate check in either direction.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — the handshake steps, the certificate chain, why Flexible mode is risky, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: Cloudflare's own <a href="https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/">SSL/TLS encryption modes documentation</a> for the Flexible/Full/Full (Strict) comparison, and standard TLS handshake references (e.g. the IETF TLS 1.3 RFC 8446 and vendor explainers like Cloudflare's and Auth0's TLS handshake guides) for the ClientHello-through-session-key sequence this lesson compresses.</p>
+
+  <div class="lesson-nav">
+    <a href="./0004-cloudflare-at-the-edge.html">← Lesson 4: Cloudflare at the Edge</a>
+    <a href="./0006-api-gateways-and-kong.html">Next: API Gateways and Kong →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

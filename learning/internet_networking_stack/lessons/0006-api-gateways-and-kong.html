@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 6 · API Gateways and Kong</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Internet Networking Stack · Lesson 6 of 11</p>
+  <h1>API Gateways and Kong</h1>
+  <p class="subtitle">What a plain load balancer doesn't do — and where end-user authentication actually gets checked.</p>
+
+  <p class="lede">Lesson 1 described Kong as the hop that "checks the request, decides which internal service should handle it," which is also a fair description of a load balancer. This lesson makes the difference precise: a load balancer answers <em>which healthy server</em>; an API gateway answers <em>should this request even proceed, and if so, on what terms</em> — and it answers that question the same way for every route, instead of every service reimplementing it separately.</p>
+
+  <h2>The problem a gateway solves</h2>
+
+  <p>Imagine ten internal services, each needing to check an API key, enforce a rate limit, and log every request the same way. Without a gateway, that's the same logic written (and maintained, and inevitably drifted) ten times. An API gateway puts these <strong>cross-cutting concerns</strong> — the things nearly every route needs, that aren't specific to any one service's business logic — in exactly one place, enforced before a request ever reaches application code.</p>
+
+  <h2>Kong's model: Services, Routes, Plugins, Consumers</h2>
+
+  <table>
+    <thead><tr><th>Concept</th><th>What it is</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Service</strong></td><td>One upstream target — the internal API a group of routes should ultimately reach (e.g. the orders service).</td></tr>
+      <tr><td><strong>Route</strong></td><td>A match rule (host, path, method) that says which incoming requests belong to which Service.</td></tr>
+      <tr><td><strong>Plugin</strong></td><td>A behavior attached at a chosen scope — global, one Service, one Route, or one Consumer — that runs during the request lifecycle: auth checks, rate limiting, transformation, logging.</td></tr>
+      <tr><td><strong>Consumer</strong></td><td>An identity Kong tracks credentials for — an API key, a JWT signing secret, an OAuth client — used by auth plugins to know <em>who</em> is calling.</td></tr>
+    </tbody>
+  </table>
+
+  <p>A request arrives, Kong matches it to a Route, resolves the Route's Service, and runs every Plugin that applies to that request — in scope order — before ever proxying the request onward.</p>
+
+  <h2>Where end-user authentication actually happens</h2>
+
+  <p>This is the detail worth being precise about: when a plugin like <code>key-auth</code> or <code>jwt</code> is attached to a Route, an invalid or missing credential means Kong itself returns <code>401 Unauthorized</code> — your upstream service, and the Kubernetes cluster behind it, never see the request at all. Kong checks the JWT's signature and claims (issuer, expiry) against the Consumer it identifies from the token; a bad signature or an expired token fails right there, at the gateway, before hop 5 of Lesson 1's map even begins.</p>
+
+  <div class="callout">
+    <span class="callout-label">AuthN, not AuthZ — a distinction Lesson 9 makes precise</span>
+    <p>Kong answering "is this a valid, recognized caller?" is <strong>authentication</strong>. Whether that caller is allowed to, say, delete <em>this specific</em> order is a different question — <strong>authorization</strong> — and it's usually left to the application (or, as Lesson 8 will show, partly to the service mesh) rather than the gateway. Kong's plugins <em>can</em> do coarse authorization (this Consumer may call this Route at all), but fine-grained "can user 42 edit resource 99" logic almost always belongs downstream, where the business rules actually live.</p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A client sends a request with an expired JWT to a Kong Route protected by the <code>jwt</code> plugin. What actually returns the 401, and does the request reach the Kubernetes cluster?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Kong validates the JWT's signature and expiry itself, using the Consumer's registered signing secret — it doesn't forward the token to the upstream service to ask.">The upstream application service returns the 401, after Kong forwards the request and lets the app validate the token.</li>
+      <li data-option="b" data-explain="Right. The jwt plugin checks the token's signature and expiry at the gateway. An expired token fails that check immediately — Kong returns 401 on the spot, and the request never reaches the Kubernetes Service, let alone a Pod.">Kong itself returns the 401, and the request never reaches the Kubernetes Service or any Pod.</li>
+      <li data-option="c" data-explain="Cloudflare has no knowledge of application-level credentials like a JWT — that check is Kong's job specifically, several hops further in.">Cloudflare returns the 401 at the edge, before the request ever reaches Kong.</li>
+      <li data-option="d" data-explain="An expired token is exactly the kind of thing a stateless credential check catches deterministically — this isn't a timing race, it's a straightforward expiry comparison the plugin performs every time.">It's inconsistent — sometimes Kong catches it, sometimes it slips through to the application.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Control plane and data plane</h2>
+
+  <p>Kong's own architecture splits into two roles: <strong>control plane</strong> nodes hold the configuration (Routes, Services, Plugins) and the database connection; <strong>data plane</strong> nodes proxy the actual live traffic, using a copy of that configuration pushed down to them. Data plane nodes initiate the connection to the control plane and authenticate to it via mTLS — the exact mechanism Lesson 5 previewed, already in production use one layer below the traffic you've been tracing. If the control plane goes offline, data planes keep serving traffic on their last known configuration; they just can't receive updates until it's back.</p>
+
+  <details class="reveal">
+    <summary>Think first: why split configuration (control plane) from live traffic handling (data plane) at all, instead of one Kong process doing both?</summary>
+    <div class="reveal-body">
+      <p>It's the same motivation as most of this course's other splits: an operator changing configuration shouldn't be able to destabilize the path every live request is currently flowing through, and a data plane node handling thousands of requests per second shouldn't also be managing a database connection for config writes. Separating them means the thing under the most load (traffic proxying) stays lean and focused, while the thing doing occasional, heavier work (config management) doesn't sit in the hot path at all.</p>
+    </div>
+  </details>
+
+  <h2>Kong as a Kubernetes Ingress Controller</h2>
+
+  <p>So far this lesson has treated Kong as a standalone proxy. In front of a Kubernetes cluster specifically, Kong usually runs as the <strong>Ingress Controller</strong>: it watches the cluster's Ingress/Gateway API resources and translates them into its own Routes, Services, and Plugins automatically, in real time, as those Kubernetes resources change. That's the bridge into Lesson 7 — Kong's data plane <em>is</em>, in that deployment, one more thing running inside (or just in front of) the very cluster it's routing into.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — the Services/Routes/Plugins model, where auth actually gets checked, the control-plane/data-plane split, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: Kong's own <a href="https://developer.konghq.com/gateway/entities/plugin/">Plugins documentation</a> for scoping and the request-lifecycle model, <a href="https://developer.konghq.com/gateway/cp-dp-communication/">Control Plane and Data Plane communication</a> docs for the mTLS-secured CP/DP split, and <a href="https://developer.konghq.com/how-to/authenticate-consumers-jwt/">"Authenticate Consumers with the JWT plugin"</a> for the signature/expiry validation this lesson's quiz relies on.</p>
+
+  <div class="lesson-nav">
+    <a href="./0005-tls-and-certificates.html">← Lesson 5: TLS and Certificates</a>
+    <a href="../index.html">Course overview — Lessons 7+ coming next →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

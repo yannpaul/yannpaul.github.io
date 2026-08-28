@@ -20,14 +20,14 @@
     <li><a href="./lessons/0001-the-map-one-request-six-hops.html">The Map: One Request, Six Hops</a> — the whole path at a glance: DNS → Cloudflare edge → origin load balancer → Kong → Kubernetes Service → Pod, and why it's split into pieces at all</li>
     <li><a href="./lessons/0002-ip-addresses-and-the-vpc.html">IP Addresses and the VPC</a> — public vs. private address space, what a VPC and its subnets are, and why only the load balancer (not Kong, not your Pods) has an internet-reachable address</li>
     <li><a href="./lessons/0003-cidr-route-tables-and-traffic-direction.html">CIDR, Route Tables, and Traffic Direction</a> — reading a <code>/16</code> vs. a <code>/24</code>, how a route table picks a target via longest prefix match, and why ingress being allowed doesn't always mean egress is too</li>
+    <li><a href="./lessons/0004-cloudflare-at-the-edge.html">Cloudflare at the Edge</a> — what a PoP does to a request in order (DDoS/rate checks, the WAF, cache lookup), what a cache HIT skips entirely, and the 522/524 errors specific to this one hop</li>
+    <li><a href="./lessons/0005-tls-and-certificates.html">TLS and Certificates</a> — the handshake in one pass, the certificate chain, why Cloudflare's Flexible/Full/Full (Strict) modes decide whether the edge-to-origin leg is encrypted at all, and an mTLS preview</li>
+    <li><a href="./lessons/0006-api-gateways-and-kong.html">API Gateways and Kong</a> — what a gateway centralizes that a load balancer doesn't, Kong's Services/Routes/Plugins/Consumers model, where end-user authentication actually gets checked, and Kong's own mTLS-secured control-plane/data-plane split</li>
   </ol>
 
   <h2>Coming up</h2>
   <p class="subtitle">Planned, not yet written — each will zoom into one hop from Lesson 1 or one concern that cuts across the whole stack.</p>
-  <ol start="4">
-    <li><strong>Cloudflare at the Edge</strong> — anycast routing to the nearest point of presence, DDoS mitigation, the WAF, TLS termination, and what gets cached at the edge vs. forwarded on</li>
-    <li><strong>TLS and Certificates</strong> — the handshake, why it matters exactly where it terminates, and the certificate-chain vocabulary Lesson 8's mTLS will reuse</li>
-    <li><strong>API Gateways and Kong</strong> — what an API gateway is for that a plain load balancer isn't, Kong's Routes/Services/plugins model, and where end-user authentication gets enforced</li>
+  <ol start="7">
     <li><strong>Kubernetes Networking: Service → kube-proxy → Pod</strong> — ClusterIP/NodePort/LoadBalancer Services, how kube-proxy and the CNI actually deliver a packet to one Pod, and where an Ingress controller (Kong, again) fits in</li>
     <li><strong>The Service Mesh and Citadel</strong> — sidecar proxies, mTLS between Pods, SPIFFE service identities issued by Istio's Citadel (now folded into <code>istiod</code>) — authentication between your own services, not end users</li>
     <li><strong>AuthN vs. AuthZ, End to End</strong> — tying the edge, the gateway, the mesh, and the app together: who's proven who they are (authentication) vs. who's allowed to do what (authorization), and why static assets skip most of this entirely</li>

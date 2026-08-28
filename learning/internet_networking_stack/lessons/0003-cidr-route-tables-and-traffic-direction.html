@@ -110,7 +110,7 @@
 
   <h3>The same direction split, one layer up</h3>
 
-  <p>Once a request is inside your Kubernetes cluster, the identical ingress/egress split reappears at the Pod level via a <strong>NetworkPolicy</strong>: an <code>ingress</code> section lists what's allowed to send <em>to</em> a Pod, an <code>egress</code> section lists what that Pod is allowed to send <em>to</em>. With no NetworkPolicy at all, a Pod allows all traffic both ways by default — the restrictive behavior only turns on once at least one policy selects that Pod. And Pod-to-Pod traffic needs both sides to agree: A can only reach B if A's egress rules allow sending to B <em>and</em> B's ingress rules allow receiving from A — this comes back in Lesson 6, once Services and Pods have been covered properly.</p>
+  <p>Once a request is inside your Kubernetes cluster, the identical ingress/egress split reappears at the Pod level via a <strong>NetworkPolicy</strong>: an <code>ingress</code> section lists what's allowed to send <em>to</em> a Pod, an <code>egress</code> section lists what that Pod is allowed to send <em>to</em>. With no NetworkPolicy at all, a Pod allows all traffic both ways by default — the restrictive behavior only turns on once at least one policy selects that Pod. And Pod-to-Pod traffic needs both sides to agree: A can only reach B if A's egress rules allow sending to B <em>and</em> B's ingress rules allow receiving from A — this comes back in Lesson 7, once Services and Pods have been covered properly.</p>
 
   <div class="ask-your-teacher">
     Something unclear — longest prefix match, the stateful/stateless split, anything else? Ask your teacher (me) before moving on.
@@ -120,7 +120,7 @@
 
   <div class="lesson-nav">
     <a href="./0002-ip-addresses-and-the-vpc.html">← Lesson 2: IP Addresses and the VPC</a>
-    <a href="../index.html">Course overview — Lessons 4+ coming next →</a>
+    <a href="./0004-cloudflare-at-the-edge.html">Next: Cloudflare at the Edge →</a>
   </div>
 </main>
 <script src="../assets/quiz.js"></script>
