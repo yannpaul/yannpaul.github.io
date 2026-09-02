@@ -43,7 +43,27 @@
 
   <div class="callout">
     <span class="callout-label">The DNS half of the story</span>
-    <p>Every Service also gets a stable cluster-internal DNS name — <code>my-service.my-namespace.svc.cluster.local</code> — resolved by the cluster's own DNS server (CoreDNS) to the Service's ClusterIP. This is how your application code finds another internal service at all: by name, never by chasing a Pod IP directly.</p>
+    <p>Every Service also gets a stable cluster-internal DNS name — <code>my-service.my-namespace.svc.cluster.local</code> — resolved by the cluster's own DNS server (CoreDNS) to the Service's ClusterIP. This is how your application code finds another internal service at all: by name, never by chasing a Pod IP directly. Note this is a <em>two-stage</em> translation with very different volatility at each stage: DNS name → ClusterIP is essentially fixed for the Service's whole lifetime; ClusterIP → Pod IP, via the kernel rules below, is the part that's constantly being rewritten.</p>
+  </div>
+
+  <h2>How the kernel picks <em>one</em> Pod among several</h2>
+
+  <p>A Service's EndpointSlice usually lists more than one healthy Pod. Which one does a given packet actually get sent to? It depends on kube-proxy's mode:</p>
+
+  <table>
+    <thead><tr><th>Mode</th><th>Selection behavior</th></tr></thead>
+    <tbody>
+      <tr><td><strong>iptables</strong> (the long-standing default)</td><td>Roughly uniform random — implemented as a chain of probabilistic rules (the first backend gets a 1-in-N chance, the next gets 1-in-(N-1) of what's left, and so on), which works out to an even split. No awareness of load; no session affinity unless explicitly configured.</td></tr>
+      <tr><td><strong>IPVS</strong></td><td>A real choice of load-balancing algorithms — round robin, least-connection, hashing — configured explicitly.</td></tr>
+      <tr><td><strong>eBPF-based</strong> (e.g. Cilium)</td><td>Typically consistent hashing, resolved in-kernel with lower overhead than iptables' rule-chain walk.</td></tr>
+    </tbody>
+  </table>
+
+  <p>The default (iptables) is closer to a coin flip across healthy Pods than a smart load balancer — it has no idea which Pod is currently under more load.</p>
+
+  <div class="callout warn">
+    <span class="callout-label">A stale rule is not the same failure as an application error</span>
+    <p>There's a real, if narrow, window where a kernel rule can point at a Pod that's already gone: a Pod crashes ungracefully, and there's a gap before the EndpointSlice updates and kube-proxy reprograms the kernel to match. A request that lands in that gap gets routed to an address where nothing is listening anymore — a <strong>connection-level failure</strong> (refused or timed out), surfacing upstream as a 502 or 504 (Lesson 12), before any application code ever ran. Compare that to a request that reaches a real, currently-running Pod, whose application code then decides to respond with a 500: that's a completed, successful network round trip carrying a failure <em>status</em> — nothing about the routing was wrong at all. Same eventual symptom ("the request failed"), completely different mechanism, and Lesson 12's habit of checking whether a connection was even established is exactly how to tell them apart.</p>
   </div>
 
   <div class="quiz" data-answer="c">
