@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 12 · Error Codes Across the Stack</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Internet Networking Stack · Lesson 12 of 13</p>
+  <h1>Error Codes Across the Stack</h1>
+  <p class="subtitle">Every hop in this course can fail. Each one fails with a different, readable signature.</p>
+
+  <p class="lede">Every lesson so far has mentioned an error code in passing — 522 in Lesson 4, 401 in Lesson 6. This lesson collects them into one diagnostic map: given a code, which hop produced it, and what does that tell you about where to actually look?</p>
+
+  <h2>The full map, hop by hop</h2>
+
+  <table>
+    <thead><tr><th>Hop</th><th>Code</th><th>What it means</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="4">Cloudflare edge (Lesson 4)</td><td><strong>521</strong></td><td>The origin refused the connection outright — nothing is listening.</td></tr>
+      <tr><td><strong>522</strong></td><td>Cloudflare couldn't complete a TCP connection to the origin within its timeout (Lesson 4).</td></tr>
+      <tr><td><strong>523</strong></td><td>The origin's IP is unreachable — often a DNS or routing problem.</td></tr>
+      <tr><td><strong>524</strong></td><td>The origin accepted the connection but didn't finish responding before Cloudflare's read timeout (Lesson 4).</td></tr>
+      <tr><td>Cloudflare edge (TLS)</td><td><strong>526</strong></td><td>Full (Strict) mode (Lesson 5) rejected the origin's certificate — invalid, expired, or untrusted.</td></tr>
+      <tr><td rowspan="3">Kong gateway (Lesson 6)</td><td><strong>401</strong></td><td>Missing or invalid credential — an auth plugin rejected the request before it reached your Route's Service.</td></tr>
+      <tr><td><strong>429</strong></td><td>A rate-limiting plugin tripped — too many requests from this Consumer/IP in the configured window.</td></tr>
+      <tr><td><strong>502 / 504</strong></td><td>Kong reached the Service but got a broken (502) or too-slow (504) response from it — the problem is one hop further in, at Kubernetes.</td></tr>
+      <tr><td>Kubernetes (Lessons 7–9)</td><td><strong>503</strong> (from Kong)</td><td>No healthy Pod was available in the Service's EndpointSlice at all — Kong has nowhere to send the request.</td></tr>
+      <tr><td rowspan="3">Application code</td><td><strong>400</strong></td><td>The request itself is malformed — bad JSON, a missing required field.</td></tr>
+      <tr><td><strong>403</strong></td><td>Authenticated, but not authorized for this specific action (Lesson 11) — a business-rule rejection, not a credentials problem.</td></tr>
+      <tr><td><strong>404 / 500</strong></td><td>The resource genuinely doesn't exist, or the application code itself threw an unhandled error.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout warn">
+    <span class="callout-label">The trap: the same code means different things at different hops</span>
+    <p>A <strong>404</strong> from Kong means no Route matched the request's host/path at all — a routing-configuration problem, nothing to do with your application. A <strong>404</strong> from your application means the route matched fine, the request reached your code, and your code decided the specific resource doesn't exist. Same three digits, completely different fix. The same is true of <strong>429</strong>: it can come from Cloudflare's own rate limiting (Lesson 4) or from a Kong rate-limiting plugin (Lesson 6) — both block the request before your application ever runs, but at different hops, often with different configured thresholds.</p>
+  </div>
+
+  <h2>Telling them apart without guessing</h2>
+
+  <p>Two habits resolve most of this ambiguity fast:</p>
+
+  <ul>
+    <li><strong>Check the response headers, not just the code.</strong> Cloudflare-originated responses typically carry a <code>cf-ray</code> header; Kong-originated responses typically carry Kong-specific headers (e.g. rate-limit counters) your application never sets. A 404 or 429 with neither is more likely to have come from your own application code.</li>
+    <li><strong>Check the response body.</strong> Kong's own error responses have a distinct, generic JSON shape; Cloudflare's error pages are Cloudflare's own branded HTML; your application's 404 page is whatever you built. If the body doesn't look like something your team wrote, it probably didn't come from your application.</li>
+  </ul>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A client reports a <code>429 Too Many Requests</code>. The response body is generic JSON with no branding, and there's no <code>cf-ray</code> header. Which hop most likely produced it?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A Cloudflare-originated response would carry a cf-ray header — its absence points away from the edge, not toward it.">Cloudflare's edge, since 429 is a classic rate-limiting response.</li>
+      <li data-option="b" data-explain="Right. No cf-ray header rules out Cloudflare; a generic, unbranded JSON body is consistent with Kong's own rate-limiting plugin response, not a custom application error page. The fix is checking Kong's rate-limit plugin configuration for this Route, not application code or Cloudflare's dashboard.">Kong's gateway layer, since its rate-limiting plugin returns a generic response by default and the missing cf-ray header rules out the edge.</li>
+      <li data-option="c" data-explain="A 429 from the application specifically would typically use whatever error-response format the rest of that application's API uses — "generic JSON with no branding" is a weaker signal for this than for Kong's default plugin output.">The application itself, since only application code can decide how many requests are "too many."</li>
+      <li data-option="d" data-explain="The service mesh's PeerAuthentication and AuthorizationPolicy (Lesson 10) govern service identity and access, not request-rate limiting — that's not a concern this layer implements.">The service mesh, since Citadel enforces rate limits between Pods.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <details class="reveal">
+    <summary>Think first: your team sees an intermittent 503 on one specific Route, correlated with deploys. Using Lessons 7–9's model, what's the most likely mechanism, and where would you look first?</summary>
+    <div class="reveal-body">
+      <p>During a rolling deploy, old Pods terminate and new ones start, and there's a brief window where the EndpointSlice behind the Service (Lesson 7) has zero ready Pods — new ones haven't passed their readiness check yet, old ones already have. Kong, unable to reach any healthy Pod for that Service, returns 503. The fix isn't in application code at all: it's tuning the deployment's rollout strategy (e.g. ensuring new Pods are ready before old ones terminate) so the EndpointSlice never goes empty during a rollout.</p>
+    </div>
+  </details>
+
+  <div class="ask-your-teacher">
+    Something unclear — the hop-by-hop code map, telling apart same-code-different-layer cases, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">This lesson synthesizes error codes already sourced in Lessons 4–6 (Cloudflare 52x, Kong's auth/rate-limit plugin behavior) and grounds the 400/401/403/404/429/500/502/503/504 semantics against standard HTTP status code references (e.g. MDN's HTTP response status code documentation).</p>
+
+  <div class="lesson-nav">
+    <a href="./0011-authn-vs-authz-end-to-end.html">← Lesson 11: AuthN vs. AuthZ, End to End</a>
+    <a href="./0013-capstone-trace-a-real-request.html">Next: Capstone — Trace a Real Request →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

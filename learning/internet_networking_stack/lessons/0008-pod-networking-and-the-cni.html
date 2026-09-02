@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 8 · Pod Networking and the CNI</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Internet Networking Stack · Lesson 8 of 13</p>
+  <h1>Pod Networking and the CNI</h1>
+  <p class="subtitle">kube-proxy picked a Pod IP. This lesson is how a packet actually gets there.</p>
+
+  <p class="lede">Lesson 7 ended with kube-proxy rewriting a packet's destination to one specific Pod's IP address. That's a decision, not a delivery — something still has to physically carry the packet from wherever it is to that exact Pod, possibly on a completely different machine. That's the job of the <strong>CNI (Container Network Interface)</strong>.</p>
+
+  <h2>The one rule every CNI has to satisfy</h2>
+
+  <p>Kubernetes' networking model rests on a single, deliberately simple guarantee: <strong>every Pod gets its own real IP address, and every Pod can reach every other Pod's IP directly — no NAT between Pods, ever.</strong> Compare that to Docker's default networking, where containers on one host share an address space translated through the host's own IP — a model that makes "which container is this" ambiguous across machines. Kubernetes' flat, NAT-free model is what lets a Service's EndpointSlice hand kube-proxy a bare Pod IP and trust that it's reachable from anywhere in the cluster, full stop. The CNI plugin is whatever piece of software actually makes that guarantee true on the wire.</p>
+
+  <h2>Same node: a virtual cable and a virtual switch</h2>
+
+  <p>When a Pod is created, the CNI plugin creates a <strong>veth pair</strong> — think of it as a virtual ethernet cable with two ends: one end is placed inside the Pod's own network namespace (where the container sees it as its network interface), the other end stays on the host. That host-side end gets plugged into a <strong>bridge</strong> (commonly named <code>cni0</code>), which acts as a Layer 2 virtual switch connecting every Pod on that node.</p>
+
+  <div class="hop-flow">
+    <div class="hop">
+      <span class="hop-name">Pod A</span>
+      <span class="hop-detail">veth end inside the Pod's namespace</span>
+    </div>
+    <div class="hop-arrow">→</div>
+    <div class="hop internal">
+      <span class="hop-name">cni0 bridge</span>
+      <span class="hop-detail">Layer 2 switch, same node</span>
+    </div>
+    <div class="hop-arrow">→</div>
+    <div class="hop">
+      <span class="hop-name">Pod B</span>
+      <span class="hop-detail">veth end inside its namespace</span>
+    </div>
+  </div>
+
+  <p>Two Pods on the <em>same</em> node reach each other purely through this bridge — a Layer 2 switching decision, no routing involved at all.</p>
+
+  <h2>Different nodes: overlay or underlay</h2>
+
+  <p>Once the destination Pod is on a <em>different</em> node, the packet has to cross the real network connecting the nodes — and that network typically has no idea what a "Pod IP" is. CNIs solve this one of two ways:</p>
+
+  <table>
+    <thead><tr><th>Approach</th><th>How it works</th><th>Trade-off</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Overlay</strong> (e.g. VXLAN)</td><td>Wraps the Pod-to-Pod packet inside another packet addressed node-to-node — a tunnel the underlying network just sees as ordinary traffic between two nodes it already knows how to reach.</td><td>Works on almost any network; costs ~50 bytes of overhead per packet for the extra wrapping.</td></tr>
+      <tr><td><strong>Underlay / BGP</strong></td><td>The physical network itself is taught the Pod IP routes directly (via BGP), so packets travel unwrapped.</td><td>Zero encapsulation overhead; requires a network fabric that supports BGP peering with the cluster's nodes.</td></tr>
+    </tbody>
+  </table>
+
+  <details class="reveal">
+    <summary>Think first: a company runs Kubernetes on a restrictive cloud network that only allows standard TCP/UDP traffic between nodes — no custom IP protocols. Which approach, overlay or underlay/BGP, is more likely to work without special network configuration?</summary>
+    <div class="reveal-body">
+      <p>Overlay (VXLAN) — it encapsulates Pod traffic inside ordinary UDP packets between node IPs, which passes through almost any network that allows normal traffic at all. BGP-based underlay routing needs the physical/cloud network fabric itself to speak BGP with the cluster's nodes, which isn't something every environment permits or supports — it trades that flexibility for zero per-packet overhead where it's available.</p>
+    </div>
+  </details>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Two Pods on the <em>same</em> Kubernetes node need to communicate. What actually happens?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Right. Same-node Pod-to-Pod traffic is a Layer 2 switching decision through the node's local bridge (cni0) — no IP routing, no encapsulation, no leaving the machine at all.">Their veth pairs both connect to the same node-local bridge, which switches the traffic between them directly — no routing needed.</li>
+      <li data-option="b" data-explain="VXLAN encapsulation exists specifically to cross the physical network between different nodes — it's unnecessary overhead for two Pods that are already on the same machine.">The traffic is wrapped in a VXLAN tunnel just like cross-node traffic, for consistency.</li>
+      <li data-option="c" data-explain="kube-proxy decides which Pod IP a Service should route to; it doesn't get involved in delivering direct Pod-IP-to-Pod-IP traffic that already names its destination.">kube-proxy intercepts the packet and manually forwards it between the two Pods.</li>
+      <li data-option="d" data-explain="Kubernetes' entire flat-networking model exists specifically so Pods reach each other by IP directly, same node or not — going out to the internet and back would defeat that model entirely, and isn't what any CNI does.">The traffic leaves the node, goes out to the internet, and comes back in — since every Pod has its own routable IP.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Closing the loop from Lesson 3: who actually enforces a NetworkPolicy?</h2>
+
+  <p>Lesson 3 previewed Kubernetes' <code>NetworkPolicy</code> resource — ingress/egress allow-rules scoped to a Pod — and promised the mechanism would come once Pods and their networking were covered properly. Here it is: <code>NetworkPolicy</code> is just another declarative Kubernetes resource, and like the Ingress resource Lesson 9 covers next, <strong>it does nothing by itself</strong>. The CNI plugin is what actually has to read those rules and enforce them, by programming the packet filtering that allows or drops traffic accordingly. Not every CNI plugin implements this — the basic bridge plugin described above doesn't enforce NetworkPolicy at all, which is why production clusters typically run a CNI (Calico, Cilium, and others) chosen specifically for that capability, not just for basic connectivity.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — veth pairs and the bridge, overlay vs. underlay, how NetworkPolicy enforcement actually happens, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: Kubernetes' own <a href="https://kubernetes.io/docs/concepts/cluster-administration/networking/">Cluster Networking documentation</a> for the flat, NAT-free Pod networking model, and Tigera/Calico's <a href="https://www.tigera.io/blog/when-to-use-bgp-vxlan-or-ip-in-ip-a-practical-guide-for-kubernetes-networking/">"When to Use BGP, VXLAN, or IP-in-IP"</a> for the overlay-vs-underlay trade-offs this lesson compresses.</p>
+
+  <div class="lesson-nav">
+    <a href="./0007-kubernetes-services-and-kube-proxy.html">← Lesson 7: Kubernetes Services and kube-proxy</a>
+    <a href="./0009-ingress-and-kong-as-ingress-controller.html">Next: Ingress and Kong as Ingress Controller →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

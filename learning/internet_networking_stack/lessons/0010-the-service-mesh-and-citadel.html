@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 10 · The Service Mesh and Citadel</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Internet Networking Stack · Lesson 10 of 13</p>
+  <h1>The Service Mesh and Citadel</h1>
+  <p class="subtitle">Kong secured the traffic entering the cluster. This is what secures every hop after that.</p>
+
+  <p class="lede">Lesson 6 showed Kong's own control-plane and data-plane nodes authenticating to each other with mTLS. Lesson 5 promised that same mechanism would reappear as the way Pods prove their identity to each other. Here it is: once a request is past Kong and inside the cluster, it may still cross a dozen internal services calling each other — and a <strong>service mesh</strong> is what gives every one of those internal hops the same cryptographic identity guarantees, automatically.</p>
+
+  <h2>The problem: internal traffic needs identity too</h2>
+
+  <p>Kong authenticates the end user calling in from outside. But once inside the cluster, service A calling service B is just another network connection — by default, unencrypted and with no proof that "service A" is really who it claims to be. In a cluster with dozens of internal services, hand-rolling mTLS certificate issuance and rotation into every one of them individually would be exactly the kind of duplicated, drifting cross-cutting concern Lesson 6 introduced API gateways to avoid — just one layer further in.</p>
+
+  <h2>The sidecar pattern</h2>
+
+  <p>Istio's answer is to inject a small proxy — <strong>Envoy</strong> — into every Pod, alongside the application container, as a <strong>sidecar</strong>. All inbound and outbound traffic for the application container is transparently routed through its own sidecar first. The application code doesn't need to know any of this is happening; it just makes a normal network call, and its sidecar handles the encryption, identity, and policy enforcement invisibly.</p>
+
+  <h2>istiod: where Citadel actually lives now</h2>
+
+  <p>In current Istio, three historically separate components — <strong>Pilot</strong> (service discovery and routing config), <strong>Citadel</strong> (certificate issuance), and <strong>Galley</strong> (config validation) — are consolidated into one control-plane binary called <code>istiod</code>. Citadel's job specifically: issue every workload a <strong>SPIFFE X.509 certificate</strong> — a cryptographic identity tied to that Pod's Kubernetes service account — and rotate it automatically (a 24-hour default lifetime is typical), all without the application ever seeing a certificate file.</p>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Which statement about Citadel in current Istio is accurate?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Citadel doesn't run as its own separate Pod in current Istio — it was folded into the consolidated istiod control-plane binary.">Citadel runs as its own dedicated Pod, separate from the rest of Istio's control plane.</li>
+      <li data-option="b" data-explain="Right. Pilot, Citadel, and Galley were consolidated into istiod. Citadel's certificate-issuance job didn't go away — it's now one function inside that single control-plane binary, alongside routing config distribution (formerly Pilot) and config validation (formerly Galley).">Citadel's certificate-issuance role is now a function inside istiod, alongside what used to be separate Pilot and Galley components.</li>
+      <li data-option="c" data-explain="Certificate issuance and rotation happen automatically, in the background, by design — an application developer never needs to request or install a certificate manually for this to work.">Application developers must manually request a certificate from Citadel for each service.</li>
+      <li data-option="d" data-explain="mTLS certificates are issued per-workload identity (tied to the Kubernetes service account), not shared across the mesh — a shared secret would defeat the point of per-service cryptographic identity.">Citadel issues one shared certificate used by every Pod in the mesh.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Two separate policies: PeerAuthentication and AuthorizationPolicy</h2>
+
+  <p>The same authentication-vs-authorization split from Lesson 6's callout reappears here, as two distinct Istio resources:</p>
+
+  <table>
+    <thead><tr><th>Resource</th><th>Question it answers</th><th>Example</th></tr></thead>
+    <tbody>
+      <tr><td><strong>PeerAuthentication</strong></td><td>AuthN — <em>how strictly is mTLS enforced</em> between workloads?</td><td>Require STRICT mTLS for every Pod in a namespace, rejecting any connection without a valid SPIFFE certificate.</td></tr>
+      <tr><td><strong>AuthorizationPolicy</strong></td><td>AuthZ — <em>given a proven identity, what is it allowed to do?</em></td><td>Allow only the <code>checkout</code> service's identity to call the <code>payments</code> service, and nothing else.</td></tr>
+    </tbody>
+  </table>
+
+  <p>PeerAuthentication in <strong>permissive</strong> mode accepts both mTLS and plaintext traffic — useful while migrating a mesh incrementally, so nothing breaks mid-rollout. <strong>Strict</strong> mode rejects any connection that doesn't present a valid certificate at all. AuthorizationPolicy only makes sense once identity is established — it's the layer that decides what a now-verified caller may actually reach.</p>
+
+  <details class="reveal">
+    <summary>Think first: Lesson 6 said Kong's own control-plane/data-plane traffic already uses mTLS, and Lesson 5 called that a preview of the mesh. What's actually different about what Citadel adds, if Kong was already doing mTLS somewhere?</summary>
+    <div class="reveal-body">
+      <p>Kong's mTLS in Lesson 6 secures one specific, narrow relationship: Kong's own control-plane nodes talking to Kong's own data-plane nodes — infrastructure Kong operates internally. Citadel's mTLS is general-purpose and automatic across <em>every</em> workload in the mesh, including your own application Pods that have nothing to do with Kong at all. Kong's example was proof the mechanism (mTLS) is real and already running in this stack; Citadel is what extends that same mechanism to every internal service-to-service call, not just Kong's own plumbing.</p>
+    </div>
+  </details>
+
+  <div class="ask-your-teacher">
+    Something unclear — sidecars, istiod's consolidation, PeerAuthentication vs. AuthorizationPolicy, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: Istio's own <a href="https://istio.io/latest/docs/ops/deployment/architecture/">Architecture documentation</a> for the Pilot/Citadel/Galley consolidation into <code>istiod</code>, and <a href="https://istio.io/latest/docs/concepts/security/">Istio Security concepts documentation</a> for PeerAuthentication and AuthorizationPolicy.</p>
+
+  <div class="lesson-nav">
+    <a href="./0009-ingress-and-kong-as-ingress-controller.html">← Lesson 9: Ingress and Kong as Ingress Controller</a>
+    <a href="./0011-authn-vs-authz-end-to-end.html">Next: AuthN vs. AuthZ, End to End →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

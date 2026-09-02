@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 9 · Ingress and Kong as Ingress Controller</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Internet Networking Stack · Lesson 9 of 13</p>
+  <h1>Ingress and Kong as Ingress Controller</h1>
+  <p class="subtitle">What "Ingress" actually is, and the precise sense in which Kong <em>is</em> one.</p>
+
+  <p class="lede">This is the lesson the rest of Kubernetes networking has been building toward. Lessons 7 and 8 gave every Pod and every Service a stable, reachable address — but that's all Layer 4: IP addresses and ports. None of it understands hostnames or URL paths. That gap is exactly what <strong>Ingress</strong> fills, and Kong's specific role in filling it is what this lesson makes precise.</p>
+
+  <h2>The problem: Services don't speak HTTP</h2>
+
+  <p>Say you run three separate apps behind three hostnames — <code>app.example.com</code>, <code>admin.example.com</code>, <code>docs.example.com</code> — all in one cluster. Each has its own Service. But a Service, on its own, has no idea what a <code>Host</code> header is; it just forwards whatever arrives at its IP and port. Give each app its own <code>LoadBalancer</code> Service (Lesson 7) and you've provisioned three separate, separately-billed cloud load balancers, with no shared place to apply routing logic, TLS, or the auth/rate-limiting Lesson 6 covered. You want <em>one</em> entry point that reads the request's host and path and routes accordingly — HTTP-aware routing, which is a job a plain L4 Service structurally cannot do.</p>
+
+  <h2>What an Ingress resource actually is</h2>
+
+  <p>An <strong>Ingress</strong> is a Kubernetes API resource — a declarative record, like any other Kubernetes object — that describes HTTP(S) routing rules: which host and path should go to which Service. A minimal one reads roughly like this:</p>
+
+  <pre><code>apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app-routes
+spec:
+  ingressClassName: kong
+  rules:
+    - host: app.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: app-service
+                port:
+                  number: 80</code></pre>
+
+  <p>That's it — a mapping from <code>app.example.com/*</code> to the <code>app-service</code> Service. Kubernetes matches more specific paths first when a request could match more than one rule (an <code>Exact</code> path wins over a <code>Prefix</code> one) — the same "most specific wins" instinct Lesson 3's longest prefix match already taught you, one layer up the stack.</p>
+
+  <div class="callout warn">
+    <span class="callout-label">The single most important fact in this lesson</span>
+    <p>An Ingress resource, by itself, <strong>does nothing.</strong> It's a config record sitting in the cluster's API — like a route table with no router plugged in to read it. Creating one with no software watching for it changes nothing about how traffic actually flows. Something has to actively watch for Ingress resources and program a <em>real</em>, running proxy to actually enforce them. That something is an <strong>Ingress Controller</strong> — and it's the single detail most explanations of Ingress skip past.</p>
+  </div>
+
+  <h2>IngressClass: which controller claims which Ingress</h2>
+
+  <p>A cluster can run more than one Ingress Controller at once (or, before one is installed, none at all). The <code>ingressClassName</code> field in the example above — <code>kong</code> — says which controller should pick up this particular Ingress resource. Without a matching controller watching for that class, the resource just sits there, valid YAML, doing nothing, exactly as the callout above warned.</p>
+
+  <h2>Kong's specific role, made precise</h2>
+
+  <p>This is where Lesson 6 and Kubernetes finally connect directly. The <strong>Kong Ingress Controller (KIC)</strong> is Kong's own controller: it watches the cluster for Ingress resources (plus Kong-specific CRDs and, on newer setups, Gateway API <code>HTTPRoute</code> resources), and for every rule it sees, it automatically creates the matching Kong <strong>Route</strong> and Kong <strong>Service</strong> — the exact entities from Lesson 6 — and pushes that configuration to the running Kong Gateway data plane Pods, which are the thing actually proxying live traffic. This reconciliation happens continuously and in real time: edit the Ingress resource, and KIC updates Kong's configuration to match within moments, with no one touching Kong's admin API by hand.</p>
+
+  <div class="hop-flow">
+    <div class="hop">
+      <span class="hop-name">Ingress resource</span>
+      <span class="hop-detail">Declarative YAML — inert on its own</span>
+    </div>
+    <div class="hop-arrow">→</div>
+    <div class="hop edge">
+      <span class="hop-name">Kong Ingress Controller</span>
+      <span class="hop-detail">Watches the cluster, translates continuously</span>
+    </div>
+    <div class="hop-arrow">→</div>
+    <div class="hop edge">
+      <span class="hop-name">Kong Route + Service</span>
+      <span class="hop-detail">Lesson 6's exact entities, auto-generated</span>
+    </div>
+    <div class="hop-arrow">→</div>
+    <div class="hop">
+      <span class="hop-name">Kong data plane</span>
+      <span class="hop-detail">Actually proxies the live traffic</span>
+    </div>
+  </div>
+
+  <p>So when Lesson 1 drew "Kong" as hop 4 and Kubernetes docs talk about "the Ingress," they're not two separate systems that happen to sit near each other — in this deployment shape, <strong>Kong is the Ingress Controller.</strong> The Ingress resources you write are simply a Kubernetes-native way of configuring the same Kong Routes, Services, and Plugins Lesson 6 already taught you, instead of calling Kong's admin API directly.</p>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">A teammate applies a new Ingress resource routing <code>billing.example.com</code> to a <code>billing-service</code>, but no Kong Ingress Controller (or any other) is installed in the cluster yet. What happens when a request for <code>billing.example.com</code> arrives?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Kubernetes' API server stores the Ingress resource as valid config regardless of whether any controller is watching for it — there's no validation step that requires a controller to exist.">Kubernetes rejects the Ingress resource at creation time, since no controller exists to enforce it.</li>
+      <li data-option="b" data-explain="A Service (Lesson 7) is purely L4 — it doesn't parse Host headers or apply Ingress-style routing rules on its own. That's specifically the job Ingress plus a controller adds.">The billing-service's own ClusterIP handles the routing directly, since Ingress is just a hint layered on top of it.</li>
+      <li data-option="c" data-explain="Kubernetes doesn't fabricate infrastructure to satisfy a resource with no controller behind it — an Ingress resource is inert config, not a request that triggers automatic provisioning.">Kubernetes automatically provisions a default load balancer to satisfy the new rule.</li>
+      <li data-option="d" data-explain="Right. With no Ingress Controller watching for this IngressClass, the resource is just an inert record in the cluster's API — nothing is actually proxying traffic for it. The request either fails to route at all or falls through to whatever was already in place before the resource was created.">Nothing changes for real traffic — the Ingress resource just sits there unenforced until an Ingress Controller exists to act on it.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <details class="reveal">
+    <summary>Think first: Lesson 6 covered Kong Plugins scoped to a Route or Service via Kong's own admin API. If your team writes Ingress resources instead of touching Kong's admin API directly, how do you attach a plugin (say, rate limiting) to one specific Ingress rule?</summary>
+    <div class="reveal-body">
+      <p>Kong Ingress Controller supports Kong-specific Kubernetes annotations and CRDs (e.g. a <code>KongPlugin</code> resource, referenced from the Ingress via an annotation) that map directly onto Lesson 6's Plugin-scoping model — global, Service-level, Route-level, or Consumer-level. The mechanism underneath is identical to Lesson 6; only the interface changed, from Kong's admin API to Kubernetes-native YAML that KIC translates on your behalf.</p>
+    </div>
+  </details>
+
+  <div class="ask-your-teacher">
+    Something unclear — the Ingress resource itself, why it does nothing without a controller, exactly how KIC maps to Kong's Route/Service model, anything else? Ask your teacher (me) before moving on. This was the lesson you specifically asked for — good questions now are worth more than nodding along.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: Kubernetes' own <a href="https://kubernetes.io/docs/concepts/services-networking/ingress/">Ingress documentation</a> for the resource format, path-matching rules, and IngressClass; Kong's own <a href="https://developer.konghq.com/kubernetes-ingress-controller/ingress/">Kong Ingress Controller "Ingress" concept documentation</a> for exactly how an Ingress resource maps to a Kong Route and Service.</p>
+
+  <div class="lesson-nav">
+    <a href="./0008-pod-networking-and-the-cni.html">← Lesson 8: Pod Networking and the CNI</a>
+    <a href="./0010-the-service-mesh-and-citadel.html">Next: The Service Mesh and Citadel →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

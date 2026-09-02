@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 13 · Capstone: Trace a Real Request</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Internet Networking Stack · Lesson 13 of 13 — Capstone</p>
+  <h1>Capstone: Trace a Real Request</h1>
+  <p class="subtitle">Twelve lessons, one map. Time to walk it end to end — twice — then see if it transfers.</p>
+
+  <p class="lede">Three parts: a quick interleaved recall across all twelve lessons, two full request traces walked side by side, and a new scenario this course never touched, to test whether the mental model actually generalizes or just memorized well.</p>
+
+  <h2>Part 1: Rapid recall</h2>
+  <p class="subtitle">One question per lesson, deliberately out of order — interleaving is harder than reviewing in sequence, which is the point.</p>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">(Lesson 9) An Ingress resource exists in the cluster, but no Ingress Controller is watching for its IngressClass. What happens to matching traffic?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Wrong hop — see Lesson 9's callout on inert Ingress resources.">Kubernetes provisions a default controller automatically.</li>
+      <li data-option="b" data-explain="Wrong hop — see Lesson 9's callout on inert Ingress resources.">The nearest Service handles the routing directly.</li>
+      <li data-option="c" data-explain="Right — an Ingress resource with no matching controller is inert config, nothing more.">Nothing — the resource is inert config until a matching controller exists.</li>
+      <li data-option="d" data-explain="Wrong hop — see Lesson 9's callout on inert Ingress resources.">Kong claims it by default regardless of IngressClass.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">(Lesson 2) A subnet's route table has no route to an internet gateway, but an instance in it has a public IP attached. Is it reachable from the internet?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Right — public-vs-private is a routing fact, not an address fact.">No — routing, not the address itself, decides reachability.</li>
+      <li data-option="b" data-explain="Wrong — see Lesson 2's gotcha callout.">Yes — any public IP is reachable regardless of routing.</li>
+      <li data-option="c" data-explain="Wrong — see Lesson 2's gotcha callout.">Only if a NAT gateway is also present.</li>
+      <li data-option="d" data-explain="Wrong — see Lesson 2's gotcha callout.">Only during the TCP handshake, not afterward.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">(Lesson 5) Cloudflare is set to Flexible mode. Is the Cloudflare-to-origin leg encrypted?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Wrong — Flexible is specifically the one mode with no origin-side encryption.">Yes, always.</li>
+      <li data-option="b" data-explain="Wrong — Flexible is specifically the one mode with no origin-side encryption.">Yes, but only the certificate isn't validated.</li>
+      <li data-option="c" data-explain="Wrong — Flexible is specifically the one mode with no origin-side encryption.">Only if the origin requests it.</li>
+      <li data-option="d" data-explain="Right — Flexible mode leaves the second leg as plain HTTP.">No — Flexible mode leaves that leg as plain HTTP.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">(Lesson 7) kube-proxy, in its default mode, relays traffic through a running process sitting between client and Pod. True or false?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Wrong — see Lesson 7's clarification on kube-proxy's actual role.">True — kube-proxy proxies every packet itself.</li>
+      <li data-option="b" data-explain="Right — kube-proxy programs kernel rules; the kernel does the forwarding, not a running kube-proxy process.">False — it programs kernel rules (iptables/IPVS/eBPF) that the kernel itself uses to forward packets.</li>
+      <li data-option="c" data-explain="Wrong — see Lesson 7's clarification on kube-proxy's actual role.">True, but only for LoadBalancer-type Services.</li>
+      <li data-option="d" data-explain="Wrong — see Lesson 7's clarification on kube-proxy's actual role.">False — CoreDNS handles all the forwarding instead.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">(Lesson 4) A request for a static image gets a Cloudflare cache HIT. Did it reach the origin load balancer?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Wrong — a HIT means the origin wasn't contacted for this request.">Yes, to log the request.</li>
+      <li data-option="b" data-explain="Wrong — a HIT means the origin wasn't contacted for this request.">Yes, but only to revalidate the cached copy.</li>
+      <li data-option="c" data-explain="Right — HIT means served entirely from the edge.">No — a HIT is served entirely from Cloudflare's edge.</li>
+      <li data-option="d" data-explain="Wrong — a HIT means the origin wasn't contacted for this request.">Only if the WAF flagged it first.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">(Lesson 10) PeerAuthentication and AuthorizationPolicy answer the same question. True or false?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Right — PeerAuthentication is AuthN (how strict is mTLS); AuthorizationPolicy is AuthZ (what's allowed).">False — one governs mTLS strictness (AuthN), the other governs access rules (AuthZ).</li>
+      <li data-option="b" data-explain="Wrong — see Lesson 10's table distinguishing the two resources.">True — both configure certificate rotation.</li>
+      <li data-option="c" data-explain="Wrong — see Lesson 10's table distinguishing the two resources.">True — both are enforced by Kong, not Istio.</li>
+      <li data-option="d" data-explain="Wrong — see Lesson 10's table distinguishing the two resources.">False — AuthorizationPolicy is deprecated in favor of PeerAuthentication.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">(Lesson 3) A route table has both a <code>/16</code> and a more specific <code>/24</code> entry that could match a packet's destination. Which wins?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Wrong — see Lesson 3's longest prefix match rule.">The /16, since broader routes take priority.</li>
+      <li data-option="b" data-explain="Right — longest prefix match: the more specific route always wins.">The /24, since it's the more specific (longest prefix) match.</li>
+      <li data-option="c" data-explain="Wrong — routers deterministically resolve this via longest prefix match, not randomly.">Whichever route was added first.</li>
+      <li data-option="d" data-explain="Wrong — see Lesson 3's longest prefix match rule.">Neither — the packet is dropped as ambiguous.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">(Lesson 8) Two Pods on different nodes communicate via a VXLAN overlay. What is actually happening to their packets?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Wrong — see Lesson 8's overlay explanation.">They travel unwrapped, routed by BGP.</li>
+      <li data-option="b" data-explain="Wrong — see Lesson 8's overlay explanation.">They pass through Kong as an intermediate hop.</li>
+      <li data-option="c" data-explain="Wrong — see Lesson 8's overlay explanation.">They're translated via NAT at each node.</li>
+      <li data-option="d" data-explain="Right — VXLAN wraps the Pod packet inside a node-to-node packet, tunneling it.">They're encapsulated inside a packet addressed node-to-node, tunneling across the physical network.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">(Lesson 12) A 404 comes back with Kong's generic error body, no custom branding. Most likely cause?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Right — this is Kong's own 'no Route matched' response, not your application's.">No Kong Route matched this host/path — a routing-config issue, not an application one.</li>
+      <li data-option="b" data-explain="Wrong — an application-thrown 404 would typically use that application's own error format, not Kong's generic one.">The application's database query returned zero rows.</li>
+      <li data-option="c" data-explain="Wrong — see Lesson 12's guidance on reading the response body/headers.">Cloudflare's cache expired.</li>
+      <li data-option="d" data-explain="Wrong — see Lesson 12's guidance on reading the response body/headers.">The service mesh rejected the request for a mismatched identity.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">(Lesson 6) An expired JWT reaches a Kong Route with the jwt plugin attached. Does the request reach the Kubernetes Service?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Wrong — see Lesson 6's explanation of where the jwt plugin rejects.">Yes, and the Service itself rejects it.</li>
+      <li data-option="b" data-explain="Wrong — see Lesson 6's explanation of where the jwt plugin rejects.">Yes, and the application rejects it.</li>
+      <li data-option="c" data-explain="Right — Kong rejects it at the gateway; the Kubernetes Service never sees it.">No — Kong returns 401 itself, before the Service is ever involved.</li>
+      <li data-option="d" data-explain="Wrong — see Lesson 6's explanation of where the jwt plugin rejects.">It depends on which Pod would have handled it.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">(Lesson 1) On the six/thirteen-hop map, which two hops does a Cloudflare cache HIT skip entirely?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Wrong — DNS and the edge are always involved; caching skips what's past the edge.">DNS and the Cloudflare edge.</li>
+      <li data-option="b" data-explain="Right — a HIT is served from the edge, so nothing past it (origin, Kong, Kubernetes) is touched.">The origin load balancer and everything inside Kubernetes.</li>
+      <li data-option="c" data-explain="Wrong — Kong is skipped along with Kubernetes on a HIT, not run selectively.">Only Kong, while Kubernetes still runs a health check.</li>
+      <li data-option="d" data-explain="Wrong — caching doesn't touch the certificate chain question at all.">The TLS certificate chain validation step.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">(Lesson 11) A valid JWT passes Kong's auth check, but the application still returns 403. What's the correct read?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Wrong — authentication and authorization are different questions; passing one doesn't guarantee the other.">This shouldn't happen — Kong's approval should be final.</li>
+      <li data-option="b" data-explain="Wrong — see Lesson 11's authN/authZ distinction.">The token must actually be invalid despite Kong's check.</li>
+      <li data-option="c" data-explain="Wrong — see Lesson 11's authN/authZ distinction.">The service mesh silently overrode Kong's decision.</li>
+      <li data-option="d" data-explain="Right — authentication (Kong) and authorization (the app's business rule) are separate questions.">Authentication succeeded; authorization — a separate, later question — failed instead.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Part 2: Two full traces, side by side</h2>
+
+  <table>
+    <thead><tr><th>Hop</th><th>Static: <code>GET /app.bundle.js</code></th><th>Restricted: <code>POST /api/orders</code></th></tr></thead>
+    <tbody>
+      <tr><td>DNS</td><td>Resolves to Cloudflare's anycast IP</td><td>Same</td></tr>
+      <tr><td>Cloudflare edge</td><td>WAF/DDoS checks run, then a cache <strong>HIT</strong> — served immediately, nothing past this point runs</td><td>WAF/DDoS checks run, response is <strong>DYNAMIC</strong> — must continue on</td></tr>
+      <tr><td>Origin load balancer</td><td>— (never reached)</td><td>Reached, TLS re-established per the site's mode (Lesson 5), forwarded to Kong</td></tr>
+      <tr><td>Kong gateway</td><td>—</td><td><code>jwt</code> plugin validates the caller (Lesson 6); rate-limit plugin checks quota; Route matched to the orders Service</td></tr>
+      <tr><td>Kubernetes Service → Pod</td><td>—</td><td>kube-proxy picks a healthy Pod (Lesson 7); the CNI delivers the packet (Lesson 8)</td></tr>
+      <tr><td>Service mesh</td><td>—</td><td>mTLS-authenticated sidecar-to-sidecar hop if the order service calls another internal service; AuthorizationPolicy checks that call is allowed (Lesson 10)</td></tr>
+      <tr><td>Application</td><td>—</td><td>Checks the authenticated user actually owns this order (Lesson 11's fine-grained authZ) before writing anything</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Part 3: Transfer — a new scenario</h2>
+  <p class="subtitle">This course never covered video conferencing. If the mental model actually transferred, it shouldn't matter.</p>
+
+  <p>A SaaS video-conferencing product runs the same stack this course built: Cloudflare in front, Kong as the API gateway and Kubernetes Ingress Controller, a Kubernetes cluster with an Istio mesh inside. A user joins a meeting: the browser first calls <code>POST /api/meetings/42/join</code> (authenticated, returns a short-lived signaling token), then opens a long-lived WebSocket connection to a <code>signaling-service</code> Pod using that token, which in turn calls an internal <code>media-relay-service</code> to actually route audio/video packets between participants.</p>
+
+  <details class="reveal">
+    <summary>Think first: which layer(s) authenticate the WebSocket connection to signaling-service, and which authenticate the internal signaling-service → media-relay-service call? Are they the same mechanism?</summary>
+    <div class="reveal-body">
+      <p>No — they're different layers doing different jobs, exactly as Lesson 11's table laid out. The WebSocket connection carries the short-lived signaling token from the join call; Kong (or the app itself, since Kong's plugin support for long-lived WebSocket upgrades varies) validates that end-user-facing credential once at connection time. The internal <code>signaling-service</code> → <code>media-relay-service</code> call is a service-to-service hop entirely inside the mesh — it's authenticated via mTLS and each side's SPIFFE identity (Lesson 10), with an AuthorizationPolicy deciding whether <code>signaling-service</code>'s identity is even allowed to call <code>media-relay-service</code> at all. The end user's identity and the calling service's identity are two separate proofs, checked by two separate mechanisms.</p>
+    </div>
+  </details>
+
+  <details class="reveal">
+    <summary>Think first: would Cloudflare ever return a cache HIT for the join call's response? Why or why not?</summary>
+    <div class="reveal-body">
+      <p>No. The join response contains a signaling token scoped to one specific user and one specific meeting — serving a cached copy to the next caller would hand them someone else's session token entirely, a severe security failure, not a performance win. This is Lesson 11's static-vs-restricted distinction in its sharpest form: this response is about as restricted as a response gets, and Cloudflare (correctly configured) would mark it <code>DYNAMIC</code> and never cache it regardless of any <code>Cache-Control</code> header claiming otherwise on a response like this.</p>
+    </div>
+  </details>
+
+  <details class="reveal">
+    <summary>Think first: a user reports "meeting join works, but no video ever appears." Using Lesson 12's diagnostic habits, what's your first move — and what would distinguish a Kong-layer problem from a mesh-layer problem here?</summary>
+    <div class="reveal-body">
+      <p>Since the join call itself succeeds (Kong's auth check and Kubernetes routing to <code>signaling-service</code> are both working), the failure is most likely one hop further in: the internal <code>signaling-service</code> → <code>media-relay-service</code> call. Check that hop specifically — a mesh-layer problem (an AuthorizationPolicy blocking the call, or strict mTLS rejecting an unexpected identity) would show up as a connection failure or 403-equivalent between those two specific Pods, visible in the mesh's own logs/metrics, not as anything Kong or Cloudflare would ever see or report — those two layers already did their job successfully and have no visibility into a purely internal, Kong-bypassing service-to-service call.</p>
+    </div>
+  </details>
+
+  <div class="ask-your-teacher">
+    That's the whole course, walked end to end twice and then applied somewhere new. If any of the transfer questions felt shaky, that's exactly the signal for which lesson to revisit — tell your teacher (me) which one, and we'll go deeper.
+  </div>
+
+  <div class="lesson-nav">
+    <a href="./0012-error-codes-across-the-stack.html">← Lesson 12: Error Codes Across the Stack</a>
+    <a href="../index.html">Course overview</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

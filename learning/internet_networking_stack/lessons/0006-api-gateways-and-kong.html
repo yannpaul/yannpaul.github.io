@@ -8,7 +8,7 @@
 </head>
 <body>
 <main>
-  <p class="eyebrow">Internet Networking Stack · Lesson 6 of 11</p>
+  <p class="eyebrow">Internet Networking Stack · Lesson 6 of 13</p>
   <h1>API Gateways and Kong</h1>
   <p class="subtitle">What a plain load balancer doesn't do — and where end-user authentication actually gets checked.</p>
 
@@ -37,8 +37,8 @@
   <p>This is the detail worth being precise about: when a plugin like <code>key-auth</code> or <code>jwt</code> is attached to a Route, an invalid or missing credential means Kong itself returns <code>401 Unauthorized</code> — your upstream service, and the Kubernetes cluster behind it, never see the request at all. Kong checks the JWT's signature and claims (issuer, expiry) against the Consumer it identifies from the token; a bad signature or an expired token fails right there, at the gateway, before hop 5 of Lesson 1's map even begins.</p>
 
   <div class="callout">
-    <span class="callout-label">AuthN, not AuthZ — a distinction Lesson 9 makes precise</span>
-    <p>Kong answering "is this a valid, recognized caller?" is <strong>authentication</strong>. Whether that caller is allowed to, say, delete <em>this specific</em> order is a different question — <strong>authorization</strong> — and it's usually left to the application (or, as Lesson 8 will show, partly to the service mesh) rather than the gateway. Kong's plugins <em>can</em> do coarse authorization (this Consumer may call this Route at all), but fine-grained "can user 42 edit resource 99" logic almost always belongs downstream, where the business rules actually live.</p>
+    <span class="callout-label">AuthN, not AuthZ — a distinction Lesson 11 makes precise</span>
+    <p>Kong answering "is this a valid, recognized caller?" is <strong>authentication</strong>. Whether that caller is allowed to, say, delete <em>this specific</em> order is a different question — <strong>authorization</strong> — and it's usually left to the application (or, as Lesson 10 will show, partly to the service mesh) rather than the gateway. Kong's plugins <em>can</em> do coarse authorization (this Consumer may call this Route at all), but fine-grained "can user 42 edit resource 99" logic almost always belongs downstream, where the business rules actually live.</p>
   </div>
 
   <div class="quiz" data-answer="b">
@@ -65,7 +65,7 @@
 
   <h2>Kong as a Kubernetes Ingress Controller</h2>
 
-  <p>So far this lesson has treated Kong as a standalone proxy. In front of a Kubernetes cluster specifically, Kong usually runs as the <strong>Ingress Controller</strong>: it watches the cluster's Ingress/Gateway API resources and translates them into its own Routes, Services, and Plugins automatically, in real time, as those Kubernetes resources change. That's the bridge into Lesson 7 — Kong's data plane <em>is</em>, in that deployment, one more thing running inside (or just in front of) the very cluster it's routing into.</p>
+  <p>So far this lesson has treated Kong as a standalone proxy. In front of a Kubernetes cluster specifically, Kong usually runs as the <strong>Ingress Controller</strong>: it watches the cluster's Ingress/Gateway API resources and translates them into its own Routes, Services, and Plugins automatically, in real time, as those Kubernetes resources change. That's the bridge into Lesson 9, which is dedicated entirely to unpacking what an Ingress resource is and exactly how Kong plays this role — Kong's data plane <em>is</em>, in that deployment, one more thing running inside (or just in front of) the very cluster it's routing into.</p>
 
   <div class="ask-your-teacher">
     Something unclear — the Services/Routes/Plugins model, where auth actually gets checked, the control-plane/data-plane split, anything else? Ask your teacher (me) before moving on.
@@ -75,7 +75,7 @@
 
   <div class="lesson-nav">
     <a href="./0005-tls-and-certificates.html">← Lesson 5: TLS and Certificates</a>
-    <a href="../index.html">Course overview — Lessons 7+ coming next →</a>
+    <a href="./0007-kubernetes-services-and-kube-proxy.html">Next: Kubernetes Services and kube-proxy →</a>
   </div>
 </main>
 <script src="../assets/quiz.js"></script>

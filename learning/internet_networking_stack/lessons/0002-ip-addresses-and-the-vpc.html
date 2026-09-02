@@ -8,7 +8,7 @@
 </head>
 <body>
 <main>
-  <p class="eyebrow">Internet Networking Stack · Lesson 2 of 11</p>
+  <p class="eyebrow">Internet Networking Stack · Lesson 2 of 13</p>
   <h1>IP Addresses and the VPC</h1>
   <p class="subtitle">Why Kong and your Pods aren't directly reachable from the internet — and Cloudflare is.</p>
 
@@ -71,7 +71,7 @@
     </div>
   </div>
 
-  <p>Only the load balancer has an address the internet can dial directly — and in practice, even that's usually locked down to accept traffic only from Cloudflare's published IP ranges, not the whole internet. Kong, the Kubernetes nodes, and every Pod live on private addresses one or two layers further in. A Pod's IP, assigned by the cluster's CNI plugin, is typically private even relative to the node it runs on — reachable from other things inside the cluster's network, and from nowhere else. (You'll meet the CNI properly in Lesson 6.)</p>
+  <p>Only the load balancer has an address the internet can dial directly — and in practice, even that's usually locked down to accept traffic only from Cloudflare's published IP ranges, not the whole internet. Kong, the Kubernetes nodes, and every Pod live on private addresses one or two layers further in. A Pod's IP, assigned by the cluster's CNI plugin, is typically private even relative to the node it runs on — reachable from other things inside the cluster's network, and from nowhere else. (You'll meet the CNI properly in Lesson 8.)</p>
 
   <div class="quiz" data-answer="b">
     <p class="quiz-question">A Kubernetes worker node in a private subnet has a public IP address attached to it by mistake, but its subnet's route table still only routes internet-bound traffic to a NAT gateway. Can a stranger on the internet reach it directly?</p>

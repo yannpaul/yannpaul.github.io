@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 7 · Kubernetes Services and kube-proxy</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Internet Networking Stack · Lesson 7 of 13</p>
+  <h1>Kubernetes Services and kube-proxy</h1>
+  <p class="subtitle">Pods come and go constantly. Something has to give them a stable address anyway.</p>
+
+  <p class="lede">Lesson 1 called hop 5 "Kubernetes Service: picks one healthy Pod out of possibly many" and moved on. Time to open that box — starting with the problem it exists to solve, since Kubernetes' whole approach to networking only makes sense once you see what it's working around.</p>
+
+  <h2>The problem: Pods are not stable</h2>
+
+  <p>A Pod is disposable by design. It gets rescheduled to a different node, restarted after a crash, or replaced entirely during a rolling deploy — and every time, it's assigned a brand-new IP address (Lesson 8 covers exactly how). If Kong, or any other caller, had to track individual Pod IPs directly, every one of those routine events would break every connection pointed at it.</p>
+
+  <p>A <strong>Service</strong> is Kubernetes' fix: a stable virtual IP address and DNS name that sits in front of a <em>set</em> of Pods, so nothing outside that set ever needs to know which specific Pods currently exist behind it.</p>
+
+  <h2>How a Service knows which Pods are behind it</h2>
+
+  <p>A Service doesn't point at Pods by name — it points at a <strong>label selector</strong> (e.g. "every Pod labeled <code>app: orders</code>"). Kubernetes continuously tracks which Pods currently match that selector <em>and</em> are passing their readiness checks, recording the current, healthy set as an <strong>EndpointSlice</strong>. Add a Pod, remove a Pod, fail a health check — the EndpointSlice updates automatically, with no one editing the Service itself.</p>
+
+  <h2>Three ways to expose a Service</h2>
+
+  <table>
+    <thead><tr><th>Type</th><th>What it does</th><th>Reachable from</th></tr></thead>
+    <tbody>
+      <tr><td><strong>ClusterIP</strong></td><td>A stable virtual IP, valid only inside the cluster's own network. The default.</td><td>Other Pods in the cluster</td></tr>
+      <tr><td><strong>NodePort</strong></td><td>Everything ClusterIP does, plus the same port opened on every node's own IP.</td><td>Anything that can reach a node directly</td></tr>
+      <tr><td><strong>LoadBalancer</strong></td><td>Everything NodePort does, plus asks the cloud provider to provision a real external load balancer in front of it.</td><td>The internet, if the cloud LB is public</td></tr>
+    </tbody>
+  </table>
+
+  <p>In this course's map, the Kong data plane Pods typically sit behind a <code>LoadBalancer</code> Service (or the origin load balancer from Lesson 1 points at one) — that's how traffic crosses from "outside the cluster" to "inside it" at all. Everything Kong then forwards onward to your application, though, almost always targets a plain <code>ClusterIP</code> Service — internal traffic never needs a cloud load balancer of its own.</p>
+
+  <h2>kube-proxy: a configurer, not a proxy in the traffic path</h2>
+
+  <p>Despite the name, <strong>kube-proxy</strong> — a process running on every node — doesn't sit in the middle of each connection relaying bytes. In its default mode, it watches Services and EndpointSlices, and translates them into packet-forwarding rules installed directly in the node's kernel (via <code>iptables</code>, or the faster <code>IPVS</code>/eBPF-based alternatives on newer setups). When a packet arrives addressed to a Service's ClusterIP, the kernel itself — not a running kube-proxy process — rewrites the destination to one specific, currently-healthy Pod IP and forwards it on. kube-proxy's job is keeping those kernel rules in sync with reality as Pods and Services change, not sitting in the data path.</p>
+
+  <div class="callout">
+    <span class="callout-label">The DNS half of the story</span>
+    <p>Every Service also gets a stable cluster-internal DNS name — <code>my-service.my-namespace.svc.cluster.local</code> — resolved by the cluster's own DNS server (CoreDNS) to the Service's ClusterIP. This is how your application code finds another internal service at all: by name, never by chasing a Pod IP directly.</p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">A Pod backing an <code>orders</code> Service crashes and Kubernetes reschedules it, giving it a new IP. What has to change for other services still calling <code>orders.default.svc.cluster.local</code> to keep working?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Every caller would need to re-resolve DNS and reconnect on every single Pod restart if this were true — exactly what a Service exists to prevent.">Every caller must update its configuration with the new Pod IP.</li>
+      <li data-option="b" data-explain="kube-proxy reacts to the EndpointSlice update automatically; it doesn't need a person to intervene, and nothing about DNS itself needs touching either.">A person needs to manually update kube-proxy's rules to point at the new Pod IP.</li>
+      <li data-option="c" data-explain="Right. The Service's ClusterIP and DNS name never change. The EndpointSlice updates automatically to reflect the new, healthy Pod, and kube-proxy reprograms the kernel's forwarding rules to match — all invisible to every caller, who keeps using the same stable name and IP throughout.">Nothing, from a caller's point of view — the Service's IP and DNS name stay the same; only the EndpointSlice behind it updates.</li>
+      <li data-option="d" data-explain="CoreDNS resolves the Service name to the Service's ClusterIP, which doesn't change — it has no reason to re-resolve anything here.">DNS must re-resolve the service name to the new Pod's IP directly.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <details class="reveal">
+    <summary>Think first: why does Kong typically reach your application via a ClusterIP Service rather than a LoadBalancer Service, even though LoadBalancer "does more"?</summary>
+    <div class="reveal-body">
+      <p>A LoadBalancer Service provisions a real, often-billed cloud load balancer — useful for the one deliberately-public entry point into the cluster, but wasteful and unnecessary for traffic that's already inside the cluster. Kong is already inside the same network the application Pods are in (or one hop from it); a ClusterIP gives it a stable internal address with none of the external-facing machinery a LoadBalancer adds for traffic that was never going to arrive from outside anyway.</p>
+    </div>
+  </details>
+
+  <div class="ask-your-teacher">
+    Something unclear — label selectors and EndpointSlices, the three Service types, what kube-proxy actually does versus what its name implies, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: Kubernetes' own <a href="https://kubernetes.io/docs/concepts/services-networking/service/">Service documentation</a> and <a href="https://kubernetes.io/docs/reference/networking/virtual-ips/">Virtual IPs and Service Proxies</a> reference, which covers kube-proxy's iptables/IPVS/eBPF modes in detail.</p>
+
+  <div class="lesson-nav">
+    <a href="./0006-api-gateways-and-kong.html">← Lesson 6: API Gateways and Kong</a>
+    <a href="./0008-pod-networking-and-the-cni.html">Next: Pod Networking and the CNI →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

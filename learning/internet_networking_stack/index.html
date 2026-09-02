@@ -13,7 +13,7 @@
   <h1>The Internet Networking Stack</h1>
   <p class="subtitle">How a request actually gets from a browser to your code and back — Cloudflare, Kong, Kubernetes, and service-mesh auth — from the operator's side of a SaaS company.</p>
 
-  <p class="lede">Eleven short lessons, each a self-contained page with a quick retrieval-practice check. Start at Lesson 1 and work through in order — each one zooms into one hop of the map the first lesson draws, or one concern (auth, error codes, caching) that cuts across all of them.</p>
+  <p class="lede">Thirteen short lessons, each a self-contained page with a quick retrieval-practice check. Start at Lesson 1 and work through in order — each one zooms into one hop of the map the first lesson draws, or one concern (auth, error codes, caching) that cuts across all of them. The course is complete, start to capstone.</p>
 
   <h2>Lessons</h2>
   <ol>
@@ -23,16 +23,13 @@
     <li><a href="./lessons/0004-cloudflare-at-the-edge.html">Cloudflare at the Edge</a> — what a PoP does to a request in order (DDoS/rate checks, the WAF, cache lookup), what a cache HIT skips entirely, and the 522/524 errors specific to this one hop</li>
     <li><a href="./lessons/0005-tls-and-certificates.html">TLS and Certificates</a> — the handshake in one pass, the certificate chain, why Cloudflare's Flexible/Full/Full (Strict) modes decide whether the edge-to-origin leg is encrypted at all, and an mTLS preview</li>
     <li><a href="./lessons/0006-api-gateways-and-kong.html">API Gateways and Kong</a> — what a gateway centralizes that a load balancer doesn't, Kong's Services/Routes/Plugins/Consumers model, where end-user authentication actually gets checked, and Kong's own mTLS-secured control-plane/data-plane split</li>
-  </ol>
-
-  <h2>Coming up</h2>
-  <p class="subtitle">Planned, not yet written — each will zoom into one hop from Lesson 1 or one concern that cuts across the whole stack.</p>
-  <ol start="7">
-    <li><strong>Kubernetes Networking: Service → kube-proxy → Pod</strong> — ClusterIP/NodePort/LoadBalancer Services, how kube-proxy and the CNI actually deliver a packet to one Pod, and where an Ingress controller (Kong, again) fits in</li>
-    <li><strong>The Service Mesh and Citadel</strong> — sidecar proxies, mTLS between Pods, SPIFFE service identities issued by Istio's Citadel (now folded into <code>istiod</code>) — authentication between your own services, not end users</li>
-    <li><strong>AuthN vs. AuthZ, End to End</strong> — tying the edge, the gateway, the mesh, and the app together: who's proven who they are (authentication) vs. who's allowed to do what (authorization), and why static assets skip most of this entirely</li>
-    <li><strong>Error Codes Across the Stack</strong> — a diagnostic map from a single status code (401, 403, 404, 429, 500, 502, 503, 504, or a Cloudflare 52x) back to the one hop that produced it</li>
-    <li><strong>Capstone: Trace a Real Request</strong> — two full traces side by side (a static asset load vs. an authenticated API call) end to end, then a new scenario to test whether it transfers</li>
+    <li><a href="./lessons/0007-kubernetes-services-and-kube-proxy.html">Kubernetes Services and kube-proxy</a> — why Pods need a stable address in front of them, ClusterIP/NodePort/LoadBalancer, EndpointSlices, and what kube-proxy actually does (hint: it's not a proxy in the traffic path)</li>
+    <li><a href="./lessons/0008-pod-networking-and-the-cni.html">Pod Networking and the CNI</a> — the flat, NAT-free Pod networking model, veth pairs and the bridge for same-node delivery, overlay vs. underlay/BGP for cross-node, and who actually enforces a NetworkPolicy</li>
+    <li><a href="./lessons/0009-ingress-and-kong-as-ingress-controller.html">Ingress and Kong as Ingress Controller</a> — why Services can't do HTTP-aware routing, what an Ingress resource is (and why it does nothing alone), IngressClass, and the precise sense in which Kong <em>is</em> your Ingress Controller</li>
+    <li><a href="./lessons/0010-the-service-mesh-and-citadel.html">The Service Mesh and Citadel</a> — sidecar proxies, istiod (where Citadel actually lives now), SPIFFE workload identities, and PeerAuthentication vs. AuthorizationPolicy</li>
+    <li><a href="./lessons/0011-authn-vs-authz-end-to-end.html">AuthN vs. AuthZ, End to End</a> — every layer's authentication/authorization answer lined up in one table, and why static assets skip nearly all of it</li>
+    <li><a href="./lessons/0012-error-codes-across-the-stack.html">Error Codes Across the Stack</a> — a full diagnostic map from a status code to the hop that produced it, including same-code-different-layer traps like a 404 from Kong vs. a 404 from your app</li>
+    <li><a href="./lessons/0013-capstone-trace-a-real-request.html">Capstone: Trace a Real Request</a> — interleaved recall across all twelve lessons, two full traces side by side, then a new video-conferencing scenario to test whether it transfers</li>
   </ol>
 
   <div class="lesson-nav">

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 11 · AuthN vs. AuthZ, End to End</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Internet Networking Stack · Lesson 11 of 13</p>
+  <h1>AuthN vs. AuthZ, End to End</h1>
+  <p class="subtitle">The same two questions, asked by four different layers — and why a static asset barely asks them at all.</p>
+
+  <p class="lede">Every lesson since 4 has quietly reused the same two words. Time to collect them: <strong>authentication</strong> ("who are you, proven") and <strong>authorization</strong> ("given who you are, what are you allowed to do"). This lesson lines up every layer that asks one or both of those questions, then answers the other thing this course promised early on — why a static asset and a restricted one take genuinely different paths.</p>
+
+  <h2>Four layers, two questions, four different answers</h2>
+
+  <table>
+    <thead><tr><th>Layer</th><th>Authenticates?</th><th>Authorizes?</th></tr></thead>
+    <tbody>
+      <tr><td>Cloudflare edge (Lesson 4)</td><td>No — the WAF/DDoS checks filter <em>traffic</em>, not <em>identity</em></td><td>No</td></tr>
+      <tr><td>Kong gateway (Lesson 6)</td><td><strong>Yes</strong> — validates the end user's API key/JWT</td><td>Coarse only — "may this Consumer call this Route at all"</td></tr>
+      <tr><td>Service mesh / Citadel (Lesson 10)</td><td><strong>Yes</strong> — mTLS proves <em>service</em> identity, not end-user identity</td><td><strong>Yes</strong> — AuthorizationPolicy decides which service may call which</td></tr>
+      <tr><td>Application code</td><td>Rarely — usually trusts the identity Kong already established</td><td><strong>Yes</strong> — the fine-grained "can user 42 edit resource 99" business rule</td></tr>
+    </tbody>
+  </table>
+
+  <p>Notice what's missing: nobody before the application layer checks whether <em>this specific user</em> can touch <em>this specific record</em>. Kong knows the caller is a valid, authenticated user; the mesh knows the calling <em>service</em> is who it claims to be; only the application actually holds the business rule ("orders belong to the account that created them") needed to answer the fine-grained question. Every layer before it narrows down who could possibly be asking, but the last mile of authorization always lands in the code that knows the data.</p>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">A request carries a perfectly valid JWT — Kong's <code>jwt</code> plugin passes it through without complaint. The application then rejects the request anyway, because the authenticated user doesn't own the order they're trying to view. What just happened?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Kong's authentication check and the application's authorization check are two different questions — a valid token answers the first, not the second. There's no bug or redundancy here.">This is a bug — Kong should have caught this and never let the request through.</li>
+      <li data-option="b" data-explain="Kong deliberately doesn't hold the fine-grained business rule ("who owns which order") needed to answer this — that logic lives in the application specifically because only it has the data.">Kong re-checks authorization internally using its own copy of the ownership data.</li>
+      <li data-option="c" data-explain="Right. Kong's job was authentication — is this a real, valid caller — and it did that correctly. Whether this specific caller may see this specific order is authorization, a fine-grained business rule that only the application holds. Passing authentication doesn't imply passing authorization; they're different questions, checked by different layers.">Kong authenticated the caller successfully; the application then authorized (or in this case, denied) the specific action, which is a separate, later check.</li>
+      <li data-option="d" data-explain="The service mesh's AuthorizationPolicy governs which internal services may call which other services — it has no visibility into which end user is asking for which specific order.">The service mesh's AuthorizationPolicy is what actually rejected this request.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Static vs. restricted: why they take different paths</h2>
+
+  <p>Lesson 4 planted this and deferred it — now it's time to answer directly. A <strong>static resource</strong> (a JS bundle, a logo, a CSS file) is the same bytes for every visitor, with no notion of "who's asking" baked into the response at all. A <strong>restricted resource</strong> (an authenticated dashboard, an API response scoped to one account) is different for every caller, and serving the wrong one to the wrong person is a security incident, not a caching optimization.</p>
+
+  <table>
+    <thead><tr><th></th><th>Static resource</th><th>Restricted resource</th></tr></thead>
+    <tbody>
+      <tr><td>Cloudflare cache status</td><td>Can be <code>HIT</code> — origin never touched</td><td>Must stay <code>DYNAMIC</code> — caching it would leak one user's data to the next</td></tr>
+      <tr><td>Reaches Kong's auth plugin?</td><td>No, if served from cache — the request never got that far</td><td>Always — there's no cacheable shortcut around checking who's asking</td></tr>
+      <tr><td>Reaches the mesh / app authZ?</td><td>No</td><td>Yes — the full chain from this lesson's table above runs in full</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <span class="callout-label">The one-sentence version</span>
+    <p>A static resource can skip most of this course's hops entirely, because <em>nobody needs to be authenticated to receive it</em>. A restricted resource can't skip any of them, because every hop from Kong onward exists specifically to answer "who is this, and are they allowed" — questions a static asset never needed asked in the first place.</p>
+  </div>
+
+  <details class="reveal">
+    <summary>Think first: a marketing page at <code>/pricing</code> is fully static and cacheable — but it embeds a "Log in" button that calls an authenticated API. Does caching the pricing page at Cloudflare's edge create any risk for the authenticated API call?</summary>
+    <div class="reveal-body">
+      <p>No — the two are entirely separate requests on separate paths. Caching <code>/pricing</code>'s static HTML at the edge only affects that one response; the authenticated API call the login button triggers is its own request, carrying its own credentials, evaluated fresh by Kong and everything downstream every time. Caching is scoped per-response, not per-page — a cached static shell embedding a link to a dynamic endpoint creates no shortcut into that endpoint at all.</p>
+    </div>
+  </details>
+
+  <div class="ask-your-teacher">
+    Something unclear — the authN/authZ split across layers, why static assets skip so much of the stack, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">This lesson synthesizes claims already sourced in Lessons 4, 6, and 10 — see those lessons' citations for the underlying Cloudflare, Kong, and Istio documentation.</p>
+
+  <div class="lesson-nav">
+    <a href="./0010-the-service-mesh-and-citadel.html">← Lesson 10: The Service Mesh and Citadel</a>
+    <a href="./0012-error-codes-across-the-stack.html">Next: Error Codes Across the Stack →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

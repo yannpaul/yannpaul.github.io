@@ -8,7 +8,7 @@
 </head>
 <body>
 <main>
-  <p class="eyebrow">Internet Networking Stack · Lesson 4 of 11</p>
+  <p class="eyebrow">Internet Networking Stack · Lesson 4 of 13</p>
   <h1>Cloudflare at the Edge</h1>
   <p class="subtitle">What actually happens inside the second hop of Lesson 1's map, before your infrastructure ever hears about the request.</p>
 
@@ -68,7 +68,7 @@
 
   <div class="callout">
     <span class="callout-label">Where this is going</span>
-    <p>This HIT/DYNAMIC split is the seed of Lesson 9's static-vs-restricted-resources question: a static asset (a JS bundle, a logo) is exactly the kind of response that can be a HIT and skip your entire infrastructure, while a personalized, authenticated API response is exactly the kind that has to stay <code>DYNAMIC</code> — caching someone else's dashboard data for the next visitor would be a serious bug, not an optimization.</p>
+    <p>This HIT/DYNAMIC split is the seed of Lesson 11's static-vs-restricted-resources question: a static asset (a JS bundle, a logo) is exactly the kind of response that can be a HIT and skip your entire infrastructure, while a personalized, authenticated API response is exactly the kind that has to stay <code>DYNAMIC</code> — caching someone else's dashboard data for the next visitor would be a serious bug, not an optimization.</p>
   </div>
 
   <div class="quiz" data-answer="a">
@@ -84,7 +84,7 @@
 
   <h2>When the edge can't reach the origin at all</h2>
 
-  <p>On a cache miss, Cloudflare has to open a connection to your origin load balancer — and that hop can fail in ways specific to this one leg of the journey, surfaced as Cloudflare-specific error codes (the full diagnostic map comes in Lesson 10, but these two are worth knowing now since they're squarely about this lesson's hop):</p>
+  <p>On a cache miss, Cloudflare has to open a connection to your origin load balancer — and that hop can fail in ways specific to this one leg of the journey, surfaced as Cloudflare-specific error codes (the full diagnostic map comes in Lesson 12, but these two are worth knowing now since they're squarely about this lesson's hop):</p>
 
   <table>
     <thead><tr><th>Code</th><th>What it means</th></tr></thead>
@@ -105,7 +105,7 @@
     Something unclear — the DDoS/WAF/cache ordering, cache-control headers, the 522 vs. 524 distinction, anything else? Ask your teacher (me) before moving on.
   </div>
 
-  <p class="cite">Primary sources for this lesson: Cloudflare's own <a href="https://developers.cloudflare.com/cache/concepts/cache-control/">Cache-Control documentation</a> and <a href="https://developers.cloudflare.com/ddos-protection/frequently-asked-questions/">DDoS Protection FAQ</a> for the caching and mitigation mechanics; see Lesson 10 for the full error-code diagnostic map this lesson previews two entries of.</p>
+  <p class="cite">Primary sources for this lesson: Cloudflare's own <a href="https://developers.cloudflare.com/cache/concepts/cache-control/">Cache-Control documentation</a> and <a href="https://developers.cloudflare.com/ddos-protection/frequently-asked-questions/">DDoS Protection FAQ</a> for the caching and mitigation mechanics; see Lesson 12 for the full error-code diagnostic map this lesson previews two entries of.</p>
 
   <div class="lesson-nav">
     <a href="./0003-cidr-route-tables-and-traffic-direction.html">← Lesson 3: CIDR, Route Tables, and Traffic Direction</a>

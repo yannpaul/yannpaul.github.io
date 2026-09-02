@@ -8,7 +8,7 @@
 </head>
 <body>
 <main>
-  <p class="eyebrow">Internet Networking Stack · Lesson 5 of 11</p>
+  <p class="eyebrow">Internet Networking Stack · Lesson 5 of 13</p>
   <h1>TLS and Certificates</h1>
   <p class="subtitle">The mechanism behind the padlock, and why <em>where</em> it terminates matters as much as whether it's there.</p>
 
@@ -75,7 +75,7 @@
 
   <h2>A preview: what if both sides need to prove who they are?</h2>
 
-  <p>Everything above is <em>one-way</em> authentication — the client verifies the server's identity via its certificate, but the server has no cryptographic proof of who the client is (that's what login credentials are for, separately, at the application layer). <strong>Mutual TLS (mTLS)</strong> is the same handshake with both sides presenting a certificate, so each end cryptographically proves its identity to the other. This isn't hypothetical or exotic — it's already running inside this exact stack: Kong's own control-plane and data-plane nodes authenticate to each other via mTLS, and Lesson 8 will show it as the mechanism Istio's Citadel uses to give every Pod a verifiable identity. Same handshake as above; the difference is nobody skips the certificate check in either direction.</p>
+  <p>Everything above is <em>one-way</em> authentication — the client verifies the server's identity via its certificate, but the server has no cryptographic proof of who the client is (that's what login credentials are for, separately, at the application layer). <strong>Mutual TLS (mTLS)</strong> is the same handshake with both sides presenting a certificate, so each end cryptographically proves its identity to the other. This isn't hypothetical or exotic — it's already running inside this exact stack: Kong's own control-plane and data-plane nodes authenticate to each other via mTLS, and Lesson 10 will show it as the mechanism Istio's Citadel uses to give every Pod a verifiable identity. Same handshake as above; the difference is nobody skips the certificate check in either direction.</p>
 
   <div class="ask-your-teacher">
     Something unclear — the handshake steps, the certificate chain, why Flexible mode is risky, anything else? Ask your teacher (me) before moving on.

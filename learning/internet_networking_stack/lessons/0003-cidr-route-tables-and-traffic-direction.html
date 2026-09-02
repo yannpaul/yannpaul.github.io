@@ -8,7 +8,7 @@
 </head>
 <body>
 <main>
-  <p class="eyebrow">Internet Networking Stack · Lesson 3 of 11</p>
+  <p class="eyebrow">Internet Networking Stack · Lesson 3 of 13</p>
   <h1>CIDR, Route Tables, and Traffic Direction</h1>
   <p class="subtitle">Lesson 2 used <code>10.0.0.0/16</code> and route tables without fully unpacking them. Here's the mechanism.</p>
 
@@ -110,7 +110,7 @@
 
   <h3>The same direction split, one layer up</h3>
 
-  <p>Once a request is inside your Kubernetes cluster, the identical ingress/egress split reappears at the Pod level via a <strong>NetworkPolicy</strong>: an <code>ingress</code> section lists what's allowed to send <em>to</em> a Pod, an <code>egress</code> section lists what that Pod is allowed to send <em>to</em>. With no NetworkPolicy at all, a Pod allows all traffic both ways by default — the restrictive behavior only turns on once at least one policy selects that Pod. And Pod-to-Pod traffic needs both sides to agree: A can only reach B if A's egress rules allow sending to B <em>and</em> B's ingress rules allow receiving from A — this comes back in Lesson 7, once Services and Pods have been covered properly.</p>
+  <p>Once a request is inside your Kubernetes cluster, the identical ingress/egress split reappears at the Pod level via a <strong>NetworkPolicy</strong>: an <code>ingress</code> section lists what's allowed to send <em>to</em> a Pod, an <code>egress</code> section lists what that Pod is allowed to send <em>to</em>. With no NetworkPolicy at all, a Pod allows all traffic both ways by default — the restrictive behavior only turns on once at least one policy selects that Pod. And Pod-to-Pod traffic needs both sides to agree: A can only reach B if A's egress rules allow sending to B <em>and</em> B's ingress rules allow receiving from A — this comes back in Lesson 8, once Services and Pods have been covered properly.</p>
 
   <div class="ask-your-teacher">
     Something unclear — longest prefix match, the stateful/stateless split, anything else? Ask your teacher (me) before moving on.
