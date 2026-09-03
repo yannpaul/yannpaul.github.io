@@ -12,7 +12,7 @@
   <h1>Ingress and Kong as Ingress Controller</h1>
   <p class="subtitle">What "Ingress" actually is, and the precise sense in which Kong <em>is</em> one.</p>
 
-  <p class="lede">This is the lesson the rest of Kubernetes networking has been building toward. Lessons 7 and 8 gave every Pod and every Service a stable, reachable address — but that's all Layer 4: IP addresses and ports. None of it understands hostnames or URL paths. That gap is exactly what <strong>Ingress</strong> fills, and Kong's specific role in filling it is what this lesson makes precise.</p>
+  <p class="lede">This is the lesson the rest of Kubernetes networking has been building toward. Lessons 7 and 8 gave every Pod and every Service a stable, reachable address — but that's all Layer 4: a forwarding decision made from IP address and port alone (Lesson 3's route tables handle the IP part at Layer 3; a Service adds port-awareness on top), never by reading the connection's actual content. None of it understands hostnames or URL paths. That gap is exactly what <strong>Ingress</strong> fills, and Kong's specific role in filling it is what this lesson makes precise.</p>
 
   <h2>The problem: Services don't speak HTTP</h2>
 
