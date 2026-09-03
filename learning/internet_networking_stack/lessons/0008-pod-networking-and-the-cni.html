@@ -53,6 +53,12 @@
     </tbody>
   </table>
 
+  <div class="callout warn">
+    <span class="callout-label">At cluster scale: what overlay actually buys you (and what it costs)</span>
+    <p>It's tempting to think overlay networking is what separates Pod IPs from node IPs — it isn't; that separation is universal to every CNI, overlay or not. What overlay actually buys you is <strong>address-space independence</strong>: the Pod-IP range can be a large, private CIDR (a <code>/16</code>, say — 65,536 addresses) with no relationship to your real VPC's address space at all, since it only ever exists inside the tunnel. Cloud-native alternatives that skip the overlay — AWS's VPC CNI, GKE's VPC-native mode — hand Pods real, routable IPs straight from the VPC subnet instead: better performance and native compatibility with VPC-level tooling (security groups, flow logs), but now genuinely bounded by real VPC subnet size, and by a sharper limit most people don't expect first — each node's network interface can only hold so many secondary IPs (an AWS ENI limit tied to instance type), which is a common wall for clusters running many small Pods per node.</p>
+    <p>Overlay's encapsulation overhead (Lesson 8's table above) also stops being trivial at high east-west throughput — the CPU cost of wrapping/unwrapping every packet, and the reduced effective MTU, is why some large, performance-sensitive clusters choose BGP underlay (or an eBPF dataplane like Cilium in native-routing mode) specifically to eliminate it. And Pod networking isn't the only thing that stops scaling gracefully: Lesson 7's default iptables kube-proxy mode evaluates a roughly linear rule chain that gets slow with thousands of Services, which is why large clusters often move to IPVS or an eBPF dataplane there too.</p>
+  </div>
+
   <details class="reveal">
     <summary>Think first: a company runs Kubernetes on a restrictive cloud network that only allows standard TCP/UDP traffic between nodes — no custom IP protocols. Which approach, overlay or underlay/BGP, is more likely to work without special network configuration?</summary>
     <div class="reveal-body">
