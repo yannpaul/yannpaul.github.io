@@ -20,7 +20,7 @@
 
   <h2>Same node: a virtual cable and a virtual switch</h2>
 
-  <p>When a Pod is created, the CNI plugin creates a <strong>veth pair</strong> — think of it as a virtual ethernet cable with two ends: one end is placed inside the Pod's own network namespace (where the container sees it as its network interface), the other end stays on the host. That host-side end gets plugged into a <strong>bridge</strong> (commonly named <code>cni0</code>), which acts as a Layer 2 virtual switch connecting every Pod on that node.</p>
+  <p>When a Pod is created, the CNI plugin creates a <strong>veth pair</strong> — think of it as a virtual ethernet cable with two ends: one end is placed inside the Pod's own network namespace (where the container sees it as its network interface), the other end stays on the host. That host-side end gets plugged into a <strong>bridge</strong> (commonly named <code>cni0</code>) — a device, virtual here rather than physical, that joins multiple links into one by forwarding each frame to the port its destination MAC address lives on, with no IP awareness at all ("bridge" and "switch" mean the same thing today; <code>cni0</code> is a software one, connecting every Pod on that node).</p>
 
   <div class="hop-flow">
     <div class="hop">
@@ -48,7 +48,7 @@
   <table>
     <thead><tr><th>Approach</th><th>How it works</th><th>Trade-off</th></tr></thead>
     <tbody>
-      <tr><td><strong>Overlay</strong> (e.g. VXLAN)</td><td>Wraps the Pod-to-Pod packet inside another packet addressed node-to-node — a tunnel the underlying network just sees as ordinary traffic between two nodes it already knows how to reach.</td><td>Works on almost any network; costs ~50 bytes of overhead per packet for the extra wrapping.</td></tr>
+      <tr><td><strong>Overlay</strong> (e.g. VXLAN)</td><td>Uses <strong>tunneling</strong>: wraps the Pod-to-Pod packet entirely inside another packet addressed node-to-node — an envelope inside an envelope — so the underlying network only ever reads the outer, node-to-node address and just sees ordinary traffic between two nodes it already knows how to reach.</td><td>Works on almost any network; costs ~50 bytes of overhead per packet for the extra wrapping.</td></tr>
       <tr><td><strong>Underlay / BGP</strong></td><td>The physical network itself is taught the Pod IP routes directly (via BGP), so packets travel unwrapped.</td><td>Zero encapsulation overhead; requires a network fabric that supports BGP peering with the cluster's nodes.</td></tr>
     </tbody>
   </table>
