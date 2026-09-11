@@ -8,7 +8,7 @@
 </head>
 <body>
 <main>
-  <p class="eyebrow">Internet Networking Stack · Lesson 7 of 14</p>
+  <p class="eyebrow">Internet Networking Stack · Lesson 7 of 15</p>
   <h1>Kubernetes Services and kube-proxy</h1>
   <p class="subtitle">Pods come and go constantly. Something has to give them a stable address anyway.</p>
 
@@ -37,6 +37,11 @@
 
   <p>In this course's map, the Kong data plane Pods typically sit behind a <code>LoadBalancer</code> Service (or the origin load balancer from Lesson 1 points at one) — that's how traffic crosses from "outside the cluster" to "inside it" at all. Everything Kong then forwards onward to your application, though, almost always targets a plain <code>ClusterIP</code> Service — internal traffic never needs a cloud load balancer of its own.</p>
 
+  <div class="callout">
+    <span class="callout-label">Two more variants, for completeness</span>
+    <p>A <strong>headless Service</strong> (<code>clusterIP: None</code>) skips the virtual IP and kube-proxy rules entirely — DNS resolves straight to the individual Pod IPs behind it instead of one shared address, useful when a caller specifically needs to reach (or distinguish between) each Pod directly, as StatefulSets do. An <strong>ExternalName Service</strong> is thinner still: no proxying, no selector, just a DNS CNAME alias to some external hostname — a way to give an outside dependency a cluster-local name without Istio's ServiceEntry machinery (Lesson 11) or any traffic passing through kube-proxy at all. One more knob worth knowing: a plain ClusterIP Service can also be given <code>sessionAffinity: ClientIP</code>, which biases kube-proxy's otherwise near-random backend selection (Lesson 7's own topic) toward routing the same client to the same Pod repeatedly.</p>
+  </div>
+
   <h2>kube-proxy: a configurer, not a proxy in the traffic path</h2>
 
   <p>Despite the name, <strong>kube-proxy</strong> — a process running on every node — doesn't sit in the middle of each connection relaying bytes. In its default mode, it watches Services and EndpointSlices, and translates them into packet-forwarding rules installed directly in the node's kernel (via <code>iptables</code>, or the faster <code>IPVS</code>/eBPF-based alternatives on newer setups). When a packet arrives addressed to a Service's ClusterIP, the kernel itself — not a running kube-proxy process — rewrites the destination to one specific, currently-healthy Pod IP and forwards it on. kube-proxy's job is keeping those kernel rules in sync with reality as Pods and Services change, not sitting in the data path.</p>
@@ -63,7 +68,7 @@
 
   <div class="callout warn">
     <span class="callout-label">A stale rule is not the same failure as an application error</span>
-    <p>There's a real, if narrow, window where a kernel rule can point at a Pod that's already gone: a Pod crashes ungracefully, and there's a gap before the EndpointSlice updates and kube-proxy reprograms the kernel to match. A request that lands in that gap gets routed to an address where nothing is listening anymore — a <strong>connection-level failure</strong> (refused or timed out), surfacing upstream as a 502 or 504 (Lesson 12), before any application code ever ran. Compare that to a request that reaches a real, currently-running Pod, whose application code then decides to respond with a 500: that's a completed, successful network round trip carrying a failure <em>status</em> — nothing about the routing was wrong at all. Same eventual symptom ("the request failed"), completely different mechanism, and Lesson 12's habit of checking whether a connection was even established is exactly how to tell them apart.</p>
+    <p>There's a real, if narrow, window where a kernel rule can point at a Pod that's already gone: a Pod crashes ungracefully, and there's a gap before the EndpointSlice updates and kube-proxy reprograms the kernel to match. A request that lands in that gap gets routed to an address where nothing is listening anymore — a <strong>connection-level failure</strong> (refused or timed out), surfacing upstream as a 502 or 504 (Lesson 13), before any application code ever ran. Compare that to a request that reaches a real, currently-running Pod, whose application code then decides to respond with a 500: that's a completed, successful network round trip carrying a failure <em>status</em> — nothing about the routing was wrong at all. Same eventual symptom ("the request failed"), completely different mechanism, and Lesson 13's habit of checking whether a connection was even established is exactly how to tell them apart.</p>
   </div>
 
   <div class="quiz" data-answer="c">

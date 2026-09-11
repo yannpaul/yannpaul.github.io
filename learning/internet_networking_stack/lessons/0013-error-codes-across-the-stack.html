@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lesson 12 · Error Codes Across the Stack</title>
+<title>Lesson 13 · Error Codes Across the Stack</title>
 <link rel="stylesheet" href="../assets/styles.css">
 </head>
 <body>
 <main>
-  <p class="eyebrow">Internet Networking Stack · Lesson 12 of 14</p>
+  <p class="eyebrow">Internet Networking Stack · Lesson 13 of 15</p>
   <h1>Error Codes Across the Stack</h1>
   <p class="subtitle">Every hop in this course can fail. Each one fails with a different, readable signature.</p>
 
@@ -29,7 +29,7 @@
       <tr><td><strong>502 / 504</strong></td><td>Kong reached the Service but got a broken (502) or too-slow (504) response from it — the problem is one hop further in, at Kubernetes.</td></tr>
       <tr><td>Kubernetes (Lessons 7–9)</td><td><strong>503</strong> (from Kong)</td><td>No healthy Pod was available in the Service's EndpointSlice at all — Kong has nowhere to send the request.</td></tr>
       <tr><td rowspan="3">Application code</td><td><strong>400</strong></td><td>The request itself is malformed — bad JSON, a missing required field.</td></tr>
-      <tr><td><strong>403</strong></td><td>Authenticated, but not authorized for this specific action (Lesson 11) — a business-rule rejection, not a credentials problem.</td></tr>
+      <tr><td><strong>403</strong></td><td>Authenticated, but not authorized for this specific action (Lesson 12) — a business-rule rejection, not a credentials problem.</td></tr>
       <tr><td><strong>404 / 500</strong></td><td>The resource genuinely doesn't exist, or the application code itself threw an unhandled error.</td></tr>
     </tbody>
   </table>
@@ -73,8 +73,8 @@
   <p class="cite">This lesson synthesizes error codes already sourced in Lessons 4–6 (Cloudflare 52x, Kong's auth/rate-limit plugin behavior) and grounds the 400/401/403/404/429/500/502/503/504 semantics against standard HTTP status code references (e.g. MDN's HTTP response status code documentation).</p>
 
   <div class="lesson-nav">
-    <a href="./0011-authn-vs-authz-end-to-end.html">← Lesson 11: AuthN vs. AuthZ, End to End</a>
-    <a href="./0013-the-seven-osi-layers.html">Next: The Seven OSI Layers →</a>
+    <a href="./0012-authn-vs-authz-end-to-end.html">← Lesson 12: AuthN vs. AuthZ, End to End</a>
+    <a href="./0014-the-seven-osi-layers.html">Next: The Seven OSI Layers →</a>
   </div>
 </main>
 <script src="../assets/quiz.js"></script>

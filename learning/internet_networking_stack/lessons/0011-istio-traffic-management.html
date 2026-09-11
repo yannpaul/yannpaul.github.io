@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 11 · Istio Traffic Management</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Internet Networking Stack · Lesson 11 of 15</p>
+  <h1>Istio Traffic Management</h1>
+  <p class="subtitle">Lesson 10 covered who's allowed to call whom. This is what decides where a call actually goes — including calls that leave the mesh entirely.</p>
+
+  <p class="lede">Lesson 10 was scoped deliberately narrow: Citadel, PeerAuthentication, AuthorizationPolicy — the identity half of Istio. It left out an entire other set of resources: the ones that decide <em>how</em> a request is routed once identity is settled, and whether a call is even allowed to reach something outside the mesh at all. This lesson fills that in, ending with <strong>ServiceEntry</strong> — the piece that makes an external destination visible to Istio in the first place.</p>
+
+  <h2>VirtualService: the mesh's own routing rules</h2>
+
+  <p>A <strong>VirtualService</strong> does inside the mesh roughly what a Kong Route (Lesson 6) does at the edge, or an Ingress resource (Lesson 9) does at the cluster boundary: it matches a request — by hostname, path, headers — and decides where it goes. The difference is scope: a VirtualService governs traffic <em>between services already inside the mesh</em>, after Kong has already made its own routing decision and handed the request to a Pod's sidecar.</p>
+
+  <p>A VirtualService can also do things no earlier lesson's routing layer could: split traffic by percentage across versions (90% to <code>v1</code>, 10% to a <code>v2</code> canary), inject retries and timeouts, or deliberately inject faults to test resilience — all without touching application code.</p>
+
+  <h2>DestinationRule: what happens once a destination is picked</h2>
+
+  <p>A <strong>DestinationRule</strong> is the companion resource: where a VirtualService decides <em>where</em> traffic goes, a DestinationRule decides <em>how</em> to treat it once it's headed there — load balancing algorithm, connection pool limits, circuit-breaking (outlier detection) settings, and <strong>subsets</strong> (named groups of Pods, usually by version label) that a VirtualService's routing rules can then target by name.</p>
+
+  <div class="callout">
+    <span class="callout-label">The pairing, concretely</span>
+    <p>A DestinationRule defines <code>v1</code> and <code>v2</code> as subsets of the <code>orders</code> service (by Pod label). A VirtualService then says: 90% of traffic to <code>v1</code>, 10% to <code>v2</code>. Neither resource does anything useful alone — the DestinationRule has nothing to point traffic at without the VirtualService's routing rule, and the VirtualService can't reference a subset that doesn't exist yet.</p>
+  </div>
+
+  <table>
+    <thead><tr><th>Resource</th><th>Question it answers</th><th>Course parallel</th></tr></thead>
+    <tbody>
+      <tr><td><strong>VirtualService</strong></td><td>Which destination should this request go to?</td><td>Kong's Route (Lesson 6) — but for mesh-internal traffic</td></tr>
+      <tr><td><strong>DestinationRule</strong></td><td>Given that destination, on what terms — which subset, what load balancing, what circuit breaker?</td><td>Kong's Plugins (Lesson 6) — applied per-destination instead of per-Route</td></tr>
+    </tbody>
+  </table>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A team wants to send 10% of traffic to a new <code>v2</code> of the <code>payments</code> service as a canary, with the rest going to <code>v1</code>. Which resource actually expresses the 90/10 split?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A DestinationRule defines the v1/v2 subsets by label and their traffic policies — it doesn't itself express a percentage split between them.">DestinationRule — it defines the split directly.</li>
+      <li data-option="b" data-explain="Right. VirtualService's routing rules carry the weighted split (90/10) across subsets; DestinationRule only defines what those subsets are and how to treat each one once selected.">VirtualService — its routing rule carries the weighted split across the subsets a DestinationRule defines.</li>
+      <li data-option="c" data-explain="AuthorizationPolicy (Lesson 10) governs who may call a workload at all — it has no concept of weighted traffic splitting between versions.">AuthorizationPolicy — it decides which version an identity may call.</li>
+      <li data-option="d" data-explain="PeerAuthentication (Lesson 10) governs mTLS strictness — it has nothing to do with version splitting.">PeerAuthentication — strict mode routes a fixed percentage to each subset.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>ServiceEntry: making the outside world visible to Istio</h2>
+
+  <p>Everything above assumes the destination is already a Kubernetes Service Istio knows about. A <strong>ServiceEntry</strong> is how something <em>outside</em> the mesh — an external API, a legacy VM, a third-party service — gets added to Istio's own internal service registry, so it can be addressed, routed, and governed exactly like an internal one. A typical use: registering <code>api.stripe.com</code> so a payments service's calls to it get routed through the mesh's own traffic-management and observability, rather than slipping past Istio unnoticed.</p>
+
+  <div class="callout warn">
+    <span class="callout-label">Directly answering the question this lesson exists to answer</span>
+    <p>Without a ServiceEntry, an external destination is invisible to Istio's own configuration — it isn't a "thing" a VirtualService can route to, a DestinationRule can apply policy to, or (as the next section covers) an AuthorizationPolicy on an egress gateway can name. ServiceEntry is the resource that makes an external call a first-class citizen of the mesh's config model at all.</p>
+  </div>
+
+  <h2>The egress gate: outboundTrafficPolicy and the Sidecar resource</h2>
+
+  <p>Istio's mesh-wide default, <strong>ALLOW_ANY</strong>, lets every outbound call leave a Pod's sidecar untouched, whether or not Istio knows anything about the destination — easy to start with, but it means calls to unregistered destinations are neither observed nor governed by the mesh at all. Setting <code>outboundTrafficPolicy.mode</code> to <strong>REGISTRY_ONLY</strong> flips that: a sidecar will only let a call through to a destination already in Istio's service registry — a Kubernetes Service, or something a ServiceEntry has explicitly registered. Anything else is blocked at the sidecar before it ever leaves the Pod.</p>
+
+  <p>This is a genuinely different, coarser gate than either of the two egress mechanisms this course already covered — worth placing in order, since all three can be true or false independently for the same call:</p>
+
+  <div class="hop-flow">
+    <div class="hop">
+      <span class="hop-name">1. NetworkPolicy</span>
+      <span class="hop-detail">CNI/kernel level (Lesson 3, 8) — is this IP:port allowed to leave at all?</span>
+    </div>
+    <div class="hop-arrow">→</div>
+    <div class="hop edge">
+      <span class="hop-name">2. REGISTRY_ONLY</span>
+      <span class="hop-detail">Sidecar level — is this destination even known to Istio?</span>
+    </div>
+    <div class="hop-arrow">→</div>
+    <div class="hop edge">
+      <span class="hop-name">3. AuthorizationPolicy</span>
+      <span class="hop-detail">On an egress gateway (Lesson 10) — is this specific identity allowed to reach it?</span>
+    </div>
+  </div>
+
+  <p>A cluster can (and often does) run all three at once, each catching what the others don't: NetworkPolicy is a blunt, IP-level allowlist enforced before Istio ever sees the packet; REGISTRY_ONLY refuses to forward to anything Istio wasn't told about; an AuthorizationPolicy on an egress gateway adds identity-aware, per-caller rules on top of a destination that's already known.</p>
+
+  <p>The <strong>Sidecar</strong> resource is also how this default gets overridden per-namespace — a tooling namespace that genuinely needs unrestricted egress can carry its own Sidecar resource loosening the mesh-wide REGISTRY_ONLY default, without changing it everywhere. The same resource has a second, unrelated job worth knowing: scoping which services and namespaces a given sidecar actually bothers to track configuration for, which keeps a large mesh's per-Pod Envoy config from growing unbounded — the same "don't make every node hold state it doesn't need" instinct Lesson 8's CNI design and Lesson 7's EndpointSlice both share.</p>
+
+  <details class="reveal">
+    <summary>Think first: a workload calls an external API with no ServiceEntry registered for it, in a mesh running REGISTRY_ONLY. What actually happens, and which resource would fix it?</summary>
+    <div class="reveal-body">
+      <p>The sidecar blocks the call outright — REGISTRY_ONLY means an unregistered destination isn't reachable at all, regardless of NetworkPolicy or AuthorizationPolicy settings, since the block happens before either would even be relevant. The fix is a ServiceEntry registering that external host, which makes it a known destination the sidecar will forward to (and, from there, a VirtualService/DestinationRule pair or an egress-gateway AuthorizationPolicy could optionally govern further).</p>
+    </div>
+  </details>
+
+  <h2>A naming collision worth resolving: three things called "Gateway"</h2>
+
+  <p>By this point in the course, "Gateway" has meant three different things, and it's worth disambiguating explicitly rather than letting them blur:</p>
+
+  <table>
+    <thead><tr><th>"Gateway"</th><th>What it actually is</th></tr></thead>
+    <tbody>
+      <tr><td>Kubernetes Gateway API (Lesson 9)</td><td>The newer, more expressive alternative to the Ingress resource — still just declarative config, still inert without a controller.</td></tr>
+      <tr><td>Kong (this course's actual stack)</td><td>The thing running as the Ingress Controller (Lesson 9), proxying real traffic at the cluster boundary — hop 4 of Lesson 1's map.</td></tr>
+      <tr><td>Istio's own <code>Gateway</code> resource</td><td>A separate Istio config object that configures a dedicated ingress or egress proxy's L4–L6 listener (port, protocol, TLS) — paired with a VirtualService for the actual L7 routing rules attached to it.</td></tr>
+    </tbody>
+  </table>
+
+  <p>In this course's specific stack, Kong is the thing actually sitting at the boundary — Istio's own Gateway resource would typically only enter the picture if Kong were swapped out, or for a dedicated egress gateway specifically. Worth knowing it exists, so the name doesn't collide with Kong's role when you encounter it in Istio's own docs.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — VirtualService vs. DestinationRule, what ServiceEntry actually registers, the three-layer egress picture, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: Istio's own <a href="https://istio.io/latest/docs/concepts/traffic-management/">Traffic Management concepts documentation</a> for VirtualService/DestinationRule, <a href="https://istio.io/latest/docs/reference/config/networking/service-entry/">Service Entry reference documentation</a>, and <a href="https://istio.io/latest/docs/tasks/traffic-management/egress/egress-control/">"Accessing External Services"</a> for <code>outboundTrafficPolicy</code> and the Sidecar resource's egress-scoping role.</p>
+
+  <div class="lesson-nav">
+    <a href="./0010-the-service-mesh-and-citadel.html">← Lesson 10: The Service Mesh and Citadel</a>
+    <a href="./0012-authn-vs-authz-end-to-end.html">Next: AuthN vs. AuthZ, End to End →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

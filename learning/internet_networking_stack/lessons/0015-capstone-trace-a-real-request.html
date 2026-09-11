@@ -3,16 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lesson 14 · Capstone: Trace a Real Request</title>
+<title>Lesson 15 · Capstone: Trace a Real Request</title>
 <link rel="stylesheet" href="../assets/styles.css">
 </head>
 <body>
 <main>
-  <p class="eyebrow">Internet Networking Stack · Lesson 14 of 14 — Capstone</p>
+  <p class="eyebrow">Internet Networking Stack · Lesson 15 of 15 — Capstone</p>
   <h1>Capstone: Trace a Real Request</h1>
-  <p class="subtitle">Thirteen lessons, one map. Time to walk it end to end — twice — then see if it transfers.</p>
+  <p class="subtitle">Fourteen lessons, one map. Time to walk it end to end — twice — then see if it transfers.</p>
 
-  <p class="lede">Three parts: a quick interleaved recall across all thirteen lessons, two full request traces walked side by side, and a new scenario this course never touched, to test whether the mental model actually generalizes or just memorized well.</p>
+  <p class="lede">Three parts: a quick interleaved recall across all fourteen lessons, two full request traces walked side by side, and a new scenario this course never touched, to test whether the mental model actually generalizes or just memorized well.</p>
 
   <h2>Part 1: Rapid recall</h2>
   <p class="subtitle">One question per lesson, deliberately out of order — interleaving is harder than reviewing in sequence, which is the point.</p>
@@ -106,12 +106,12 @@
   </div>
 
   <div class="quiz" data-answer="a">
-    <p class="quiz-question">(Lesson 12) A 404 comes back with Kong's generic error body, no custom branding. Most likely cause?</p>
+    <p class="quiz-question">(Lesson 13) A 404 comes back with Kong's generic error body, no custom branding. Most likely cause?</p>
     <ul class="quiz-options">
       <li data-option="a" data-explain="Right — this is Kong's own 'no Route matched' response, not your application's.">No Kong Route matched this host/path — a routing-config issue, not an application one.</li>
       <li data-option="b" data-explain="Wrong — an application-thrown 404 would typically use that application's own error format, not Kong's generic one.">The application's database query returned zero rows.</li>
-      <li data-option="c" data-explain="Wrong — see Lesson 12's guidance on reading the response body/headers.">Cloudflare's cache expired.</li>
-      <li data-option="d" data-explain="Wrong — see Lesson 12's guidance on reading the response body/headers.">The service mesh rejected the request for a mismatched identity.</li>
+      <li data-option="c" data-explain="Wrong — see Lesson 13's guidance on reading the response body/headers.">Cloudflare's cache expired.</li>
+      <li data-option="d" data-explain="Wrong — see Lesson 13's guidance on reading the response body/headers.">The service mesh rejected the request for a mismatched identity.</li>
     </ul>
     <p class="quiz-feedback"></p>
   </div>
@@ -139,23 +139,34 @@
   </div>
 
   <div class="quiz" data-answer="d">
-    <p class="quiz-question">(Lesson 11) A valid JWT passes Kong's auth check, but the application still returns 403. What's the correct read?</p>
+    <p class="quiz-question">(Lesson 12) A valid JWT passes Kong's auth check, but the application still returns 403. What's the correct read?</p>
     <ul class="quiz-options">
       <li data-option="a" data-explain="Wrong — authentication and authorization are different questions; passing one doesn't guarantee the other.">This shouldn't happen — Kong's approval should be final.</li>
-      <li data-option="b" data-explain="Wrong — see Lesson 11's authN/authZ distinction.">The token must actually be invalid despite Kong's check.</li>
-      <li data-option="c" data-explain="Wrong — see Lesson 11's authN/authZ distinction.">The service mesh silently overrode Kong's decision.</li>
+      <li data-option="b" data-explain="Wrong — see Lesson 12's authN/authZ distinction.">The token must actually be invalid despite Kong's check.</li>
+      <li data-option="c" data-explain="Wrong — see Lesson 12's authN/authZ distinction.">The service mesh silently overrode Kong's decision.</li>
       <li data-option="d" data-explain="Right — authentication (Kong) and authorization (the app's business rule) are separate questions.">Authentication succeeded; authorization — a separate, later question — failed instead.</li>
     </ul>
     <p class="quiz-feedback"></p>
   </div>
 
   <div class="quiz" data-answer="c">
-    <p class="quiz-question">(Lesson 13) A Kubernetes Service matches traffic by ClusterIP and port, with no idea what HTTP host or path was requested. Which OSI layer does that put it at?</p>
+    <p class="quiz-question">(Lesson 14) A Kubernetes Service matches traffic by ClusterIP and port, with no idea what HTTP host or path was requested. Which OSI layer does that put it at?</p>
     <ul class="quiz-options">
       <li data-option="a" data-explain="Layer 2 is MAC-address switching within one segment (Lesson 8's bridge) — a Service doesn't operate there at all.">Layer 2 — it's just switching frames.</li>
       <li data-option="b" data-explain="Layer 3 is IP-only routing (Lesson 3's route tables) — a Service adds port-awareness on top of that.">Layer 3 — it only knows the IP address.</li>
       <li data-option="c" data-explain="Right — IP address plus port, with no content awareness, is exactly Layer 4. Kong, one layer up, is what reads the actual HTTP content (Layer 7).">Layer 4 — IP address and port, no content awareness.</li>
       <li data-option="d" data-explain="Layer 7 is content-aware routing by host/path/headers — that's precisely what a plain Service can't do, which is why Ingress and Kong exist.">Layer 7 — it reads the full HTTP request.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">(Lesson 11) An external API is called from inside the mesh, but with `outboundTrafficPolicy` set to REGISTRY_ONLY and no ServiceEntry registered for it. What happens?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="REGISTRY_ONLY's whole point is to stop exactly this — nothing outside the registry passes through unannounced.">The call passes through unobserved, same as the default ALLOW_ANY behavior.</li>
+      <li data-option="b" data-explain="Right — REGISTRY_ONLY blocks any destination the sidecar doesn't recognize from Istio's service registry, and a ServiceEntry is precisely what registers an external destination into it. With none registered, the sidecar has no way to know this call is allowed.">The sidecar blocks the call — an unregistered destination isn't in Istio's service registry at all.</li>
+      <li data-option="c" data-explain="A NetworkPolicy operates beneath Istio, at the CNI/kernel level — it isn't what REGISTRY_ONLY checks against.">Kubernetes' own NetworkPolicy decides instead, ignoring Istio's setting entirely.</li>
+      <li data-option="d" data-explain="AuthorizationPolicy governs identity-based access once a destination is already reachable — it doesn't create reachability for something REGISTRY_ONLY has already blocked.">An AuthorizationPolicy on the destination decides instead.</li>
     </ul>
     <p class="quiz-feedback"></p>
   </div>
@@ -170,8 +181,8 @@
       <tr><td>Origin load balancer</td><td>— (never reached)</td><td>Reached, TLS re-established per the site's mode (Lesson 5), forwarded to Kong</td></tr>
       <tr><td>Kong gateway</td><td>—</td><td><code>jwt</code> plugin validates the caller (Lesson 6); rate-limit plugin checks quota; Route matched to the orders Service</td></tr>
       <tr><td>Kubernetes Service → Pod</td><td>—</td><td>kube-proxy picks a healthy Pod (Lesson 7); the CNI delivers the packet (Lesson 8)</td></tr>
-      <tr><td>Service mesh</td><td>—</td><td>mTLS-authenticated sidecar-to-sidecar hop if the order service calls another internal service; AuthorizationPolicy checks that call is allowed (Lesson 10)</td></tr>
-      <tr><td>Application</td><td>—</td><td>Checks the authenticated user actually owns this order (Lesson 11's fine-grained authZ) before writing anything</td></tr>
+      <tr><td>Service mesh</td><td>—</td><td>mTLS-authenticated sidecar-to-sidecar hop if the order service calls another internal service; AuthorizationPolicy checks that call is allowed (Lesson 10); if it also calls an external payments API, a VirtualService/DestinationRule pair (Lesson 11) governs how, and a ServiceEntry is what let the call leave the mesh at all</td></tr>
+      <tr><td>Application</td><td>—</td><td>Checks the authenticated user actually owns this order (Lesson 12's fine-grained authZ) before writing anything</td></tr>
     </tbody>
   </table>
 
@@ -183,21 +194,28 @@
   <details class="reveal">
     <summary>Think first: which layer(s) authenticate the WebSocket connection to signaling-service, and which authenticate the internal signaling-service → media-relay-service call? Are they the same mechanism?</summary>
     <div class="reveal-body">
-      <p>No — they're different layers doing different jobs, exactly as Lesson 11's table laid out. The WebSocket connection carries the short-lived signaling token from the join call; Kong (or the app itself, since Kong's plugin support for long-lived WebSocket upgrades varies) validates that end-user-facing credential once at connection time. The internal <code>signaling-service</code> → <code>media-relay-service</code> call is a service-to-service hop entirely inside the mesh — it's authenticated via mTLS and each side's SPIFFE identity (Lesson 10), with an AuthorizationPolicy deciding whether <code>signaling-service</code>'s identity is even allowed to call <code>media-relay-service</code> at all — enforced, per Lesson 10, on <code>media-relay-service</code>'s own inbound side, not as a rule attached to <code>signaling-service</code>'s outbound calls. The end user's identity and the calling service's identity are two separate proofs, checked by two separate mechanisms.</p>
+      <p>No — they're different layers doing different jobs, exactly as Lesson 12's table laid out. The WebSocket connection carries the short-lived signaling token from the join call; Kong (or the app itself, since Kong's plugin support for long-lived WebSocket upgrades varies) validates that end-user-facing credential once at connection time. The internal <code>signaling-service</code> → <code>media-relay-service</code> call is a service-to-service hop entirely inside the mesh — it's authenticated via mTLS and each side's SPIFFE identity (Lesson 10), with an AuthorizationPolicy deciding whether <code>signaling-service</code>'s identity is even allowed to call <code>media-relay-service</code> at all — enforced, per Lesson 10, on <code>media-relay-service</code>'s own inbound side, not as a rule attached to <code>signaling-service</code>'s outbound calls. The end user's identity and the calling service's identity are two separate proofs, checked by two separate mechanisms.</p>
     </div>
   </details>
 
   <details class="reveal">
     <summary>Think first: would Cloudflare ever return a cache HIT for the join call's response? Why or why not?</summary>
     <div class="reveal-body">
-      <p>No. The join response contains a signaling token scoped to one specific user and one specific meeting — serving a cached copy to the next caller would hand them someone else's session token entirely, a severe security failure, not a performance win. This is Lesson 11's static-vs-restricted distinction in its sharpest form: this response is about as restricted as a response gets, and Cloudflare (correctly configured) would mark it <code>DYNAMIC</code> and never cache it regardless of any <code>Cache-Control</code> header claiming otherwise on a response like this.</p>
+      <p>No. The join response contains a signaling token scoped to one specific user and one specific meeting — serving a cached copy to the next caller would hand them someone else's session token entirely, a severe security failure, not a performance win. This is Lesson 12's static-vs-restricted distinction in its sharpest form: this response is about as restricted as a response gets, and Cloudflare (correctly configured) would mark it <code>DYNAMIC</code> and never cache it regardless of any <code>Cache-Control</code> header claiming otherwise on a response like this.</p>
     </div>
   </details>
 
   <details class="reveal">
-    <summary>Think first: a user reports "meeting join works, but no video ever appears." Using Lesson 12's diagnostic habits, what's your first move — and what would distinguish a Kong-layer problem from a mesh-layer problem here?</summary>
+    <summary>Think first: a user reports "meeting join works, but no video ever appears." Using Lesson 13's diagnostic habits, what's your first move — and what would distinguish a Kong-layer problem from a mesh-layer problem here?</summary>
     <div class="reveal-body">
       <p>Since the join call itself succeeds (Kong's auth check and Kubernetes routing to <code>signaling-service</code> are both working), the failure is most likely one hop further in: the internal <code>signaling-service</code> → <code>media-relay-service</code> call. Check that hop specifically — a mesh-layer problem (an AuthorizationPolicy blocking the call, or strict mTLS rejecting an unexpected identity) would show up as a connection failure or 403-equivalent between those two specific Pods, visible in the mesh's own logs/metrics, not as anything Kong or Cloudflare would ever see or report — those two layers already did their job successfully and have no visibility into a purely internal, Kong-bypassing service-to-service call.</p>
+    </div>
+  </details>
+
+  <details class="reveal">
+    <summary>Think first: <code>media-relay-service</code> also needs to reach a third-party STUN/TURN service out on the open internet to help participants behind restrictive NATs connect. What does that call need that a purely internal call to <code>signaling-service</code> doesn't?</summary>
+    <div class="reveal-body">
+      <p>A <strong>ServiceEntry</strong> (Lesson 11) registering that external STUN/TURN host into Istio's service registry — without it, and if the mesh runs with <code>outboundTrafficPolicy: REGISTRY_ONLY</code>, the sidecar has no way to know the destination is allowed and blocks the call outright. A purely internal call to <code>signaling-service</code> needs no such registration, since Kubernetes' own Service object already makes it a known, in-mesh destination. This is the same "is this destination even known" gate Lesson 11 walked through with external APIs generally — a third-party real-time service is just another instance of it.</p>
     </div>
   </details>
 
@@ -206,7 +224,7 @@
   </div>
 
   <div class="lesson-nav">
-    <a href="./0013-the-seven-osi-layers.html">← Lesson 13: The Seven OSI Layers</a>
+    <a href="./0014-the-seven-osi-layers.html">← Lesson 14: The Seven OSI Layers</a>
     <a href="../index.html">Course overview</a>
   </div>
 </main>
