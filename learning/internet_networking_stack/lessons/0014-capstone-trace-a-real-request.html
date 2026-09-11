@@ -3,16 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lesson 13 · Capstone: Trace a Real Request</title>
+<title>Lesson 14 · Capstone: Trace a Real Request</title>
 <link rel="stylesheet" href="../assets/styles.css">
 </head>
 <body>
 <main>
-  <p class="eyebrow">Internet Networking Stack · Lesson 13 of 13 — Capstone</p>
+  <p class="eyebrow">Internet Networking Stack · Lesson 14 of 14 — Capstone</p>
   <h1>Capstone: Trace a Real Request</h1>
-  <p class="subtitle">Twelve lessons, one map. Time to walk it end to end — twice — then see if it transfers.</p>
+  <p class="subtitle">Thirteen lessons, one map. Time to walk it end to end — twice — then see if it transfers.</p>
 
-  <p class="lede">Three parts: a quick interleaved recall across all twelve lessons, two full request traces walked side by side, and a new scenario this course never touched, to test whether the mental model actually generalizes or just memorized well.</p>
+  <p class="lede">Three parts: a quick interleaved recall across all thirteen lessons, two full request traces walked side by side, and a new scenario this course never touched, to test whether the mental model actually generalizes or just memorized well.</p>
 
   <h2>Part 1: Rapid recall</h2>
   <p class="subtitle">One question per lesson, deliberately out of order — interleaving is harder than reviewing in sequence, which is the point.</p>
@@ -128,7 +128,7 @@
   </div>
 
   <div class="quiz" data-answer="b">
-    <p class="quiz-question">(Lesson 1) On the six/thirteen-hop map, which two hops does a Cloudflare cache HIT skip entirely?</p>
+    <p class="quiz-question">(Lesson 1) On the six-hop map, which two hops does a Cloudflare cache HIT skip entirely?</p>
     <ul class="quiz-options">
       <li data-option="a" data-explain="Wrong — DNS and the edge are always involved; caching skips what's past the edge.">DNS and the Cloudflare edge.</li>
       <li data-option="b" data-explain="Right — a HIT is served from the edge, so nothing past it (origin, Kong, Kubernetes) is touched.">The origin load balancer and everything inside Kubernetes.</li>
@@ -145,6 +145,17 @@
       <li data-option="b" data-explain="Wrong — see Lesson 11's authN/authZ distinction.">The token must actually be invalid despite Kong's check.</li>
       <li data-option="c" data-explain="Wrong — see Lesson 11's authN/authZ distinction.">The service mesh silently overrode Kong's decision.</li>
       <li data-option="d" data-explain="Right — authentication (Kong) and authorization (the app's business rule) are separate questions.">Authentication succeeded; authorization — a separate, later question — failed instead.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">(Lesson 13) A Kubernetes Service matches traffic by ClusterIP and port, with no idea what HTTP host or path was requested. Which OSI layer does that put it at?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Layer 2 is MAC-address switching within one segment (Lesson 8's bridge) — a Service doesn't operate there at all.">Layer 2 — it's just switching frames.</li>
+      <li data-option="b" data-explain="Layer 3 is IP-only routing (Lesson 3's route tables) — a Service adds port-awareness on top of that.">Layer 3 — it only knows the IP address.</li>
+      <li data-option="c" data-explain="Right — IP address plus port, with no content awareness, is exactly Layer 4. Kong, one layer up, is what reads the actual HTTP content (Layer 7).">Layer 4 — IP address and port, no content awareness.</li>
+      <li data-option="d" data-explain="Layer 7 is content-aware routing by host/path/headers — that's precisely what a plain Service can't do, which is why Ingress and Kong exist.">Layer 7 — it reads the full HTTP request.</li>
     </ul>
     <p class="quiz-feedback"></p>
   </div>
@@ -172,7 +183,7 @@
   <details class="reveal">
     <summary>Think first: which layer(s) authenticate the WebSocket connection to signaling-service, and which authenticate the internal signaling-service → media-relay-service call? Are they the same mechanism?</summary>
     <div class="reveal-body">
-      <p>No — they're different layers doing different jobs, exactly as Lesson 11's table laid out. The WebSocket connection carries the short-lived signaling token from the join call; Kong (or the app itself, since Kong's plugin support for long-lived WebSocket upgrades varies) validates that end-user-facing credential once at connection time. The internal <code>signaling-service</code> → <code>media-relay-service</code> call is a service-to-service hop entirely inside the mesh — it's authenticated via mTLS and each side's SPIFFE identity (Lesson 10), with an AuthorizationPolicy deciding whether <code>signaling-service</code>'s identity is even allowed to call <code>media-relay-service</code> at all. The end user's identity and the calling service's identity are two separate proofs, checked by two separate mechanisms.</p>
+      <p>No — they're different layers doing different jobs, exactly as Lesson 11's table laid out. The WebSocket connection carries the short-lived signaling token from the join call; Kong (or the app itself, since Kong's plugin support for long-lived WebSocket upgrades varies) validates that end-user-facing credential once at connection time. The internal <code>signaling-service</code> → <code>media-relay-service</code> call is a service-to-service hop entirely inside the mesh — it's authenticated via mTLS and each side's SPIFFE identity (Lesson 10), with an AuthorizationPolicy deciding whether <code>signaling-service</code>'s identity is even allowed to call <code>media-relay-service</code> at all — enforced, per Lesson 10, on <code>media-relay-service</code>'s own inbound side, not as a rule attached to <code>signaling-service</code>'s outbound calls. The end user's identity and the calling service's identity are two separate proofs, checked by two separate mechanisms.</p>
     </div>
   </details>
 
@@ -195,7 +206,7 @@
   </div>
 
   <div class="lesson-nav">
-    <a href="./0012-error-codes-across-the-stack.html">← Lesson 12: Error Codes Across the Stack</a>
+    <a href="./0013-the-seven-osi-layers.html">← Lesson 13: The Seven OSI Layers</a>
     <a href="../index.html">Course overview</a>
   </div>
 </main>

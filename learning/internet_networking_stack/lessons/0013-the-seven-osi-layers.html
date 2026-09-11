@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 13 · The Seven OSI Layers</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Internet Networking Stack · Lesson 13 of 14</p>
+  <h1>The Seven OSI Layers</h1>
+  <p class="subtitle">A name for the ladder this whole course has been climbing, plus a way to hold it in memory.</p>
+
+  <p class="lede">"Layer 2," "Layer 4," "Layer 7" — this course has used all three by name, in Lessons 3, 6, 7, 8, and 9, without ever laying out the full model they come from. This lesson closes that gap: the complete seven-layer stack, one course example tied to each layer that has one, and a mnemonic for keeping all seven straight.</p>
+
+  <h2>The idea underneath all seven layers</h2>
+
+  <p>Each layer is defined by <strong>how much of a packet a device is willing to look at</strong> to make its forwarding decision. The higher the layer, the more of the actual content gets read. Layer 1 only cares that a signal exists at all; Layer 7 reads the full request and understands what it means.</p>
+
+  <h2>The stack, bottom to top</h2>
+
+  <table>
+    <thead><tr><th>#</th><th>Layer</th><th>What it looks at</th><th>Course example</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><strong>Physical</strong></td><td>Raw bits over a medium — electrical voltage, light pulses, radio waves</td><td>Cabling, NICs — the literal floor everything else sits on; no dedicated lesson, since nothing above it needs to touch this directly</td></tr>
+      <tr><td>2</td><td><strong>Data Link</strong></td><td>MAC addresses, within one shared local segment</td><td>The <code>cni0</code> bridge (Lesson 8) — switching, not routing</td></tr>
+      <tr><td>3</td><td><strong>Network</strong></td><td>IP addresses, across networks — this is what "routing," strictly, means</td><td>A route table's longest-prefix-match decision, and BGP underlay Pod networking (Lesson 3, Lesson 8)</td></tr>
+      <tr><td>4</td><td><strong>Transport</strong></td><td>IP address <em>and</em> port (TCP/UDP), still no content awareness</td><td>A Kubernetes Service and kube-proxy (Lesson 7) — matches ClusterIP:port, nothing more</td></tr>
+      <tr><td>5</td><td><strong>Session</strong></td><td>Establishing, maintaining, and tearing down a conversation between two hosts</td><td>No clean example in this course — see the callout below</td></tr>
+      <tr><td>6</td><td><strong>Presentation</strong></td><td>Data format, encoding, encryption/decryption</td><td>TLS's encryption (Lesson 5) conceptually lives here — though no one builds TLS as literally "a Layer 6 implementation"</td></tr>
+      <tr><td>7</td><td><strong>Application</strong></td><td>The actual protocol content — hostnames, paths, headers, meaning</td><td>Kong reading a <code>Host</code> header and URL path (Lessons 6, 9) — the first layer in this course's map that can route by <em>intent</em></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout warn">
+    <span class="callout-label">Why Layers 5 and 6 feel unfamiliar</span>
+    <p>That's normal, not a gap in what you've learned. Real-world protocols don't cleanly map to one OSI layer each — TLS (Lesson 5) blends what the model calls Session and Presentation concerns into one thing; HTTP folds Session-like behavior (cookies, keep-alive) into an Application-layer protocol. This is exactly why this course, and most working engineers, talk almost exclusively in <strong>L2 / L3 / L4 / L7</strong> shorthand: those are the layers with a distinct, nameable piece of software doing the work (a bridge, a router, a Service, a gateway). Layers 5 and 6 are still correct, official parts of the model — they're just rarely the layer anyone points to when describing a real system, this one included.</p>
+  </div>
+
+  <h2>Holding all seven in memory</h2>
+
+  <p>Bottom to top — Physical, Data Link, Network, Transport, Session, Presentation, Application — the standard mnemonic is:</p>
+
+  <p class="lede" style="text-align:center"><strong>"Please Do Not Throw Sausage Pizza Away"</strong></p>
+
+  <p>Top to bottom, the common alternative is <strong>"All People Seem To Need Data Processing"</strong> (Application, Presentation, Session, Transport, Network, Data Link, Physical) — useful if you prefer thinking from the request's intent down to the wire, which is closer to how this course actually walked through the stack (Lesson 9's Kong reading intent, down through Lesson 7's Service, down to Lesson 8's bridge).</p>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">In "Please Do Not Throw Sausage Pizza Away," which word corresponds to the layer Lesson 3's route tables operate at?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="\"Do\" is Data Link (Layer 2) — the cni0 bridge from Lesson 8, not route tables.">"Do" (Data Link)</li>
+      <li data-option="b" data-explain="\"Please\" is Physical (Layer 1) — raw signal transmission, not addressing of any kind.">"Please" (Physical)</li>
+      <li data-option="c" data-explain="Right. \"Not\" is Network — Layer 3, IP-address-based routing, exactly what a route table's longest prefix match does.">"Not" (Network)</li>
+      <li data-option="d" data-explain="\"Throw\" is Transport (Layer 4) — port-aware matching like a Kubernetes Service, not IP-only routing.">"Throw" (Transport)</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <details class="reveal">
+    <summary>Think first: name one concept from this course that lives at Layer 2, one at Layer 3, one at Layer 4, and one at Layer 7 — without looking back at the table above.</summary>
+    <div class="reveal-body">
+      <p><strong>Layer 2:</strong> the <code>cni0</code> bridge (Lesson 8) switching frames between Pods on the same node by MAC address. <strong>Layer 3:</strong> a route table's longest-prefix-match decision (Lesson 3), or BGP underlay Pod routing (Lesson 8) — both forward by IP address across networks. <strong>Layer 4:</strong> a Kubernetes Service and kube-proxy (Lesson 7) — matches ClusterIP and port, nothing more. <strong>Layer 7:</strong> Kong, whether as a plain gateway (Lesson 6) or as Ingress Controller (Lesson 9), reading the actual <code>Host</code> header and path to decide where a request goes. If any of these didn't come to mind immediately, that lesson is worth a quick re-read before the capstone.</p>
+    </div>
+  </details>
+
+  <div class="ask-your-teacher">
+    Something unclear — the layer boundaries, why 5/6 feel thin, the mnemonics, anything else? Ask your teacher (me) before moving on to the capstone.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: the ISO/IEC 7498-1 OSI reference model standard for the canonical seven-layer definition, and standard networking references (e.g. Cloudflare's and CompTIA's own OSI model explainers) for the "Please Do Not Throw Sausage Pizza Away" / "All People Seem To Need Data Processing" mnemonics this lesson uses.</p>
+
+  <div class="lesson-nav">
+    <a href="./0012-error-codes-across-the-stack.html">← Lesson 12: Error Codes Across the Stack</a>
+    <a href="./0014-capstone-trace-a-real-request.html">Next: Capstone — Trace a Real Request →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

@@ -8,7 +8,7 @@
 </head>
 <body>
 <main>
-  <p class="eyebrow">Internet Networking Stack · Lesson 10 of 13</p>
+  <p class="eyebrow">Internet Networking Stack · Lesson 10 of 14</p>
   <h1>The Service Mesh and Citadel</h1>
   <p class="subtitle">Kong secured the traffic entering the cluster. This is what secures every hop after that.</p>
 
@@ -50,6 +50,12 @@
   </table>
 
   <p>PeerAuthentication in <strong>permissive</strong> mode accepts both mTLS and plaintext traffic — useful while migrating a mesh incrementally, so nothing breaks mid-rollout. <strong>Strict</strong> mode rejects any connection that doesn't present a valid certificate at all. AuthorizationPolicy only makes sense once identity is established — it's the layer that decides what a now-verified caller may actually reach.</p>
+
+  <div class="callout warn">
+    <span class="callout-label">AuthorizationPolicy is ingress-only, not symmetric like NetworkPolicy</span>
+    <p>An AuthorizationPolicy is always attached to a target workload via a selector, and Istio's own docs describe that workload's role plainly: it's a <strong>server</strong>, and the policy governs traffic that is, from that workload's own point of view, <strong>inbound</strong>. So a policy answers "who's allowed to call <em>me</em>" — it's always the receiving Pod's sidecar deciding whether to accept a connection, never the calling Pod's sidecar deciding where it may send one. Allowing only <code>checkout</code> to call <code>payments</code> means the policy is attached to <code>payments</code>; <code>checkout</code> gets no matching "outbound" policy of its own.</p>
+    <p>This is a real asymmetry with Lesson 3/8's Kubernetes <code>NetworkPolicy</code>, which genuinely does have separate <code>ingress</code> and <code>egress</code> sections a Pod's own rules can restrict either direction with. AuthorizationPolicy has no equivalent "restrict my own outbound calls" concept for ordinary workload-to-workload traffic — the one exception is attaching a policy to a dedicated <strong>egress gateway</strong> workload (the same chokepoint pattern as Lesson 2's NAT gateway), where the mechanism is still identical: the gateway is the server for that hop, and the policy governs what's allowed to reach <em>it</em>. And the two layers don't run independently — <code>NetworkPolicy</code> is enforced first, by the CNI at the kernel level, before a packet reaches a Pod's network namespace at all; only traffic that survives that gets a chance to be evaluated by Istio's sidecar.</p>
+  </div>
 
   <details class="reveal">
     <summary>Think first: Lesson 6 said Kong's own control-plane/data-plane traffic already uses mTLS, and Lesson 5 called that a preview of the mesh. What's actually different about what Citadel adds, if Kong was already doing mTLS somewhere?</summary>
