@@ -1,0 +1,79 @@
+<!-- Mirrored to yannpaul.github.io/learning/multiplayer_game_backends/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1 · The Shape of a Multiplayer Backend</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Multiplayer Game Backends · Lesson 1 of 9</p>
+  <h1>The Shape of a Multiplayer Backend</h1>
+  <p class="subtitle">One authoritative server, a fixed simulation rate, and a boundary the client is never allowed to cross.</p>
+
+  <p class="lede">Strip away the graphics, the matchmaking screen, the cosmetics store — the backend of almost every competitive multiplayer game is one specific shape: a server that owns the <em>real</em> copy of the game world, ticking forward at a fixed rate, and a set of clients that render a best guess of that world and send it their intentions.</p>
+
+  <p>That's the whole shape. Every lesson after this one is either zooming into one piece of it (how the server hides its own latency from the player, Lesson 2) or explaining when a game deliberately breaks the pattern (peer-to-peer rollback in fighting games, Lesson 4). If you already think in distributed-systems terms, this lesson is mostly a vocabulary translation exercise — the ideas underneath will feel familiar fast.</p>
+
+  <h2>The client-server model, and why it wins</h2>
+
+  <p>A multiplayer game backend needs to answer one question first: who decides what's true? There are two broad answers.</p>
+
+  <p><strong>Client-server</strong>: one machine — a <a href="../GLOSSARY.md">dedicated, authoritative server</a> — runs the real simulation. Every client sends it inputs ("I pressed forward," "I fired") and receives back the results. No client ever talks directly to another client. This is the dominant model for competitive shooters, MOBAs, and battle royales — Counter-Strike, Overwatch, Valorant, Fortnite all work this way.</p>
+
+  <p><strong>Peer-to-peer</strong>: there is no separate server; the players' own machines coordinate directly, sometimes with one peer acting as an informal "host." This shows up in some genres (notably fighting games, which Lesson 4 covers in depth) but is rare wherever cheating or "who's actually right" matters competitively, for a reason this workspace returns to repeatedly: a peer is also a player, and a player has every incentive to lie about the world state in their own favor.</p>
+
+  <div class="ds-parallel">
+    <span class="ds-parallel-label">Distributed systems parallel</span>
+    <p>An authoritative server is structurally a <strong>single primary in primary-replica replication</strong>. Clients are replicas — but unlike a normal read replica, a game client is never trusted to have been an honest replica in the first place. Peer-to-peer is closer to a leaderless, quorum-free system: every node just believes its own state unless corrected, which is exactly why it's a poor fit whenever one participant might be adversarial.</p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Why do most competitive multiplayer games use a client-server model instead of peer-to-peer, even though peer-to-peer avoids the cost of running dedicated servers?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Bandwidth is a real cost, but it isn't the reason competitive games avoid P2P specifically — plenty of non-competitive P2P games handle bandwidth fine.">Peer-to-peer connections use too much bandwidth for real-time games to function.</li>
+      <li data-option="b" data-explain="In client-server, one machine nobody is playing on decides the truth. In P2P, the deciding machine is also a player with a direct incentive to lie about hits, positions, or resources in their own favor.">A player's own machine has an incentive to lie about game state in peer-to-peer, and there's no independent arbiter to catch it.</li>
+      <li data-option="c" data-explain="Peer-to-peer is actually the lower-latency option for the two players directly connected — that's part of why fighting games still use it (Lesson 4). Latency isn't the deciding factor here.">Peer-to-peer always has higher latency than talking to a dedicated server.</li>
+      <li data-option="d" data-explain="Graphics rendering happens client-side under both models — the server, authoritative or not, never renders anything for the player.">Only a dedicated server is powerful enough to render the game's graphics.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Tick rate: the server's own clock</h2>
+
+  <p>An authoritative server doesn't react to input the instant it arrives and continuously stream updates. Like almost all real-time simulations, it runs a <a href="../GLOSSARY.md">game loop</a> that advances the world by one fixed step — a <strong>tick</strong> — some fixed number of times per second, called the <strong>tick rate</strong>.</p>
+
+  <p>Tick rate is a real, expensive design decision, not a free dial to max out. Riot Games' own account of building Valorant is a good grounded example: they chose <strong>128 Hz</strong> server ticks — double the 64 Hz that had been the genre standard (Counter-Strike's competitive servers, for instance) — specifically to shrink "peeker's advantage," the edge a player gets by being the one to round a corner first. But every doubling of tick rate roughly doubles the CPU cost of hosting each match: at 128 ticks per second, the server has under 7.8 milliseconds to finish all the work for one tick before the next one is due, and a data center hosting thousands of concurrent matches needs that math to work out per core, not just per match.</p>
+
+  <div class="callout">
+    <span class="callout-label">Why this isn't "just turn it up"</span>
+    <p>A higher tick rate makes the game feel more precise, but it costs real money at scale — more CPU per match means fewer matches per server means more servers. Every tick-rate decision in a shipped game is a trade between game feel and hosting cost. Keep this in mind for Lesson 6, when hosting cost comes back as its own topic.</p>
+  </div>
+
+  <div class="ds-parallel">
+    <span class="ds-parallel-label">Distributed systems parallel</span>
+    <p>Tick rate is a lot like choosing a fixed <strong>consensus round interval</strong> or a database's <strong>commit batching window</strong>: shorter intervals mean fresher, more precise state, at a direct throughput/CPU cost per unit of freshness gained. The novelty in games isn't the trade-off shape — it's that the "freshness" being bought is felt by a human in real time, in milliseconds, rather than measured as a system metric.</p>
+  </div>
+
+  <h2>What the server actually sends back</h2>
+
+  <p>Each tick, the server broadcasts the result — the current state of every relevant object in the world — back out to clients. A client never gets to just "ask a question and get the real answer instantly": there's always at least one full round trip (client → server → client) of network latency between an input and its confirmed result. That unavoidable delay, <a href="../GLOSSARY.md">round-trip time (RTT)</a>, is the entire reason Lesson 2 exists — an authoritative server that simply waited for confirmation before showing anything would feel unbearably sluggish, so real games hide that latency instead of eliminating it.</p>
+
+  <p>That's the shape: authoritative server, fixed tick rate, an RTT floor no one can engineer away. Everything from here is either working around that floor (Lesson 2) or scaling this one shape up to millions of concurrent matches (Lessons 5–7).</p>
+
+  <div class="ask-your-teacher">
+    Something unclear here — the client-server vs. peer-to-peer trade-off, tick rate's cost trade-off, anything else? Ask your teacher (me) before moving on. This lesson is deliberately small; a good question now is worth more than pushing ahead confused.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: Gabriel Gambetta, <a href="https://www.gabrielgambetta.com/client-server-game-architecture.html">"Client-Server Game Architecture"</a>; Riot Games Technology Blog, <a href="https://www.riotgames.com/en/news/valorants-128-tick-servers">"VALORANT's 128-Tick Servers"</a>; Glenn Fiedler, <a href="https://gafferongames.com/post/what_every_programmer_needs_to_know_about_game_networking/">"What Every Programmer Needs To Know About Game Networking"</a>. This session's outbound web access couldn't fetch these pages directly (egress policy) — facts here are grounded via search-result snippets that quote them; read the originals to verify and go deeper.</p>
+
+  <div class="lesson-nav">
+    <span>Lesson 1 of 9</span>
+    <a href="./0002-hiding-latency.html">Next: Hiding Latency →</a>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

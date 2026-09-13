@@ -1,0 +1,114 @@
+<!-- Mirrored to yannpaul.github.io/learning/multiplayer_game_backends/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 2 · Hiding Latency</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Multiplayer Game Backends · Lesson 2 of 9</p>
+  <h1>Hiding Latency</h1>
+  <p class="subtitle">Four techniques that don't remove round-trip time — they make sure the player never has to feel it.</p>
+
+  <p class="lede">Lesson 1 ended on a floor nobody can engineer away: an authoritative server can't confirm anything faster than one network round trip. If a shooter waited for that round trip before showing your bullet leaving the gun, it would feel broken — even a great connection makes that wait noticeable. Real games don't remove the wait. They hide it, with four distinct techniques that each solve a different piece of the same problem.</p>
+
+  <h2>The problem, split into three pieces</h2>
+
+  <p>Gabriel Gambetta's framing (the standard reference for this whole lesson) splits "latency ruins the game" into three separate sub-problems, because each needs a different fix:</p>
+
+  <ol>
+    <li><strong>My own input feels laggy</strong> — I press a key, and nothing visibly happens until a full round trip later.</li>
+    <li><strong>Other players move unevenly</strong> — I only get updates about them each server tick, and just replaying pos­itions verbatim looks jerky, or ahead of where the server actually has them.</li>
+    <li><strong>Hits feel unfair</strong> — by the time my "I shot them" message reaches the server, the target has already moved on the server's clock.</li>
+  </ol>
+
+  <p>One technique addresses each of the first two; a fourth exists specifically for the third. All four assume the client-server model and tick rate from Lesson 1.</p>
+
+  <h2>1. Client-side prediction: fixing my own input</h2>
+
+  <p>The fix for problem 1 is direct: don't wait. The client applies the local player's own input immediately, running the same movement/physics rules the server will eventually use, and shows the result right away — before the server has even seen the input. Because the client is running the real rules, its guess about its own action is usually exactly right. This is why moving and shooting feel instant even though, underneath, nothing has been confirmed by anyone yet.</p>
+
+  <div class="ds-parallel">
+    <span class="ds-parallel-label">Distributed systems parallel</span>
+    <p>This is <strong>optimistic execution</strong>: proceed as if the operation will succeed, and only pay the cost of a correction on the rare occasion it doesn't. It's the same trade optimistic concurrency control makes over pessimistic locking — assume no conflict, verify after the fact, and only fall back to a slower path when the assumption turns out wrong.</p>
+  </div>
+
+  <h2>2. Server reconciliation: correcting without a snap</h2>
+
+  <p>Client-side prediction creates a new problem: sometimes the client's guess is wrong (another player's stray hit slowed you down, unseen terrain, a desync). When the server's real result disagrees with what the client already showed, the naive fix — just overwrite local state with the server's answer — causes a visible snap backward, and worse, it can silently drop player input the client had already sent for the *next* tick, before the correction arrived.</p>
+
+  <p>The actual fix, <strong>server reconciliation</strong>: the client keeps a short buffer of its own recent, not-yet-acknowledged inputs. When a correction arrives, the client resets to the server's authoritative state, then <em>replays</em> exactly those buffered inputs on top of it — reproducing wherever the player would legitimately be now, correction included, with no lost input and (ideally) no visible jump.</p>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Why does server reconciliation replay the client's buffered inputs on top of a correction, instead of just snapping straight to the server's authoritative state?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Replaying inputs doesn't reduce round-trip time at all — RTT is a network property this technique doesn't touch.">Replaying is a way to reduce the round-trip time to the server.</li>
+      <li data-option="b" data-explain="The server's state genuinely is more current for everything it has already processed — reconciliation isn't about distrusting that, it's about not losing newer input the server hasn't seen yet.">The client doesn't trust the server's state is actually more current than its own.</li>
+      <li data-option="c" data-explain="A naive overwrite would discard whatever input the client sent after the tick the server's correction covers. Replaying those buffered inputs on top of the corrected state keeps them from being silently lost.">Without replaying, any input sent after the corrected tick but before the correction arrived would be lost.</li>
+      <li data-option="d" data-explain="Bandwidth isn't the concern here — the buffered inputs were already sent to the server earlier; replaying happens entirely on the client's own machine.">Replaying saves bandwidth by not re-sending the same inputs to the server.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>3. Entity interpolation: smoothing everyone else</h2>
+
+  <p>Prediction and reconciliation only work for the <em>local</em> player, because only the local client knows its own input the instant it happens. For every other player, the client has no early information at all — it only learns where they are when a server update arrives, once per tick.</p>
+
+  <p>The naive approach — snap each remote player straight to their latest reported position — looks jerky, since ticks arrive in discrete jumps rather than smooth motion. <strong>Entity interpolation</strong> fixes this by deliberately rendering other entities slightly in the past: the client buffers the last two (or more) authoritative positions it received and smoothly interpolates between them, arriving at "now" only once the *next* update has already confirmed where the entity actually was headed. The cost is a small, fixed extra delay in what you see of other players — worth it, because delay reads as reasonable while jitter reads as broken.</p>
+
+  <div class="ds-parallel">
+    <span class="ds-parallel-label">Distributed systems parallel</span>
+    <p>This mirrors a <strong>read replica deliberately serving slightly stale data</strong> to smooth over replication lag, rather than blocking until the freshest write propagates. Entity interpolation makes the same trade explicitly, in a domain (rendering) where "slightly stale but smooth" beats "current but jumpy."</p>
+  </div>
+
+  <h2>4. Lag compensation: making hits fair</h2>
+
+  <p>The last problem is different in kind: it's not about what a client displays, it's about what the *server* decides really happened. Say a player fires at a target that's moving. On the shooter's own screen (already delayed by network and possibly further behind by entity interpolation) the target looked like it was in one spot. By the time that "I fired" message reaches the server, real server-clock time has moved on and the target has actually moved further.</p>
+
+  <p>Valve's Source engine (Half-Life 2, Counter-Strike, Team Fortress 2) documents a concrete, shipped fix: the server keeps a rolling history — roughly one second — of every player's recent positions and animation state. When a hit needs to be checked, the server temporarily rewinds *its own* copy of the world back to the exact moment the shooter's client actually fired, checks the hit against what the shooter genuinely saw, then restores the present. This is <strong>lag compensation</strong>, and it's why a competent shooter doesn't require you to visibly "lead" your shots against a moving target.</p>
+
+  <div class="callout bad">
+    <span class="callout-label">The trade lag compensation makes</span>
+    <p>Rewinding the world to favor the shooter's view is also exactly why you can sometimes be shot "behind cover" in a badly-tuned shooter — from the server's rewound perspective, at the moment the shot was actually fired, you hadn't ducked behind that wall yet. Every fairness mechanism in this lesson is a trade, not a free fix; this one trades a little unfairness to the target for a lot of fairness to the shooter.</p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Lag compensation is implemented entirely on the server, unlike the other three techniques in this lesson. Why does it have to live there rather than on either client?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Checking a hit fairly means comparing it against a rewound copy of the authoritative world state — something only the server has, and something no client (shooter or target) can be trusted to compute honestly about itself.">Only the server holds the authoritative history of where everyone actually was, and only the server's hit decision can't be biased by either player's own client.</li>
+      <li data-option="b" data-explain="Clients can and do keep short history buffers of their own state (that's part of how server reconciliation works) — buffering isn't the reason this specific technique is server-only.">Clients don't have enough memory to store even one second of position history.</li>
+      <li data-option="c" data-explain="Lag compensation doesn't shorten anyone's round-trip time — it changes which past moment a hit is checked against, not the network delay itself.">Running it on the server is the only way to reduce round-trip time for both players at once.</li>
+      <li data-option="d" data-explain="The shooter's own client already knows exactly what it fired at without needing this technique — the fairness question is specifically about the server's independent hit check.">The shooter's client can't tell what direction it fired in without server help.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Putting the four together</h2>
+
+  <table>
+    <tr><th>Technique</th><th>Fixes</th><th>Runs on</th></tr>
+    <tr><td>Client-side prediction</td><td>My own input feeling laggy</td><td>Client (local player only)</td></tr>
+    <tr><td>Server reconciliation</td><td>Correcting prediction without snapping or losing input</td><td>Client, driven by server corrections</td></tr>
+    <tr><td>Entity interpolation</td><td>Other players' motion looking jerky</td><td>Client (remote players only)</td></tr>
+    <tr><td>Lag compensation</td><td>Hits feeling unfair given network delay</td><td>Server only</td></tr>
+  </table>
+
+  <p>Notice the pattern: three of the four exist entirely to manage the *client's* experience of a delay that can't be removed. Only lag compensation changes what the *server* itself decides. That split — client-side illusion vs. server-side decision — is a preview of Lesson 8's whole point: the server is the only place a decision that matters is allowed to be made.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear here — the difference between reconciliation and lag compensation, why interpolation adds delay on purpose, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: Gabriel Gambetta, <a href="https://www.gabrielgambetta.com/client-side-prediction-server-reconciliation.html">"Client-Side Prediction and Server Reconciliation"</a> and <a href="https://www.gabrielgambetta.com/entity-interpolation.html">"Entity Interpolation"</a>; Valve Developer Community, <a href="https://developer.valvesoftware.com/wiki/Lag_Compensation">"Lag Compensation"</a> and <a href="https://developer.valvesoftware.com/wiki/Source_Multiplayer_Networking">"Source Multiplayer Networking"</a>. As with Lesson 1, this session's egress policy blocked direct fetches to these pages — facts here come from search-result snippets quoting them; read the originals to verify and go deeper, especially Gambetta's live JavaScript demos.</p>
+
+  <div class="lesson-nav">
+    <a href="./0001-the-shape-of-a-multiplayer-backend.html">← Back: The Shape of a Multiplayer Backend</a>
+    <span>Lesson 2 of 9</span>
+  </div>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
