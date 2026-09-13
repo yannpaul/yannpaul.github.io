@@ -1,0 +1,349 @@
+<!-- Mirrored to yannpaul.github.io/learning/pygame_bouncing_square/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1 · Your First Bouncing Square</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Bouncing Square in Pygame · Lesson 1 of 1 (proof of concept)</p>
+  <h1>Your First Bouncing Square</h1>
+  <p class="subtitle">Build a square that bounces around the screen forever, using nothing but a web browser and <a href="https://onecompiler.com/">onecompiler.com</a> — no installing Python or pygame on your own computer.</p>
+
+  <p class="lede">This lesson is a checklist of things to <em>do</em>, not code to copy. Where you might get stuck, there's a collapsed hint — a <code>&lt;details&gt;</code> box like the one right below this paragraph — with the exact code to type. Open it only if you're actually stuck; the point is to type this yourself and watch it work.</p>
+
+  <details class="reveal">
+    <summary>Example: this is what a hint looks like</summary>
+    <div class="reveal-body">
+      <p>Hints are code, and nothing more. No task will show you the finished answer up front — only ever a hint for one specific step, and only when you open it.</p>
+    </div>
+  </details>
+
+  <p>By the end of this lesson you'll have a real, running game window — well, a browser tab that <em>acts</em> like one — with an orange square bouncing off all four edges forever, that you built one piece at a time.</p>
+
+  <h2>Before you start</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="open-onecompiler">
+      <div class="todo-item-head">
+        <input type="checkbox" id="open-onecompiler-cb">
+        <label for="open-onecompiler-cb">Open <a href="https://onecompiler.com/">onecompiler.com</a> and find its Python/pygame option.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Look for a language picker somewhere on the page — a dropdown, a search box, or a list of languages. You want the option for <strong>Pygame</strong> if there is one; if not, plain <strong>Python</strong> works too, since pygame is just a library Python code can use.</p>
+        <details class="reveal">
+          <summary>Stuck? What you're looking for</summary>
+          <div class="reveal-body">
+            <p>You should end up looking at a page with a code editor on one side and a spot where output will appear on the other (or below it). That output area is where your square will eventually show up. If the exact wording on the page doesn't match this description, that's fine — websites change — just look for "run my code, see a picture come out the other side."</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="clear-editor">
+      <div class="todo-item-head">
+        <input type="checkbox" id="clear-editor-cb">
+        <label for="clear-editor-cb">Clear out any starter code so you have a blank editor.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Some starter templates already have example code in them. Select all of it and delete it — you're starting from nothing.</p>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Good to know</span>
+    <p>A real pygame program, run on your own computer, opens a window that stays open until you close it. A browser-based version like OneCompiler's usually can't do that — it runs your code for a while and shows you a picture or a short recording of what happened, then stops on its own after some seconds. That's expected here, not a bug. If your square stops moving after a while even though you didn't touch anything, that's just the tool ending the run — click "run" again to see more.</p>
+  </div>
+
+  <h2>Get a window showing anything at all</h2>
+
+  <p>Every pygame program starts the same way: turn pygame on, describe a window, then run a loop that keeps redrawing that window until something tells it to stop. That loop is called the <strong>game loop</strong>, and literally every moving pygame program — this one included — is built around it.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="pygame-init">
+      <div class="todo-item-head">
+        <input type="checkbox" id="pygame-init-cb">
+        <label for="pygame-init-cb">Import pygame and turn it on.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the lines</summary>
+          <div class="reveal-body">
+            <pre><code>import pygame
+
+pygame.init()</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="set-mode">
+      <div class="todo-item-head">
+        <input type="checkbox" id="set-mode-cb">
+        <label for="set-mode-cb">Create a 400×400 window.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>This is called the display <strong>Surface</strong> — the rectangle of pixels you'll draw everything onto.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the lines</summary>
+          <div class="reveal-body">
+            <pre><code>WIDTH, HEIGHT = 400, 400
+screen = pygame.display.set_mode((WIDTH, HEIGHT))</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="clock">
+      <div class="todo-item-head">
+        <input type="checkbox" id="clock-cb">
+        <label for="clock-cb">Create a clock to control how fast the loop runs.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the line</summary>
+          <div class="reveal-body">
+            <pre><code>clock = pygame.time.Clock()</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="game-loop">
+      <div class="todo-item-head">
+        <input type="checkbox" id="game-loop-cb">
+        <label for="game-loop-cb">Write the game loop: check for the quit event, fill the screen with a color, show it, and wait a moment.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>The tiny loop inside the loop (checking <code>pygame.event.get()</code>) is called the <strong>event loop</strong> — it's how you notice the player clicked the window's close button.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the loop</summary>
+          <div class="reveal-body">
+            <pre><code>running = True
+while running:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+
+    screen.fill((20, 20, 30))
+    pygame.display.flip()
+    clock.tick(60)
+
+pygame.quit()</code></pre>
+            <p><code>screen.fill(...)</code> paints the whole Surface one flat color — three numbers for red, green, and blue, each 0–255. <code>pygame.display.flip()</code> is what actually shows the Surface on screen; nothing you draw is visible until you call it. <code>clock.tick(60)</code> pauses just long enough to cap the loop at 60 times per second.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-blank">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-blank-cb">
+        <label for="run-blank-cb">Run it.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The output area shows a solid dark navy square — your 400×400 window, filled with the color <code>(20, 20, 30)</code>. Nothing moves yet, and there's no error message. If you see red error text instead, re-check every line above against your hints before continuing.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>Draw the square</h2>
+
+  <p>Now put an actual square on that window — sitting still, in the corner, for now.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="square-vars">
+      <div class="todo-item-head">
+        <input type="checkbox" id="square-vars-cb">
+        <label for="square-vars-cb">Above the game loop, add variables for the square's size and its position (top-left corner).</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the lines</summary>
+          <div class="reveal-body">
+            <pre><code>SIZE = 40
+x, y = 0, 0</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="draw-rect">
+      <div class="todo-item-head">
+        <input type="checkbox" id="draw-rect-cb">
+        <label for="draw-rect-cb">Inside the loop, after <code>screen.fill(...)</code> but before <code>pygame.display.flip()</code>, draw the square.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the line</summary>
+          <div class="reveal-body">
+            <pre><code>pygame.draw.rect(screen, (255, 120, 40), (x, y, SIZE, SIZE))</code></pre>
+            <p><code>pygame.draw.rect</code> takes the Surface to draw on, a color, and a rectangle described as <code>(left, top, width, height)</code>.</p>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Run it again: an orange square now sits in the top-left corner of the window, staying perfectly still.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>Make it move</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="velocity-vars">
+      <div class="todo-item-head">
+        <input type="checkbox" id="velocity-vars-cb">
+        <label for="velocity-vars-cb">Next to <code>x, y = 0, 0</code>, add a velocity for each axis: how many pixels to move per frame.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the line</summary>
+          <div class="reveal-body">
+            <pre><code>dx, dy = 4, 4</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="update-position">
+      <div class="todo-item-head">
+        <input type="checkbox" id="update-position-cb">
+        <label for="update-position-cb">Inside the loop, right after the event loop and before drawing anything, add the velocity to the position.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the lines</summary>
+          <div class="reveal-body">
+            <pre><code>x += dx
+y += dy</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Run it: the square now slides diagonally down and to the right, and eventually slides right off the window and out of view. That's expected — you haven't taught it about walls yet. That's next.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>Bounce off the walls</h2>
+
+  <p>A bounce is just: notice the square reached an edge, then flip the sign of its velocity on that axis. Nothing about the square's position needs to jump — only the direction it's heading changes.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="bounce-x">
+      <div class="todo-item-head">
+        <input type="checkbox" id="bounce-x-cb">
+        <label for="bounce-x-cb">Right after updating <code>x</code> and <code>y</code>, check whether the square has reached the left or right edge, and flip <code>dx</code> if so.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>The square's left edge is at <code>x</code>; its right edge is at <code>x + SIZE</code>. It's hit a wall when the left edge reaches <code>0</code> or the right edge reaches <code>WIDTH</code>.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the lines</summary>
+          <div class="reveal-body">
+            <pre><code>if x &lt;= 0 or x + SIZE &gt;= WIDTH:
+    dx = -dx</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="bounce-y">
+      <div class="todo-item-head">
+        <input type="checkbox" id="bounce-y-cb">
+        <label for="bounce-y-cb">Do the same thing for the top and bottom edges, flipping <code>dy</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the lines</summary>
+          <div class="reveal-body">
+            <pre><code>if y &lt;= 0 or y + SIZE &gt;= HEIGHT:
+    dy = -dy</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-bounce">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-bounce-cb">
+        <label for="run-bounce-cb">Run it.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The orange square bounces off every edge of the window and never leaves view — it just keeps going, changing direction each time it touches a wall, for as long as the program keeps running.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>In pygame, <code>(0, 0)</code> is the <strong>top-left</strong> corner of the window, not the bottom-left like graph paper. <code>x</code> grows to the right as you'd expect, but <code>y</code> grows <em>downward</em>. That's why a positive <code>dy</code> in this lesson moves the square down, not up — if your square seems to bounce the "wrong" way vertically, this is almost always why.</p>
+  </div>
+
+  <p>Here's the whole thing end to end, for reference once every piece above is checked off and working on your own:</p>
+
+  <details class="reveal">
+    <summary>Show the complete program</summary>
+    <div class="reveal-body">
+      <pre><code>import pygame
+
+pygame.init()
+
+WIDTH, HEIGHT = 400, 400
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+clock = pygame.time.Clock()
+
+SIZE = 40
+x, y = 0, 0
+dx, dy = 4, 4
+
+running = True
+while running:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+
+    x += dx
+    y += dy
+
+    if x &lt;= 0 or x + SIZE &gt;= WIDTH:
+        dx = -dx
+    if y &lt;= 0 or y + SIZE &gt;= HEIGHT:
+        dy = -dy
+
+    screen.fill((20, 20, 30))
+    pygame.draw.rect(screen, (255, 120, 40), (x, y, SIZE, SIZE))
+    pygame.display.flip()
+    clock.tick(60)
+
+pygame.quit()</code></pre>
+    </div>
+  </details>
+
+  <h2>Now play with it</h2>
+
+  <p>You have a working proof-of-concept. Before moving on to anything new, try changing a few numbers and predicting what will happen <em>before</em> you run it each time:</p>
+
+  <ul>
+    <li>Change <code>dx, dy = 4, 4</code> to bigger or smaller numbers — what happens to the speed?</li>
+    <li>Change one of them to a negative number to start — which direction does it head first?</li>
+    <li>Change the color tuple in <code>pygame.draw.rect</code> — pygame colors are <code>(red, green, blue)</code>, each 0–255.</li>
+    <li>Change <code>SIZE</code> to make a bigger or smaller square — does it still bounce correctly?</li>
+  </ul>
+
+  <div class="ask-your-teacher">
+    Something unclear — why <code>pygame.display.flip()</code> is needed at all, why the bounce check comes right after moving instead of before, anything else? Ask your teacher (me) before moving on. A good question now is worth more than pushing ahead confused.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://www.pygame.org/wiki/GettingStarted">pygame.org, "Getting Started"</a> for the game-loop shape; <a href="https://www.pygame.org/docs/ref/display.html">pygame.org docs, <code>pygame.display</code></a> for the Surface and <code>flip()</code>; <a href="https://www.pygame.org/docs/ref/draw.html">pygame.org docs, <code>pygame.draw</code></a> for <code>draw.rect</code>; <a href="https://www.pygame.org/docs/ref/time.html">pygame.org docs, <code>pygame.time</code></a> for <code>Clock</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="../index.html">← Course contents</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>
