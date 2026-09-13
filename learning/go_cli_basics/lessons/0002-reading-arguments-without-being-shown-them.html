@@ -1,0 +1,240 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_cli_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 2 · Reading Arguments Without Being Shown Them</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go CLI Basics · Lesson 2 of 12</p>
+  <h1>Reading Arguments Without Being Shown Them</h1>
+  <p class="subtitle">Rebuild Lesson 1 from memory first. Then give <code>burrow</code> its first real command-line flag.</p>
+
+  <p class="lede">Today's new skill: use the standard library's <code>flag</code> package to configure and capture a command-line argument. But first — the warm-up. Every lesson from here on starts this way.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lesson 1</div>
+
+  <p>Try each of these from memory before opening its hint. If you kept last lesson's <code>burrow</code> directory, you can reuse it — the point of this warm-up is the muscle memory, not starting a fresh directory every time.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-mod-init">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-mod-init-cb">
+        <label for="repeat-mod-init-cb">A <code>burrow</code> directory exists and is a Go module (has a <code>go.mod</code>).</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Forgot? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>mkdir burrow && cd burrow
+go mod init burrow</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="repeat-main-skeleton">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-main-skeleton-cb">
+        <label for="repeat-main-skeleton-cb"><code>main.go</code> exists with <code>package main</code>, imports, and the <code>getConfig()</code>/<code>run()</code>/<code>main</code> wiring from Lesson 1 — not logic dumped straight into <code>main</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Forgot? Show last lesson's shape</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func getConfig() error {
+	return nil
+}
+
+func run() error {
+	fmt.Println("burrow: not implemented yet")
+	return nil
+}
+
+func main() {
+	if err := getConfig(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="repeat-run-build">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-run-build-cb">
+        <label for="repeat-run-build-cb">Both <code>go run .</code> and <code>go build &amp;&amp; ./burrow</code> print the same placeholder message.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>If either command errors or the two disagree with each other, stop and fix it before continuing — everything today builds directly on top of this working.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <p>That's the warm-up. If it took real effort to recall rather than just copy, that's the format working as intended — see <a href="../MISSION.md">the mission</a> for why this course insists on it every single lesson.</p>
+
+  <h2>New: a <code>Config</code> to hold a <code>-path</code> flag</h2>
+
+  <p><code>getConfig()</code> currently configures nothing. Today it earns its name: it will read a <code>-path</code> flag from the command line (defaulting to <code>.</code>, the current directory) and hand it to <code>run()</code> inside a small struct.</p>
+
+  <p>Go's standard library ships this in the <a href="https://pkg.go.dev/flag"><code>flag</code></a> package. The shape you'll use: <code>flag.String(name, defaultValue, usage)</code> registers a flag and immediately returns a <code>*string</code> — a pointer, not the value itself, because the real value doesn't exist until you call <code>flag.Parse()</code>, which reads <code>os.Args</code> and fills in every registered flag's pointer.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="config-struct">
+      <div class="todo-item-head">
+        <input type="checkbox" id="config-struct-cb">
+        <label for="config-struct-cb">Define a <code>Config</code> struct type with one field, <code>Path</code> (a <code>string</code>).</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the type</summary>
+          <div class="reveal-body">
+            <pre><code>type Config struct {
+	Path string
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="getconfig-flag">
+      <div class="todo-item-head">
+        <input type="checkbox" id="getconfig-flag-cb">
+        <label for="getconfig-flag-cb">Change <code>getConfig()</code>'s signature to <code>getConfig() (Config, error)</code>. Inside it, register a <code>path</code> flag defaulting to <code>"."</code>, call <code>flag.Parse()</code>, and return a <code>Config</code> built from the flag's value.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Remember <code>flag.String</code> gives you a <code>*string</code> — you'll need to dereference it (<code>*pathFlag</code>) to put the value into your <code>Config</code>.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func getConfig() (Config, error) {
+	path := flag.String("path", ".", "path to inspect")
+	flag.Parse()
+	return Config{Path: *path}, nil
+}</code></pre>
+            <p>Add <code>"flag"</code> to your import block.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-takes-config">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-takes-config-cb">
+        <label for="run-takes-config-cb">Change <code>run</code>'s signature to <code>run(cfg Config) error</code>, and have it print the path it was given instead of the old placeholder message.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func run(cfg Config) error {
+	fmt.Println("burrow: inspecting", cfg.Path)
+	return nil
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="main-passes-config">
+      <div class="todo-item-head">
+        <input type="checkbox" id="main-passes-config-cb">
+        <label for="main-passes-config-cb">Update <code>main</code>: capture <code>getConfig()</code>'s two return values, and pass the <code>Config</code> into <code>run</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func main() {
+	cfg, err := getConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := run(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <p>Now prove it works three different ways:</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="try-default">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-default-cb">
+        <label for="try-default-cb">Run it with no flags at all.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run .</code> prints <code>burrow: inspecting .</code> — the default takes over when you don't pass <code>-path</code>.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="try-equals">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-equals-cb">
+        <label for="try-equals-cb">Run it with <code>-path=/tmp</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run . -path=/tmp</code> prints <code>burrow: inspecting /tmp</code>.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="try-space">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-space-cb">
+        <label for="try-space-cb">Run it with <code>-path /tmp</code> — a space instead of <code>=</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run . -path /tmp</code> prints the exact same thing as the <code>=</code> form. Both syntaxes are accepted for non-boolean flags — see the idiom box below for why that's not true of every flag type.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Go's <code>flag</code> package accepts a single dash for every flag — <code>-path</code>, not <code>--path</code> — though it tolerates a double dash too, since it only looks at how many leading dashes there are, not what they conventionally mean elsewhere. The <code>-flag=value</code> and <code>-flag value</code> forms are interchangeable for string, int, and most other flag types, but not for booleans: <code>-verbose false</code> doesn't work the way you'd expect, because <code>flag</code> treats a bare <code>-verbose</code> as already having consumed its value (<code>true</code>) and then tries to parse <code>false</code> as a positional argument instead. <code>-verbose=false</code> is the only reliable way to set a bool flag to false. You'll hit this directly once a boolean flag shows up later in the course.</p>
+  </div>
+
+  <p>This <code>flag.String</code> / <code>flag.Parse</code> pair is the exact call shape you'll reuse for every subcommand once <code>burrow</code> grows a real command tree — the only thing that changes in Lesson 4 is that each subcommand gets its <em>own</em> <code>flag.NewFlagSet</code> instead of sharing the single global one <code>flag.Parse()</code> uses here. The <code>getConfig</code>-then-<code>run</code> shape doesn't change at all.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why <code>flag.String</code> returns a pointer, the <code>-path=x</code> vs. <code>-path x</code> vs. boolean-flag gotcha, why <code>Config</code> exists instead of just reading the flag straight from <code>run</code>, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://pkg.go.dev/flag">pkg.go.dev, the <code>flag</code> package reference</a> for the exact behavior of <code>flag.String</code>, <code>flag.Parse</code>, and the boolean-flag parsing quirk; <a href="https://go.dev/doc/effective_go">go.dev, "Effective Go"</a> for why a config struct passed by value keeps <code>run</code> easy to reason about.</p>
+
+  <div class="lesson-nav">
+    <a href="./0001-a-module-a-main-and-the-shape-youll-reuse.html">← Lesson 1: A Module, a Main, and the Shape You'll Reuse</a>
+    <span>Lesson 2 of 12</span>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

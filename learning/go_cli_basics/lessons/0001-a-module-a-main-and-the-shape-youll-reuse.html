@@ -1,0 +1,262 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_cli_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1 · A Module, a Main, and the Shape You'll Reuse</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go CLI Basics · Lesson 1 of 12</p>
+  <h1>A Module, a Main, and the Shape You'll Reuse</h1>
+  <p class="subtitle">Get a Go module running at all, then adopt the one structural pattern every remaining lesson in this course will make you rebuild.</p>
+
+  <p class="lede">Every lesson here is a checklist of things to <em>do</em>, not code to copy. Where you might get stuck, there's a collapsed hint — a <code>&lt;details&gt;</code> box like the one right below this paragraph — with the exact command or snippet. Open it only if you're actually stuck; the point is to write this yourself.</p>
+
+  <details class="reveal">
+    <summary>Example: this is what a hint looks like</summary>
+    <div class="reveal-body">
+      <p>Hints are commands or minimal code, nothing more. No lesson will show you a finished solution up front — only ever a hint for one specific task, and only when you open it.</p>
+    </div>
+  </details>
+
+  <p>By the end of this lesson you'll have a real, if useless, Go program: a module, a <code>main</code>, and the <code>getConfig</code>/<code>run</code> skeleton that every future lesson in this course — including the finished <code>burrow</code> tool from <a href="../MISSION.md">the mission</a> — builds on top of.</p>
+
+  <h2>Before you start</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="check-go">
+      <div class="todo-item-head">
+        <input type="checkbox" id="check-go-cb">
+        <label for="check-go-cb">Confirm you have a working Go toolchain installed.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>go version</code></pre>
+            <p>If that fails, install Go from <a href="https://go.dev/doc/install">go.dev/doc/install</a> first — everything else in this course assumes it works.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <h2>Set up the module</h2>
+
+  <p>A Go <strong>module</strong> is a project's unit of dependency management, declared by a <code>go.mod</code> file at its root. Nothing about your code needs a module to exist as text files, but the <code>go</code> command needs one to know what it's building.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="mkdir">
+      <div class="todo-item-head">
+        <input type="checkbox" id="mkdir-cb">
+        <label for="mkdir-cb">Create a project directory called <code>burrow</code> and move into it.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>mkdir burrow
+cd burrow</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="mod-init">
+      <div class="todo-item-head">
+        <input type="checkbox" id="mod-init-cb">
+        <label for="mod-init-cb">Turn this directory into a Go module.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>You need a module <em>path</em> — a string that names the module. Since you're not publishing this, any short name works.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>go mod init burrow</code></pre>
+            <p>If you might ever <code>go get</code> this from another machine under your GitHub account, <code>go mod init github.com/&lt;your-username&gt;/burrow</code> works just as well — the path is just a name until you actually publish something at it.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="read-gomod">
+      <div class="todo-item-head">
+        <input type="checkbox" id="read-gomod-cb">
+        <label for="read-gomod-cb">Open <code>go.mod</code> and read what got written.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>You should see two lines: a <code>module</code> line echoing the path you gave <code>go mod init</code>, and a <code>go</code> line naming the Go version <code>go mod init</code> found installed. Nothing else — no dependencies yet, because you haven't imported anything outside the standard library.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <p>The <code>go</code> line isn't decorative: it's the minimum Go version this module requires, and it's how the toolchain decides which language features (generics, newer standard-library functions) are safe to assume. See <a href="https://go.dev/doc/code">"How to Write Go Code"</a> for the full picture of what a module is for beyond this course's needs.</p>
+
+  <h2>Hello, burrow</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="main-go">
+      <div class="todo-item-head">
+        <input type="checkbox" id="main-go-cb">
+        <label for="main-go-cb">Create <code>main.go</code>: a <code>package main</code> file with a <code>func main()</code> that prints a placeholder message.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Any message proving it ran is fine — something like <code>"burrow: not implemented yet"</code>.</p>
+        <details class="reveal">
+          <summary>Stuck? Show a minimal skeleton</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("burrow: not implemented yet")
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="go-run">
+      <div class="todo-item-head">
+        <input type="checkbox" id="go-run-cb">
+        <label for="go-run-cb">Run it without producing a binary file.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>go run .</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Your placeholder message prints to the terminal, and no new file appears in the directory afterward.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="go-build">
+      <div class="todo-item-head">
+        <input type="checkbox" id="go-build-cb">
+        <label for="go-build-cb">Build a real binary, then run <em>that binary</em> directly (not <code>go run</code> again).</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>go build
+./burrow</code></pre>
+            <p>On Windows: <code>burrow.exe</code> instead of <code>./burrow</code>.</p>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>A new file named <code>burrow</code> (or <code>burrow.exe</code>) now sits in the directory, and running it prints the exact same message <code>go run .</code> did.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <p><code>go run .</code> compiles to a temporary location, executes it, and throws the binary away — good for fast iteration. <code>go build</code> compiles a real binary that persists, so you can run it again later without recompiling. Both do the same compilation; they just differ in what happens to the result. <code>package main</code> and <code>func main</code> are a convention the compiler enforces: only a package literally named <code>main</code>, with a function literally named <code>main</code> taking no arguments and returning nothing, can be built into a standalone executable.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Nothing forces the file with <code>func main</code> to be named <code>main.go</code> — the compiler only cares about the package and function names inside it. Naming the file <code>main.go</code> anyway is a near-universal convention, purely so anyone opening your project can guess where execution starts without reading every file.</p>
+  </div>
+
+  <h2>The shape you'll reuse: <code>getConfig()</code> and <code>run()</code></h2>
+
+  <p>Right now, all your logic lives directly inside <code>main</code>. That's fine for one <code>fmt.Println</code>, but it stops scaling the moment <code>main</code> needs to do more than one thing — which happens as soon as Lesson 2 adds a command-line flag. This course adopts a standing pattern from here on: <code>main</code> does almost nothing except call <code>getConfig()</code> to gather configuration, call <code>run()</code> to do the actual work, and turn any error either one returns into a message on stderr plus a nonzero <a href="https://pkg.go.dev/os#Exit">exit status</a>. All real logic lives in <code>run</code> (and, later, in whatever <code>run</code> calls) — never in <code>main</code> itself.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-run">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-run-cb">
+        <label for="write-run-cb">Write a <code>run() error</code> function containing the print statement <code>main</code> currently has, returning <code>nil</code> at the end.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func run() error {
+	fmt.Println("burrow: not implemented yet")
+	return nil
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="write-getconfig">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-getconfig-cb">
+        <label for="write-getconfig-cb">Write a <code>getConfig() error</code> function that, for now, just returns <code>nil</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>It has nothing to configure yet — that starts in Lesson 2. The point right now is just that the shape exists.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func getConfig() error {
+	return nil
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="rewire-main">
+      <div class="todo-item-head">
+        <input type="checkbox" id="rewire-main-cb">
+        <label for="rewire-main-cb">Rewire <code>main</code>: call <code>getConfig()</code>; if it returns an error, print it to stderr and exit with status 1. Otherwise call <code>run()</code>; if <em>that</em> returns an error, print it to stderr and exit with status 1.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>You'll need <code>os.Exit</code> and <code>fmt.Fprintln(os.Stderr, ...)</code> — both standard library, both worth reading the docs for once: <a href="https://pkg.go.dev/os#Exit"><code>os.Exit</code></a>.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func main() {
+	if err := getConfig(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}</code></pre>
+            <p>Don't forget to add <code>"os"</code> to your import block alongside <code>"fmt"</code>.</p>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Run <code>go run .</code> again. The output should be <strong>exactly the same message as before</strong> — you haven't changed what the program does, only how it's structured. If the message changed or disappeared, something in the rewiring is wrong.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>If this rewiring changed nothing observable, why do it? Because <code>run()</code> — unlike code embedded straight in <code>main</code> — can be called from a test without going through <code>os.Exit</code>, which would kill the test process. Lesson 11 cashes this in directly. And once <code>getConfig()</code> actually has something to parse (Lesson 2), keeping it separate from <code>run()</code> means the "what are we configured to do" step and the "now go do it" step can be reasoned about, and changed, independently.</p>
+  </div>
+
+  <h2>There's nothing to repeat — yet</h2>
+
+  <p>Every lesson from here on starts with a warm-up section that makes you rebuild everything structural from prior lessons — ideally from memory, hints still collapsed — before teaching anything new. This is lesson 1, so there's nothing to warm up with. Lesson 2 will make you redo the module, the <code>main.go</code> skeleton, and this exact <code>getConfig</code>/<code>run</code> wiring before it teaches you anything about flags. That's deliberate, not padding — keep doing it even once it feels easy.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why the module path doesn't seem to matter yet, the <code>go run</code> vs. <code>go build</code> distinction, why <code>getConfig</code>/<code>run</code> is worth it before it does anything, anything else? Ask your teacher (me) before moving on. This lesson is deliberately small; a good question now is worth more than pushing ahead confused.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://go.dev/doc/code">go.dev, "How to Write Go Code"</a> for modules and project layout; <a href="https://go.dev/doc/effective_go">go.dev, "Effective Go"</a> for idiomatic structure and error handling; Mat Ryer, <a href="https://grafana.com/blog/2024/02/09/how-i-write-http-services-in-go-after-eight-years/">"How I write HTTP services in Go after eight years"</a> for the <code>run()</code>-does-the-work pattern this lesson adapts.</p>
+
+  <div class="lesson-nav">
+    <span>Lesson 1 of 12</span>
+    <a href="./0002-reading-arguments-without-being-shown-them.html">Next: Reading Arguments Without Being Shown Them →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

@@ -1,0 +1,346 @@
+/* Shared stylesheet for go_cli_basics lessons and reference docs.
+   Tufte-influenced reading column, extended with a todo/checklist device
+   for a skills-first, build-it-yourself course. */
+
+:root {
+  --ink: #1a1a1a;
+  --paper: #fdfcf9;
+  --paper-raised: #ffffff;
+  --rule: #d8d3c8;
+  --muted: #6b6558;
+  --accent: #b5502f;      /* terminal-rust, used sparingly */
+  --accent-soft: #f5e8e1;
+  --good: #2f6f4f;
+  --good-soft: #e5f0e9;
+  --bad: #a13a2e;
+  --bad-soft: #f7e6e3;
+  --code-bg: #f2efe6;
+  --max-width: 42rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e8e4da;
+    --paper: #171613;
+    --paper-raised: #1f1e1a;
+    --rule: #3a382f;
+    --muted: #a39d8c;
+    --accent: #e2916f;
+    --accent-soft: #2b1f19;
+    --good: #7fd9a8;
+    --good-soft: #182620;
+    --bad: #e8a196;
+    --bad-soft: #2b1c1a;
+    --code-bg: #23221c;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { color-scheme: light dark; }
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+  font-size: 19px;
+  line-height: 1.6;
+  margin: 0;
+  padding: 3.5rem 1.5rem 6rem;
+}
+
+main {
+  max-width: var(--max-width);
+  margin: 0 auto;
+}
+
+.eyebrow {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 0.5rem;
+}
+
+h1 {
+  font-size: 2rem;
+  line-height: 1.15;
+  margin: 0 0 0.3rem;
+}
+
+h2 {
+  font-size: 1.35rem;
+  margin: 2.6rem 0 0.9rem;
+  padding-top: 1.4rem;
+  border-top: 1px solid var(--rule);
+}
+
+h3 {
+  font-size: 1.08rem;
+  margin: 1.8rem 0 0.6rem;
+}
+
+p, li { max-width: 100%; }
+
+.subtitle {
+  color: var(--muted);
+  font-size: 1.05rem;
+  margin: 0 0 2.2rem;
+}
+
+a { color: var(--accent); text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+
+.lede {
+  font-size: 1.12rem;
+}
+
+.callout {
+  background: var(--paper-raised);
+  border: 1px solid var(--rule);
+  border-left: 4px solid var(--accent);
+  border-radius: 4px;
+  padding: 1rem 1.2rem;
+  margin: 1.6rem 0;
+}
+
+.callout.good { border-left-color: var(--good); }
+.callout.bad { border-left-color: var(--bad); }
+
+.callout > :first-child { margin-top: 0; }
+.callout > :last-child { margin-bottom: 0; }
+
+.callout-label {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  display: block;
+  margin-bottom: 0.4rem;
+}
+
+code, pre {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.86rem;
+}
+
+code {
+  background: var(--code-bg);
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+}
+
+pre {
+  background: var(--code-bg);
+  padding: 1rem 1.1rem;
+  border-radius: 6px;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+pre code { background: none; padding: 0; }
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1.4rem 0;
+  font-size: 0.92rem;
+}
+
+th, td {
+  text-align: left;
+  padding: 0.55rem 0.7rem;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+
+th {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.sidenote {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.82rem;
+  color: var(--muted);
+  border-left: 2px solid var(--rule);
+  padding-left: 0.8rem;
+  margin: 0.9rem 0 0.9rem 0.2rem;
+}
+
+.cite {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+/* --- Think-first reveal (collapsed hints: commands and code snippets) --- */
+details.reveal {
+  background: var(--paper-raised);
+  border: 1px dashed var(--rule);
+  border-radius: 6px;
+  padding: 0.85rem 1.1rem;
+  margin: 0.7rem 0 0;
+}
+
+details.reveal summary {
+  cursor: pointer;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--accent);
+  list-style: revert;
+}
+
+details.reveal[open] summary {
+  margin-bottom: 0.8rem;
+  padding-bottom: 0.8rem;
+  border-bottom: 1px dashed var(--rule);
+}
+
+details.reveal .reveal-body > :first-child { margin-top: 0; }
+details.reveal .reveal-body > :last-child { margin-bottom: 0; }
+
+/* --- Todo list: this workspace's signature device ---
+   A section of tasks stated as instructions, never as code. Each item
+   may carry a details.reveal hint (above) as a last resort. Checked
+   state is cosmetic only (persisted client-side by checklist.js) — it
+   proves nothing to the teacher, it's just a personal progress marker. */
+ul.todo {
+  list-style: none;
+  margin: 1.4rem 0;
+  padding: 0;
+  display: grid;
+  gap: 1rem;
+}
+
+li.todo-item {
+  background: var(--paper-raised);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 1rem 1.2rem;
+}
+
+.todo-item-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+}
+
+.todo-item-head input[type="checkbox"] {
+  margin-top: 0.3rem;
+  width: 1.1rem;
+  height: 1.1rem;
+  accent-color: var(--accent);
+  flex: none;
+}
+
+.todo-item-head label {
+  font-weight: 600;
+}
+
+li.todo-item.done {
+  opacity: 0.6;
+}
+
+li.todo-item.done .todo-item-head label {
+  text-decoration: line-through;
+  text-decoration-color: var(--muted);
+}
+
+.todo-item-body {
+  margin-left: 1.8rem;
+}
+
+.todo-item-body > :first-child { margin-top: 0.5rem; }
+.todo-item-body > :last-child { margin-bottom: 0; }
+
+/* --- Checkpoint: describes expected observable behavior, never code --- */
+.checkpoint {
+  background: var(--good-soft);
+  border: 1px solid var(--rule);
+  border-left: 4px solid var(--good);
+  border-radius: 4px;
+  padding: 1rem 1.2rem;
+  margin: 1.6rem 0;
+}
+
+.checkpoint > :first-child { margin-top: 0; }
+.checkpoint > :last-child { margin-bottom: 0; }
+
+.checkpoint-label {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--good);
+  display: block;
+  margin-bottom: 0.4rem;
+  font-weight: 600;
+}
+
+/* --- Idiom: a Go-specific quirk/gotcha callout, this workspace's
+   equivalent of multiplayer_game_backends' .ds-parallel device --- */
+.idiom {
+  background: var(--accent-soft);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 1rem 1.2rem;
+  margin: 1.6rem 0;
+}
+
+.idiom > :first-child { margin-top: 0; }
+.idiom > :last-child { margin-bottom: 0; }
+
+.idiom-label {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  display: block;
+  margin-bottom: 0.4rem;
+  font-weight: 600;
+}
+
+/* --- Repeat marker: flags a section as deliberate repetition of prior
+   lessons, so it reads as "by design" rather than filler --- */
+.repeat-banner {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 0.3rem;
+  margin: 0 0 0.6rem;
+}
+
+.lesson-nav {
+  margin-top: 3.5rem;
+  padding-top: 1.4rem;
+  border-top: 1px solid var(--rule);
+  display: flex;
+  justify-content: space-between;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.9rem;
+}
+
+.ask-your-teacher {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.88rem;
+  color: var(--muted);
+  background: var(--accent-soft);
+  border-radius: 6px;
+  padding: 0.9rem 1.1rem;
+  margin: 2.4rem 0 0;
+}
+
+@media print {
+  body { padding: 0; font-size: 12pt; }
+  details.reveal:not([open]) { display: none; }
+  a { color: inherit; }
+}
