@@ -1,0 +1,274 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_cli_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 4 · Nested Subcommands, By Hand</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go CLI Basics · Lesson 4 of 12</p>
+  <h1>Nested Subcommands, By Hand</h1>
+  <p class="subtitle">Rebuild Lessons 1–3 from memory first. Then give <code>burrow</code> its first real verb: <code>burrow find --path .</code> instead of just <code>burrow --path .</code>.</p>
+
+  <p class="lede">This is the lesson the whole mission has been pointing at: today <code>burrow</code> stops being a single-purpose program and starts dispatching to <code>find</code>, <code>du</code>, and <code>perm</code> — the first real step toward the <code>foo bar baz --arg val</code> shape from <a href="../MISSION.md">the mission</a>. Only <code>find</code> will do real work today; <code>du</code> and <code>perm</code> just prove the dispatch works, ready for Lessons 6 and 7 to fill in.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–3</div>
+
+  <p>Rebuild the whole single-command <code>burrow</code> from memory before changing anything — you're about to gut its <code>getConfig</code>, so make sure you remember what it looked like first.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-full-file">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-full-file-cb">
+        <label for="repeat-full-file-cb">Your <code>main.go</code> currently has: a <code>Config</code> struct with a <code>Path</code> field, a <code>getConfig()</code> that fills it from a <code>-path</code> flag, a <code>walk(root string) error</code> using <code>filepath.WalkDir</code> to print every visited path, a <code>run(cfg Config) error</code> that calls <code>walk(cfg.Path)</code>, and a <code>main</code> that wires <code>getConfig</code> → <code>run</code> → stderr-and-exit on error.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Forgot? Show the whole file</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"flag"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+)
+
+type Config struct {
+	Path string
+}
+
+func getConfig() (Config, error) {
+	path := flag.String("path", ".", "path to inspect")
+	flag.Parse()
+	return Config{Path: *path}, nil
+}
+
+func walk(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		fmt.Println(path)
+		return nil
+	})
+}
+
+func run(cfg Config) error {
+	return walk(cfg.Path)
+}
+
+func main() {
+	cfg, err := getConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := run(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run . -path .</code> still walks and prints your current directory, same as it did at the end of Lesson 3, before you touch anything below.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: a subcommand per verb</h2>
+
+  <p>Right now every flag has to come before any positional argument, and there's only ever one thing <code>burrow</code> can do. A real nested CLI reads its <strong>first</strong> argument as a verb — <code>find</code>, <code>du</code>, or <code>perm</code> — and only <em>that verb's own flags</em> after it. Go's standard library supports this directly: instead of the single global <code>flag.Parse()</code> you used in Lesson 2 (which parses <code>flag.CommandLine</code>, one shared set for the whole program), <a href="https://pkg.go.dev/flag#NewFlagSet"><code>flag.NewFlagSet(name, flag.ExitOnError)</code></a> creates an independent flag set you control yourself — you decide which slice of <code>os.Args</code> it parses.</p>
+
+  <p>That's the other new piece: <a href="https://pkg.go.dev/os#Args"><code>os.Args</code></a>, the raw command-line arguments as a <code>[]string</code>. <code>os.Args[0]</code> is always the program's own path — not a flag, not a subcommand. <code>os.Args[1]</code> is where a verb like <code>find</code> would land. Everything from <code>os.Args[2:]</code> onward belongs to that verb's own flag set.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="config-command-field">
+      <div class="todo-item-head">
+        <input type="checkbox" id="config-command-field-cb">
+        <label for="config-command-field-cb">Add a <code>Command</code> field (a <code>string</code>) to <code>Config</code>, alongside the existing <code>Path</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the type</summary>
+          <div class="reveal-body">
+            <pre><code>type Config struct {
+	Command string
+	Path    string
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="getconfig-checks-args">
+      <div class="todo-item-head">
+        <input type="checkbox" id="getconfig-checks-args-cb">
+        <label for="getconfig-checks-args-cb">At the top of <code>getConfig()</code>, check whether <code>os.Args</code> has at least a subcommand in it. If not, return an error saying one is expected.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Remember <code>os.Args[0]</code> is the program itself — you need a subcommand at index <code>1</code>, so the length check is against <code>2</code>, not <code>1</code>.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the check</summary>
+          <div class="reveal-body">
+            <pre><code>if len(os.Args) < 2 {
+	return Config{}, fmt.Errorf("expected a subcommand: find, du, or perm")
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="getconfig-switch-find">
+      <div class="todo-item-head">
+        <input type="checkbox" id="getconfig-switch-find-cb">
+        <label for="getconfig-switch-find-cb">Below that check, <code>switch</code> on <code>os.Args[1]</code>. For the <code>"find"</code> case: create a <code>flag.NewFlagSet("find", flag.ExitOnError)</code>, register its own <code>-path</code> flag (default <code>"."</code>), call the flag set's <code>Parse(os.Args[2:])</code>, and return <code>Config{Command: "find", Path: *path}</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>This is the exact same <code>flag.String</code> call shape from Lesson 2 — the only difference is you're calling it on your own <code>flag.NewFlagSet</code> instead of the package-level <code>flag</code> functions, and parsing <code>os.Args[2:]</code> instead of relying on the global <code>flag.Parse()</code>.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the case</summary>
+          <div class="reveal-body">
+            <pre><code>case "find":
+	fs := flag.NewFlagSet("find", flag.ExitOnError)
+	path := fs.String("path", ".", "path to search")
+	fs.Parse(os.Args[2:])
+	return Config{Command: "find", Path: *path}, nil</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="getconfig-switch-stubs">
+      <div class="todo-item-head">
+        <input type="checkbox" id="getconfig-switch-stubs-cb">
+        <label for="getconfig-switch-stubs-cb">Add <code>"du"</code> and <code>"perm"</code> cases with the exact same shape (their own <code>flag.NewFlagSet</code>, their own <code>-path</code> flag) — they don't do anything real yet, but the dispatch needs to recognize them.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show both cases</summary>
+          <div class="reveal-body">
+            <pre><code>case "du":
+	fs := flag.NewFlagSet("du", flag.ExitOnError)
+	path := fs.String("path", ".", "path to inspect")
+	fs.Parse(os.Args[2:])
+	return Config{Command: "du", Path: *path}, nil
+case "perm":
+	fs := flag.NewFlagSet("perm", flag.ExitOnError)
+	path := fs.String("path", ".", "path to inspect")
+	fs.Parse(os.Args[2:])
+	return Config{Command: "perm", Path: *path}, nil</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="getconfig-default">
+      <div class="todo-item-head">
+        <input type="checkbox" id="getconfig-default-cb">
+        <label for="getconfig-default-cb">Add a <code>default</code> case to the switch that returns an "unknown subcommand" error naming whatever <code>os.Args[1]</code> actually was.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the case</summary>
+          <div class="reveal-body">
+            <pre><code>default:
+	return Config{}, fmt.Errorf("unknown subcommand %q", os.Args[1])</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-switch">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-switch-cb">
+        <label for="run-switch-cb">Rewrite <code>run(cfg Config)</code> to <code>switch</code> on <code>cfg.Command</code>: <code>"find"</code> calls your Lesson 3 <code>walk(cfg.Path)</code>; <code>"du"</code> and <code>"perm"</code> just print a placeholder line naming themselves and return <code>nil</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func run(cfg Config) error {
+	switch cfg.Command {
+	case "find":
+		return walk(cfg.Path)
+	case "du":
+		fmt.Println("burrow du: not implemented yet")
+		return nil
+	case "perm":
+		fmt.Println("burrow perm: not implemented yet")
+		return nil
+	}
+	return nil
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <p>Now prove all five paths through it:</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="try-find">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-find-cb">
+        <label for="try-find-cb">Run <code>burrow find -path .</code>, then <code>burrow find</code> with no <code>-path</code> at all.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Both walk your current directory — the second one because <code>-path</code> still defaults to <code>"."</code>, exactly as before, just one level deeper in the argument list now.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="try-du-perm">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-du-perm-cb">
+        <label for="try-du-perm-cb">Run <code>burrow du</code> and <code>burrow perm</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Each prints its own "not implemented yet" placeholder — proof the dispatch reached the right branch even though there's no real work behind it yet.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="try-no-subcommand">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-no-subcommand-cb">
+        <label for="try-no-subcommand-cb">Run <code>burrow</code> with no arguments at all, then <code>burrow bogus</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The first prints your "expected a subcommand" message to stderr and exits nonzero. The second prints your "unknown subcommand" message, naming <code>bogus</code> specifically, and also exits nonzero.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Why bother with a separate <code>flag.NewFlagSet</code> per subcommand instead of just keeping Lesson 2's single <code>flag.Parse()</code>? Because the package-level <code>flag.CommandLine</code> parses starting from <code>os.Args[1]</code> and stops at the first argument that doesn't look like a flag — which means <code>find</code> itself would stop it cold, and <code>-path</code> would have to come <em>before</em> the verb (<code>burrow -path . find</code>) to be seen at all. That's backwards from how real nested CLIs read. Giving each subcommand its own flag set, parsing only <code>os.Args[2:]</code>, is what makes <code>burrow find -path .</code> — verb first, its own flags after — actually work.</p>
+  </div>
+
+  <p>This is the exact mechanism Lesson 5 reuses to go one level deeper: <code>find</code> itself will grow a second verb (<code>find name --pattern ...</code>), parsed out of <code>os.Args[2:]</code> the same way <code>find</code> was just parsed out of <code>os.Args[1:]</code>. Once that lands, <code>burrow find name --pattern "*.go"</code> is the <code>foo bar baz --arg val</code> shape from the mission, done by hand with nothing but the standard library.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why <code>os.Args[0]</code> isn't the subcommand, why the global <code>flag.Parse()</code> breaks with subcommands, why <code>du</code> and <code>perm</code> get full <code>Config</code> plumbing before they do anything, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://pkg.go.dev/flag#NewFlagSet">pkg.go.dev, <code>flag.NewFlagSet</code></a> for exactly how an independent flag set differs from the package-level one; <a href="https://pkg.go.dev/os#Args">pkg.go.dev, <code>os.Args</code></a> for the guarantee that index 0 is always the program path.</p>
+
+  <div class="lesson-nav">
+    <a href="./0003-walking-a-directory-tree.html">← Lesson 3: Walking a Directory Tree</a>
+    <a href="../index.html">Course contents</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

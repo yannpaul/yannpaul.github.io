@@ -1,0 +1,195 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_cli_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 3 · Walking a Directory Tree</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go CLI Basics · Lesson 3 of 12</p>
+  <h1>Walking a Directory Tree</h1>
+  <p class="subtitle">Rebuild Lessons 1–2 from memory first. Then make <code>burrow</code> actually look at the filesystem for the first time.</p>
+
+  <p class="lede">Today's new skill: visit every file and directory under a path using <code>filepath.WalkDir</code>. This is the rough draft <code>find</code> will refine once subcommands exist in Lesson 4 — for now, <code>burrow</code> just prints everything it sees.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–2</div>
+
+  <p>Try each of these from memory before opening its hint.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-module-skeleton">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-module-skeleton-cb">
+        <label for="repeat-module-skeleton-cb">A <code>burrow</code> module exists, with <code>main.go</code> wired as <code>getConfig()</code> → <code>run(cfg)</code> → error-to-stderr-and-exit — not logic dumped straight into <code>main</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Forgot? Show the shape</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	cfg, err := getConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := run(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="repeat-config-flag">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-config-flag-cb">
+        <label for="repeat-config-flag-cb">A <code>Config</code> struct with a <code>Path</code> field exists, and <code>getConfig()</code> fills it from a <code>-path</code> flag (default <code>"."</code>) using the standard library's <code>flag</code> package.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Forgot? Show the shape</summary>
+          <div class="reveal-body">
+            <pre><code>type Config struct {
+	Path string
+}
+
+func getConfig() (Config, error) {
+	path := flag.String("path", ".", "path to inspect")
+	flag.Parse()
+	return Config{Path: *path}, nil
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="repeat-run-prints">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-run-prints-cb">
+        <label for="repeat-run-prints-cb"><code>run(cfg Config) error</code> exists and does something with <code>cfg.Path</code> — right now, probably just printing it.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run . -path /tmp</code> still runs cleanly and mentions <code>/tmp</code> somewhere in its output before you touch anything today.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: actually looking at the filesystem</h2>
+
+  <p>Everything so far has treated <code>cfg.Path</code> as a plain string — <code>burrow</code> never actually opened it. That changes today, using <a href="https://pkg.go.dev/path/filepath#WalkDir"><code>filepath.WalkDir</code></a>: it walks a directory tree, calling a function you provide once for every file and directory it finds, starting with the root itself.</p>
+
+  <p>The function you hand it has a fixed shape: <code>func(path string, d fs.DirEntry, err error) error</code>. <code>path</code> is the full path to the current entry; <code>d</code> describes it (name, whether it's a directory, and more, from the <a href="https://pkg.go.dev/io/fs#DirEntry"><code>io/fs</code></a> package); <code>err</code> is non-nil if WalkDir couldn't even read that entry (e.g. a permission error) — you decide what to do about it. Your function's own return value controls what happens next: <code>nil</code> continues, <code>filepath.SkipDir</code> skips the rest of a directory without stopping the whole walk, and any other error stops everything and comes back out as <code>WalkDir</code>'s own return value.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-walk">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-walk-cb">
+        <label for="write-walk-cb">Write a function <code>walk(root string) error</code> that uses <code>filepath.WalkDir</code> to print every path it visits under <code>root</code>, one per line, and returns whatever <code>WalkDir</code> returns.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Inside your callback: if the <code>err</code> parameter is non-nil, return it immediately (don't try to print a broken entry). Otherwise print <code>path</code> and return <code>nil</code>.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func walk(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		fmt.Println(path)
+		return nil
+	})
+}</code></pre>
+            <p>Add <code>"io/fs"</code> and <code>"path/filepath"</code> to your import block.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-calls-walk">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-calls-walk-cb">
+        <label for="run-calls-walk-cb">Change <code>run(cfg Config)</code> to call <code>walk(cfg.Path)</code> and return its result directly, replacing whatever it printed before.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func run(cfg Config) error {
+	return walk(cfg.Path)
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="try-walk-cwd">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-walk-cwd-cb">
+        <label for="try-walk-cwd-cb">Run <code>burrow</code> with no flags, from inside your <code>burrow</code> project directory.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run .</code> prints <code>.</code> on its own first line (the root itself counts as a visited entry), then every file in the directory — at minimum <code>go.mod</code> and <code>main.go</code> — one per line, in lexical (alphabetical-ish) order.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="try-walk-subdir">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-walk-subdir-cb">
+        <label for="try-walk-subdir-cb">Make a subdirectory with a file inside it, and point <code>-path</code> at it.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Need a subdirectory to test with?</summary>
+          <div class="reveal-body">
+            <pre><code>mkdir sub
+echo hi > sub/nested.txt
+go run . -path sub</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Output is exactly <code>sub</code> followed by <code>sub/nested.txt</code> — the walk descended into the subdirectory on its own, without you writing any recursion.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p><code>filepath.WalkDir</code> replaced an older function, <code>filepath.Walk</code>, which is still around but shouldn't be reached for in new code. The difference: <code>Walk</code>'s callback receives an <code>os.FileInfo</code>, which requires a full <code>stat</code> system call for <em>every single entry</em> — expensive on a large tree. <code>WalkDir</code>'s callback receives a lighter-weight <code>fs.DirEntry</code> that already has the name and directory-or-not bit without stating anything; you only pay for a full <code>Stat()</code> call if you explicitly ask <code>d.Info()</code> for one. For a tool like <code>burrow</code> that may walk large trees (Lesson 6's disk-usage report will stat every file on purpose, but <code>find</code> shouldn't have to), that difference matters.</p>
+  </div>
+
+  <p>Also worth noticing now, because it'll matter the moment <code>burrow</code> needs to skip anything: your callback gets a chance to react to <em>every</em> entry, including directories, before <code>WalkDir</code> descends into them. Returning <code>filepath.SkipDir</code> when <code>d.IsDir()</code> is true skips that whole subtree — the mechanism a later lesson will use to skip things like <code>.git</code>.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — the callback's exact signature, when to return <code>filepath.SkipDir</code> versus a plain error, why <code>WalkDir</code> beats hand-rolled recursion, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://pkg.go.dev/path/filepath#WalkDir">pkg.go.dev, <code>filepath.WalkDir</code></a> and <a href="https://pkg.go.dev/io/fs#DirEntry">pkg.go.dev, <code>io/fs.DirEntry</code></a> for the exact callback contract and the <code>Walk</code>-vs-<code>WalkDir</code> performance distinction called out in the package documentation itself.</p>
+
+  <div class="lesson-nav">
+    <a href="./0002-reading-arguments-without-being-shown-them.html">← Lesson 2: Reading Arguments Without Being Shown Them</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0004-nested-subcommands-by-hand.html">Next: Nested Subcommands, By Hand →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>
