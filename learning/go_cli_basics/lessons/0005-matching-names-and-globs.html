@@ -1,0 +1,301 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_cli_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 5 · Matching Names and Globs</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go CLI Basics · Lesson 5 of 12</p>
+  <h1>Matching Names and Globs</h1>
+  <p class="subtitle">Rebuild Lessons 1–4 from memory first. Then make <code>find</code> itself grow a second verb — the exact <code>foo bar baz --arg val</code> shape from the mission.</p>
+
+  <p class="lede">Today: <code>burrow find name --pattern "*.md"</code>, for real. <code>find</code> stops being a single subcommand and becomes a dispatcher of its own, one level deeper than Lesson 4's top-level dispatch — reusing the <em>exact same trick</em>, just applied recursively.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–4</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-full-file">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-full-file-cb">
+        <label for="repeat-full-file-cb">Your <code>main.go</code> currently has: a <code>Config</code> struct (<code>Command</code>, <code>Path</code>), a <code>getConfig()</code> that checks <code>len(os.Args)</code>, switches on <code>os.Args[1]</code>, and builds a per-subcommand <code>flag.NewFlagSet</code> for <code>find</code>, <code>du</code>, and <code>perm</code>; a <code>walk(root string) error</code> using <code>filepath.WalkDir</code>; a <code>run(cfg Config) error</code> that switches on <code>cfg.Command</code>; and <code>main</code> wiring <code>getConfig</code> → <code>run</code> → stderr-and-exit.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Forgot? Show the whole file</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"flag"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+)
+
+type Config struct {
+	Command string
+	Path    string
+}
+
+func getConfig() (Config, error) {
+	if len(os.Args) < 2 {
+		return Config{}, fmt.Errorf("expected a subcommand: find, du, or perm")
+	}
+
+	switch os.Args[1] {
+	case "find":
+		fs := flag.NewFlagSet("find", flag.ExitOnError)
+		path := fs.String("path", ".", "path to search")
+		fs.Parse(os.Args[2:])
+		return Config{Command: "find", Path: *path}, nil
+	case "du":
+		fs := flag.NewFlagSet("du", flag.ExitOnError)
+		path := fs.String("path", ".", "path to inspect")
+		fs.Parse(os.Args[2:])
+		return Config{Command: "du", Path: *path}, nil
+	case "perm":
+		fs := flag.NewFlagSet("perm", flag.ExitOnError)
+		path := fs.String("path", ".", "path to inspect")
+		fs.Parse(os.Args[2:])
+		return Config{Command: "perm", Path: *path}, nil
+	default:
+		return Config{}, fmt.Errorf("unknown subcommand %q", os.Args[1])
+	}
+}
+
+func walk(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		fmt.Println(path)
+		return nil
+	})
+}
+
+func run(cfg Config) error {
+	switch cfg.Command {
+	case "find":
+		return walk(cfg.Path)
+	case "du":
+		fmt.Println("burrow du: not implemented yet")
+		return nil
+	case "perm":
+		fmt.Println("burrow perm: not implemented yet")
+		return nil
+	}
+	return nil
+}
+
+func main() {
+	cfg, err := getConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := run(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>burrow find -path .</code>, <code>burrow du</code>, and <code>burrow perm</code> all still behave exactly as they did at the end of Lesson 4, before you touch anything below.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: <code>find</code> dispatches to its own subcommand</h2>
+
+  <p><code>find</code>'s current <code>case</code> in <code>getConfig()</code> handles its own <code>-path</code> flag directly. Today that case stops doing the work itself and instead becomes a dispatcher, exactly like <code>getConfig()</code> itself is — it looks at <code>os.Args[2]</code> (the argument right after <code>find</code>) to decide <em>which kind</em> of find, then hands the rest (<code>os.Args[3:]</code>) to a flag set of its own. Only one kind exists so far: <code>name</code>, which matches filenames against a glob pattern using <a href="https://pkg.go.dev/path/filepath#Match"><code>filepath.Match(pattern, name)</code></a> — the same shell-style wildcards you'd use at a terminal (<code>*</code>, <code>?</code>, <code>[abc]</code>), matched against one path element at a time, not a whole path.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="config-add-pattern">
+      <div class="todo-item-head">
+        <input type="checkbox" id="config-add-pattern-cb">
+        <label for="config-add-pattern-cb">Add a <code>Pattern</code> field (a <code>string</code>) to <code>Config</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the field</summary>
+          <div class="reveal-body">
+            <pre><code>type Config struct {
+	Command string
+	Path    string
+	Pattern string
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="extract-getfindconfig">
+      <div class="todo-item-head">
+        <input type="checkbox" id="extract-getfindconfig-cb">
+        <label for="extract-getfindconfig-cb">Write a new function <code>getFindConfig() (Config, error)</code>. Move the <code>"find"</code> case's job into it, but change what it does: check <code>len(os.Args)</code> is at least <code>3</code> (erroring "expected a find subcommand: name" if not), then <code>switch</code> on <code>os.Args[2]</code>. For <code>"name"</code>: a <code>flag.NewFlagSet("find name", flag.ExitOnError)</code> with <em>both</em> a <code>-pattern</code> flag (default <code>"*"</code>) and a <code>-path</code> flag (default <code>"."</code>), parsed from <code>os.Args[3:]</code>. Add a <code>default</code> case erroring on an unrecognized find subcommand.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Notice the pattern: this is <em>identical in shape</em> to what <code>getConfig()</code> itself does — check a length, switch on the next argument, build a flag set from one slice further into <code>os.Args</code>. Nested subcommands are just this same recipe applied again, one argument deeper.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func getFindConfig() (Config, error) {
+	if len(os.Args) < 3 {
+		return Config{}, fmt.Errorf("expected a find subcommand: name")
+	}
+
+	switch os.Args[2] {
+	case "name":
+		fs := flag.NewFlagSet("find name", flag.ExitOnError)
+		pattern := fs.String("pattern", "*", "glob pattern to match filenames against")
+		path := fs.String("path", ".", "path to search")
+		fs.Parse(os.Args[3:])
+		return Config{Command: "find name", Path: *path, Pattern: *pattern}, nil
+	default:
+		return Config{}, fmt.Errorf("unknown find subcommand %q", os.Args[2])
+	}
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="getconfig-calls-getfindconfig">
+      <div class="todo-item-head">
+        <input type="checkbox" id="getconfig-calls-getfindconfig-cb">
+        <label for="getconfig-calls-getfindconfig-cb">Replace <code>getConfig()</code>'s old <code>"find"</code> case with a single line calling <code>getFindConfig()</code> and returning its result.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the case</summary>
+          <div class="reveal-body">
+            <pre><code>case "find":
+	return getFindConfig()</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="write-findname">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-findname-cb">
+        <label for="write-findname-cb">Turn your Lesson 3 <code>walk</code> function into a new <code>findName(root, pattern string) error</code>: same <code>filepath.WalkDir</code> shape, but instead of unconditionally printing every path, call <code>filepath.Match(pattern, d.Name())</code> and only print the path when it matches.</label>
+      </div>
+      <div class="todo-item-body">
+        <p><code>filepath.Match</code> itself can return an error (a malformed pattern) — don't ignore it, return it the same way you return the walk's own <code>err</code>.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func findName(root, pattern string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		matched, err := filepath.Match(pattern, d.Name())
+		if err != nil {
+			return err
+		}
+		if matched {
+			fmt.Println(path)
+		}
+		return nil
+	})
+}</code></pre>
+            <p>You can delete the old <code>walk</code> function now — nothing calls it anymore.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-find-name">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-find-name-cb">
+        <label for="run-find-name-cb">In <code>run</code>, change the <code>"find"</code> case to a <code>"find name"</code> case that calls <code>findName(cfg.Path, cfg.Pattern)</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the case</summary>
+          <div class="reveal-body">
+            <pre><code>case "find name":
+	return findName(cfg.Path, cfg.Pattern)</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <p>Now prove all four paths through it. Make a couple of test files first if your <code>burrow</code> directory doesn't already have a mix of extensions:</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="try-pattern">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-pattern-cb">
+        <label for="try-pattern-cb">Run <code>burrow find name --pattern "*.go"</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Need a mix of files to test with?</summary>
+          <div class="reveal-body">
+            <pre><code>echo hi > notes.txt
+mkdir sub
+echo hi > sub/helper.go</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Output lists only <code>.go</code> files — at minimum <code>main.go</code> and <code>sub/helper.go</code> — never <code>notes.txt</code>, <code>go.mod</code>, or the bare directory names.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="try-default-pattern">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-default-pattern-cb">
+        <label for="try-default-pattern-cb">Run <code>burrow find name</code> with no <code>--pattern</code> at all.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The default pattern <code>*</code> matches everything, so this behaves like Lesson 4's plain <code>find</code> did — every file and directory, one per line.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="try-find-no-subcommand">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-find-no-subcommand-cb">
+        <label for="try-find-no-subcommand-cb">Run <code>burrow find</code> alone, then <code>burrow find bogus</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The first prints "expected a find subcommand: name" to stderr and exits nonzero. The second prints "unknown find subcommand" naming <code>bogus</code>, also nonzero. <code>burrow du</code> and <code>burrow perm</code> are untouched — still their Lesson 4 stubs.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p><code>filepath.Match</code>'s patterns are shell globs, not regular expressions — <code>*</code> matches any run of characters, <code>?</code> matches exactly one, <code>[abc]</code> matches one of a set — and critically, <code>*</code> does <em>not</em> cross a path separator, and <code>Match</code> is only ever called here against <code>d.Name()</code>, one filename at a time, never the full accumulated <code>path</code>. That's why matching still needs <code>filepath.WalkDir</code> doing the recursion — <code>Match</code> itself has no idea about directory trees at all, it just compares one name against one pattern.</p>
+  </div>
+
+  <p>You've now built the mission's exact example from scratch: <code>burrow find name --pattern "*.go"</code> is <code>foo bar baz --arg val</code>, three levels deep, using nothing but the standard library. Lesson 6 applies this same nested-dispatch recipe to <code>du</code> instead of <code>find</code> — different data, identical shape.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why <code>getFindConfig</code> mirrors <code>getConfig</code> so closely, glob syntax versus regex, why <code>Match</code> only sees one name at a time, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://pkg.go.dev/path/filepath#Match">pkg.go.dev, <code>filepath.Match</code></a> for the exact glob syntax supported and its explicit statement that patterns never match across path separators.</p>
+
+  <div class="lesson-nav">
+    <a href="./0004-nested-subcommands-by-hand.html">← Lesson 4: Nested Subcommands, By Hand</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0006-sizes-sorting-and-structs.html">Next: Sizes, Sorting, and Structs →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

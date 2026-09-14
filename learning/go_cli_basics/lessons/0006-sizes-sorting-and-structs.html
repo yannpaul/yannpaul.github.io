@@ -1,0 +1,314 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_cli_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 6 · Sizes, Sorting, and Structs</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go CLI Basics · Lesson 6 of 12</p>
+  <h1>Sizes, Sorting, and Structs</h1>
+  <p class="subtitle">Rebuild Lessons 1–5 from memory first. Then give <code>du</code> the exact same nested-dispatch treatment <code>find</code> got in Lesson 5 — and make it actually report something.</p>
+
+  <p class="lede">Today: <code>burrow du top --n 5</code>, an <code>ncdu</code>-style report of the biggest entries under a path. The dispatch mechanics are nothing new — Lesson 5's recipe, applied to <code>du</code> instead of <code>find</code>. What's new is the actual work: measuring file sizes, and sorting.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–5</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-find-name">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-find-name-cb">
+        <label for="repeat-find-name-cb"><code>burrow find name --pattern "*.go"</code> still works, from your Lesson 5 code, before you touch <code>du</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Forgot the shape of a nested dispatcher? Show Lesson 5's <code>getFindConfig</code></summary>
+          <div class="reveal-body">
+            <pre><code>func getFindConfig() (Config, error) {
+	if len(os.Args) < 3 {
+		return Config{}, fmt.Errorf("expected a find subcommand: name")
+	}
+
+	switch os.Args[2] {
+	case "name":
+		fs := flag.NewFlagSet("find name", flag.ExitOnError)
+		pattern := fs.String("pattern", "*", "glob pattern to match filenames against")
+		path := fs.String("path", ".", "path to search")
+		fs.Parse(os.Args[3:])
+		return Config{Command: "find name", Path: *path, Pattern: *pattern}, nil
+	default:
+		return Config{}, fmt.Errorf("unknown find subcommand %q", os.Args[2])
+	}
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Pattern matching, the "expected a find subcommand" error, and the "unknown find subcommand" error all still behave exactly as they did at the end of Lesson 5.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: <code>du</code> dispatches too — and does real work</h2>
+
+  <p><code>du</code>'s current case in <code>getConfig()</code> is still Lesson 4's stub: it takes a <code>-path</code> flag and does nothing with it. Today it gets Lesson 5's exact treatment — its own <code>getDuConfig()</code>, dispatching on <code>os.Args[2]</code> to a <code>top</code> subcommand — plus, for the first time, code that actually measures something on disk: <a href="https://pkg.go.dev/io/fs#DirEntry"><code>d.Info()</code></a> on a directory entry returns an <code>fs.FileInfo</code>, whose <a href="https://pkg.go.dev/io/fs#FileInfo"><code>Size()</code></a> method gives a file's size in bytes.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="config-add-n">
+      <div class="todo-item-head">
+        <input type="checkbox" id="config-add-n-cb">
+        <label for="config-add-n-cb">Add an <code>N</code> field (an <code>int</code>) to <code>Config</code>, for "how many entries to show."</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the field</summary>
+          <div class="reveal-body">
+            <pre><code>type Config struct {
+	Command string
+	Path    string
+	Pattern string
+	N       int
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="write-getduconfig">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-getduconfig-cb">
+        <label for="write-getduconfig-cb">Write <code>getDuConfig() (Config, error)</code>: check <code>len(os.Args)</code> is at least <code>3</code> (erroring "expected a du subcommand: top" if not), then switch on <code>os.Args[2]</code>. For <code>"top"</code>: a <code>flag.NewFlagSet("du top", flag.ExitOnError)</code> with a <code>-path</code> flag (default <code>"."</code>) and an <code>-n</code> flag (default <code>10</code>, using <code>fs.Int</code> instead of <code>fs.String</code> this time) parsed from <code>os.Args[3:]</code>. Add a <code>default</code> case for an unrecognized du subcommand.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>This should feel almost identical to writing <code>getFindConfig</code> last lesson — same shape, different flags.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func getDuConfig() (Config, error) {
+	if len(os.Args) < 3 {
+		return Config{}, fmt.Errorf("expected a du subcommand: top")
+	}
+
+	switch os.Args[2] {
+	case "top":
+		fs := flag.NewFlagSet("du top", flag.ExitOnError)
+		path := fs.String("path", ".", "path to inspect")
+		n := fs.Int("n", 10, "how many entries to show")
+		fs.Parse(os.Args[3:])
+		return Config{Command: "du top", Path: *path, N: *n}, nil
+	default:
+		return Config{}, fmt.Errorf("unknown du subcommand %q", os.Args[2])
+	}
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="getconfig-calls-getduconfig">
+      <div class="todo-item-head">
+        <input type="checkbox" id="getconfig-calls-getduconfig-cb">
+        <label for="getconfig-calls-getduconfig-cb">Replace <code>getConfig()</code>'s old <code>"du"</code> case with a call to <code>getDuConfig()</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the case</summary>
+          <div class="reveal-body">
+            <pre><code>case "du":
+	return getDuConfig()</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="dirsize-struct">
+      <div class="todo-item-head">
+        <input type="checkbox" id="dirsize-struct-cb">
+        <label for="dirsize-struct-cb">Define a small struct <code>dirSize</code> with a <code>Name</code> (<code>string</code>) and a <code>Size</code> (<code>int64</code>) field.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Note this is a <em>different</em> struct from <code>Config</code> — <code>Config</code> holds what the CLI was told to do; <code>dirSize</code> holds one measurement your code produces while doing it. Don't reuse <code>Config</code> for this.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the type</summary>
+          <div class="reveal-body">
+            <pre><code>type dirSize struct {
+	Name string
+	Size int64
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="write-sizeof">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-sizeof-cb">
+        <label for="write-sizeof-cb">Write <code>sizeOf(root string) (int64, error)</code>: use <code>filepath.WalkDir</code> to add up the size of every <em>regular file</em> under <code>root</code> (skip directories themselves — they have no meaningful size of their own here), and return the running total.</label>
+      </div>
+      <div class="todo-item-body">
+        <p><code>d.IsDir()</code> tells you whether an entry is a directory. For files, call <code>d.Info()</code> to get an <code>fs.FileInfo</code>, then <code>.Size()</code> on that.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func sizeOf(root string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		total += info.Size()
+		return nil
+	})
+	return total, err
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="write-dutop">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-dutop-cb">
+        <label for="write-dutop-cb">Write <code>duTop(root string, n int) error</code>: list the immediate entries of <code>root</code> with <code>os.ReadDir</code>, call <code>sizeOf</code> on each one's full path (build it with <code>filepath.Join(root, entry.Name())</code>), collect the results as <code>[]dirSize</code>, sort that slice by <code>Size</code> descending, then print the top <code>n</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Use <a href="https://pkg.go.dev/sort#Slice"><code>sort.Slice</code></a> — it takes your slice and a "less" function you write yourself, so you control the ordering directly instead of needing a named type that implements an interface. Guard against <code>n</code> being bigger than the number of entries you actually found.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func duTop(root string, n int) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+
+	var sizes []dirSize
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		size, err := sizeOf(path)
+		if err != nil {
+			return err
+		}
+		sizes = append(sizes, dirSize{Name: entry.Name(), Size: size})
+	}
+
+	sort.Slice(sizes, func(i, j int) bool {
+		return sizes[i].Size > sizes[j].Size
+	})
+
+	if n > len(sizes) {
+		n = len(sizes)
+	}
+	for _, s := range sizes[:n] {
+		fmt.Printf("%10d  %s\n", s.Size, s.Name)
+	}
+	return nil
+}</code></pre>
+            <p>Add <code>"sort"</code> to your import block.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-du-top">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-du-top-cb">
+        <label for="run-du-top-cb">In <code>run</code>, change the <code>"du"</code> case to a <code>"du top"</code> case that calls <code>duTop(cfg.Path, cfg.N)</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the case</summary>
+          <div class="reveal-body">
+            <pre><code>case "du top":
+	return duTop(cfg.Path, cfg.N)</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <p>Now build a scratch directory with sizes you know in advance, so you can check the ordering exactly:</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="build-scratch">
+      <div class="todo-item-head">
+        <input type="checkbox" id="build-scratch-cb">
+        <label for="build-scratch-cb">Make a <code>scratch</code> directory with two subdirectories: <code>big</code>, containing one 100-byte file, and <code>small</code>, containing two 10-byte files.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>mkdir -p scratch/big scratch/small
+head -c 100 /dev/zero > scratch/big/data.bin
+head -c 10 /dev/zero > scratch/small/a.bin
+head -c 10 /dev/zero > scratch/small/b.bin</code></pre>
+            <p>On Windows, any way of creating files of those exact sizes works — the byte counts are what matter, not how you made them.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="try-du-top">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-du-top-cb">
+        <label for="try-du-top-cb">Run <code>burrow du top --path scratch --n 2</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Two lines: <code>big</code> first showing <code>100</code>, then <code>small</code> showing <code>20</code> (10 + 10) — biggest first.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="try-du-top-n1">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-du-top-n1-cb">
+        <label for="try-du-top-n1-cb">Run the same command with <code>--n 1</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Only the <code>big</code> line prints — the guard you wrote for "<code>n</code> bigger than what exists" doesn't come into play here, but you can test it too, by trying <code>--n 5</code> against a directory that only has two entries and confirming it doesn't panic.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="try-du-no-subcommand">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-du-no-subcommand-cb">
+        <label for="try-du-no-subcommand-cb">Run <code>burrow du</code> alone.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Prints "expected a du subcommand: top" to stderr and exits nonzero — the same shape as Lesson 5's "expected a find subcommand" error. <code>find name</code> and <code>perm</code> are untouched.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p><code>sort.Slice</code> doesn't return anything — it sorts <code>sizes</code> in place, using your "less" function (<code>func(i, j int) bool</code>) every time it needs to compare two elements by their index. Writing <code>sizes[i].Size &gt; sizes[j].Size</code> (greater-than, not less-than) is what makes the sort descending — a common trip-up, since "less" functions almost always default to reading as ascending unless you deliberately flip the comparison like this.</p>
+  </div>
+
+  <p>Notice what didn't need to change: <code>sizeOf</code> reuses the exact same <code>filepath.WalkDir</code> shape from Lessons 3 and 5, just accumulating a number instead of printing or matching. Three lessons in a row have now reached for the same tool for a different job — that's the pattern to internalize, not any one lesson's specific code.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why <code>dirSize</code> is a separate struct from <code>Config</code>, how <code>sort.Slice</code>'s comparison function works, why <code>d.Info()</code> can fail even though <code>d.IsDir()</code> already succeeded, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://pkg.go.dev/io/fs#FileInfo">pkg.go.dev, <code>fs.FileInfo</code></a> for what <code>Size()</code> actually reports; <a href="https://pkg.go.dev/sort#Slice">pkg.go.dev, <code>sort.Slice</code></a> for the exact contract of the comparison function.</p>
+
+  <div class="lesson-nav">
+    <a href="./0005-matching-names-and-globs.html">← Lesson 5: Matching Names and Globs</a>
+    <a href="../index.html">Course contents</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>
