@@ -256,7 +256,37 @@ print totalSize</code></pre>
     <p>The dividing line worth internalizing: reach for a print statement when you just need a quick fact ("is this branch running," "roughly what's in this variable") and the edit-run loop is fast. Reach for <code>delve</code> when you need to pause at a specific moment and look around — inspect a whole struct, walk a call stack, or step through a loop iteration by iteration without editing code each time you want to check something new. Neither replaces the other; this lesson's first half (never discard an error) prevents the largest category of bug that would otherwise send you to either one for nothing.</p>
   </div>
 
-  <p>Put together, in order: stop swallowing errors first — most of what looks like a mystery turns out to be exactly that. Reach for a print statement for a fast fact. Reach for <code>delve</code> when you need to actually watch the program think.</p>
+  <h2>One more thing: the bug that isn't a bug</h2>
+
+  <p>Not every "my program gives the wrong answer" is a bug in the program. A remarkably common alternative: the test data doesn't match what you think it matches. You build a scratch directory to check <code>du top</code>, run it, and the numbers look wrong — but the actual cause is that a file you meant to create <em>inside</em> a subdirectory landed one level up instead, sitting at the top level alongside it. Nothing in <code>duTop</code>, <code>sizeOf</code>, or the sort is broken; the input simply isn't the input you meant to build. Every tool this lesson covered — <code>errcheck</code>, a print statement, <code>delve</code> — would have told you your code was doing exactly what it was told to do, because it was.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="verify-fixture-before-code">
+      <div class="todo-item-head">
+        <input type="checkbox" id="verify-fixture-before-code-cb">
+        <label for="verify-fixture-before-code-cb">Before trusting a "this looks wrong" instinct about a command's output, list what your <code>--path</code> actually contains and count it against what your program printed (or would print with a large enough <code>-n</code> to show everything).</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>ls -la /path/you/tested</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The number of entries <code>ls -la</code> shows (minus <code>.</code> and <code>..</code>) matches the number of lines your program reports. If it doesn't, you've found a real bug worth taking to <code>errcheck</code>, a print statement, or <code>delve</code>. If it does, and every value is explainable once you actually look at what's there, there was never a bug — only a test that quietly stopped matching what you thought you'd built.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>This is debugging step zero, before any tool: verify your assumptions about the input are still true, not just your memory of what the input was supposed to be. It costs one <code>ls</code>, and it's astonishing how often it's the entire fix.</p>
+  </div>
+
+  <p>Put together, in order: check your own inputs first — the cheapest bug to fix is the one that was never a bug. Stop swallowing errors next — most of what's left that looks like a mystery turns out to be exactly that. Reach for a print statement for a fast fact. Reach for <code>delve</code> when you need to actually watch the program think.</p>
 
   <div class="ask-your-teacher">
     Something unclear — why <code>go vet</code> doesn't catch discarded errors, the difference between <code>next</code> and <code>step</code> in delve, when a print statement should become a real <code>--verbose</code> flag instead of getting deleted, anything else? Ask your teacher (me) before moving on.
