@@ -1,0 +1,205 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_concurrency_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1 · Your First Goroutine</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go Concurrency Basics · Lesson 1 of 9</p>
+  <h1>Your First Goroutine</h1>
+  <p class="subtitle">A small standalone demo today — not <code>burrow</code> yet. Lesson 2 applies this for real.</p>
+
+  <p class="lede">This course exists because <code>burrow du top</code> scans one subdirectory at a time, in a plain loop, even though each subdirectory's size is completely independent of every other one — exactly the shape of problem goroutines exist for. But the first thing to learn about a goroutine has nothing to do with speed: it's that starting one and <em>waiting</em> for it are two completely separate steps, and forgetting the second one is the single most common first mistake. Today is that lesson, small and isolated, before Lesson 2 puts it to real use.</p>
+
+  <h2>Before you start</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="baseline-burrow">
+      <div class="todo-item-head">
+        <input type="checkbox" id="baseline-burrow-cb">
+        <label for="baseline-burrow-cb">Confirm your existing <code>burrow</code> (from <a href="../../go_cli_basics/">Go CLI Basics</a>) still builds and <code>du top</code> still works, exactly as it did at the end of that course.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>cd /path/to/your/burrow
+go build ./...
+./burrow du top --path . --n 5</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Builds cleanly, prints a sorted size report, same as before. Don't touch <code>main.go</code> yet — today's work happens in a throwaway scratch file, not <code>burrow</code> itself.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="scratch-dir">
+      <div class="todo-item-head">
+        <input type="checkbox" id="scratch-dir-cb">
+        <label for="scratch-dir-cb">Create a throwaway scratch directory, separate from <code>burrow</code>, for today's demo.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>mkdir goroutine-demo
+cd goroutine-demo
+go mod init goroutine-demo</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: starting a goroutine doesn't wait for it</h2>
+
+  <p>Prefixing any function call with the <code>go</code> keyword starts it as a <strong>goroutine</strong> — an independently running unit of work that the Go runtime schedules on its own — and the line right after <code>go</code> keeps running immediately. Nothing waits. Nothing pauses. If <code>main</code> has nothing else to do, it simply exits, and every goroutine still running when that happens is torn down with it — no error, no warning, no partial cleanup.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-demo">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-demo-cb">
+        <label for="write-demo-cb">Write a <code>main.go</code>: start a goroutine that prints one message, then have <code>main</code> print a different message of its own right after, with nothing else in between.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import "fmt"
+
+func main() {
+	go func() {
+		fmt.Println("hello from a goroutine")
+	}()
+	fmt.Println("hello from main")
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-demo-repeatedly">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-demo-repeatedly-cb">
+        <label for="run-demo-repeatedly-cb">Run it five or six times in a row.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>go run .</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>You'll almost certainly see <code>hello from main</code> print every single time, and <code>hello from a goroutine</code> never print at all. <code>main</code> finishes its one remaining line and exits before the goroutine — which has to be scheduled onto a thread from scratch — ever gets a chance to run. Nothing here is guaranteed by the language (in principle the scheduler could interleave differently), but on real hardware this outcome is overwhelming, and consistent, and that's the point: <code>go</code> genuinely does not wait.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>A goroutine is not an OS thread, and this course avoids calling it one. The Go runtime multiplexes potentially thousands of goroutines onto a small pool of real OS threads, starting and scheduling them far more cheaply than the operating system would a thread — which is exactly why "just start ten thousand goroutines" is a normal, unremarkable thing to write in Go, where it would be unthinkable with OS threads directly. See Rob Pike's talk "Concurrency Is Not Parallelism" (linked below) for the deeper point this course will keep returning to: concurrency is about structuring independent pieces of work, not, by itself, about making anything run faster.</p>
+  </div>
+
+  <h2>New: making main actually wait — <code>sync.WaitGroup</code></h2>
+
+  <p>To make <code>main</code> wait for a goroutine on purpose, use a <a href="https://pkg.go.dev/sync#WaitGroup"><code>sync.WaitGroup</code></a> — a counter safe to touch from multiple goroutines at once. The shape is always the same three calls: <code>Add(n)</code> increases the counter by <code>n</code>, <code>Done()</code> decreases it by one, and <code>Wait()</code> blocks until it reaches zero.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="add-waitgroup">
+      <div class="todo-item-head">
+        <input type="checkbox" id="add-waitgroup-cb">
+        <label for="add-waitgroup-cb">Add a <code>sync.WaitGroup</code>: call <code>Add(1)</code> before starting the goroutine, <code>defer wg.Done()</code> as the first line inside it, and <code>wg.Wait()</code> before <code>main</code>'s own print.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		fmt.Println("hello from a goroutine")
+	}()
+	wg.Wait()
+	fmt.Println("hello from main")
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-fixed-demo">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-fixed-demo-cb">
+        <label for="run-fixed-demo-cb">Run it several times again.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>go run .</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Every run now prints <code>hello from a goroutine</code> followed by <code>hello from main</code> — always in that order, every time. <code>main</code> is now genuinely blocked at <code>wg.Wait()</code> until the goroutine's deferred <code>Done()</code> fires, so it physically cannot reach its own print first.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="race-check-demo">
+      <div class="todo-item-head">
+        <input type="checkbox" id="race-check-demo-cb">
+        <label for="race-check-demo-cb">Run it once more under the race detector, just to see the flag exists — nothing should be flagged here.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>go run -race .</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Identical output, no warnings — this demo has nothing two goroutines touch at once, so there's nothing to catch. You'll see <code>-race</code> earn its keep in a later lesson, on purpose.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Two <code>WaitGroup</code> mistakes worth naming now, before they cost you an hour later. First: always call <code>Add</code> from the goroutine that's <em>starting</em> the work, never from inside the goroutine itself — if <code>Wait()</code> happens to run before a self-<code>Add</code>ing goroutine gets scheduled, the counter can still be zero and <code>Wait()</code> returns immediately, as if nothing were running at all. Second: a missing <code>Done()</code> — say, an early <code>return</code> before it, or a panic — leaves the counter permanently above zero, and <code>Wait()</code> blocks forever. That's exactly why this workspace's standing habit is <code>defer wg.Done()</code> as the very first line inside the goroutine: a deferred call still fires on any exit path, including a panic.</p>
+  </div>
+
+  <p>That's the whole lesson: <code>go</code> starts something and does not wait; <code>WaitGroup</code> is how you make something wait on purpose. Lesson 2 puts this exact pattern to work on <code>burrow</code>'s real bottleneck.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why the unfixed demo's ordering isn't <em>guaranteed</em> even though it's reliable in practice, the two <code>WaitGroup</code> mistakes, why goroutines aren't threads, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://go.dev/tour/concurrency/1">go.dev, "A Tour of Go": Goroutines</a> for the core mechanics; <a href="https://pkg.go.dev/sync#WaitGroup">pkg.go.dev, <code>sync.WaitGroup</code></a> for the exact contract of <code>Add</code>/<code>Done</code>/<code>Wait</code>; Rob Pike, <a href="https://go.dev/blog/waza-talk">"Concurrency Is Not Parallelism"</a> for the conceptual frame this workspace keeps returning to.</p>
+
+  <div class="lesson-nav">
+    <a href="../index.html">Course contents</a>
+    <a href="./0002-goroutines-that-do-real-work.html">Next: Goroutines That Do Real Work →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

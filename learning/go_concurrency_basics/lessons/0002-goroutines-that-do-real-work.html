@@ -1,0 +1,235 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_concurrency_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 2 · Goroutines That Do Real Work</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go Concurrency Basics · Lesson 2 of 9</p>
+  <h1>Goroutines That Do Real Work</h1>
+  <p class="subtitle">Rebuild Lesson 1's demo from memory first. Then parallelize <code>burrow du top</code> for real, in <code>main.go</code> this time.</p>
+
+  <p class="lede">Today <code>duTop</code> stops scanning subdirectories one at a time. Each call to <code>sizeOf</code> is independent — nothing about summing one subdirectory's size depends on any other's — which makes this exactly the shape of problem goroutines exist for, not an invented example.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lesson 1</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-waitgroup-demo">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-waitgroup-demo-cb">
+        <label for="repeat-waitgroup-demo-cb">From memory, in your Lesson 1 scratch directory: a goroutine that prints a message, a <code>sync.WaitGroup</code> that makes <code>main</code> wait for it, ordering reliably correct across several runs.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Forgot? Show Lesson 1's shape</summary>
+          <div class="reveal-body">
+            <pre><code>var wg sync.WaitGroup
+wg.Add(1)
+go func() {
+	defer wg.Done()
+	fmt.Println("hello from a goroutine")
+}()
+wg.Wait()
+fmt.Println("hello from main")</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The goroutine's line prints before main's line, every time, before you touch <code>burrow</code> below.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: one goroutine per subdirectory</h2>
+
+  <p>Open your <code>burrow</code> project's <code>main.go</code>. Right now <code>duTop</code> loops over <code>dirs</code> and calls <code>sizeOf</code> once per entry, appending each result as it finishes. Today that loop starts a goroutine per entry instead — but collecting <code>N</code> results from <code>N</code> independent goroutines needs a plan for <em>where each result goes</em> that doesn't let two goroutines collide.</p>
+
+  <p>The plan: pre-size the results slice to the exact number of entries (<code>make([]dirSize, len(dirs))</code>) instead of starting it empty and appending, and give each goroutine its own index to write into. Since no two goroutines ever touch the same index, there's no data race — even though many goroutines are all writing into the same slice variable.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="presize-slice">
+      <div class="todo-item-head">
+        <input type="checkbox" id="presize-slice-cb">
+        <label for="presize-slice-cb">In <code>duTop</code>, replace <code>var dSizes []dirSize</code> with <code>dSizes := make([]dirSize, len(dirs))</code>, and change the loop to <code>for i, d := range dirs</code> so you have each entry's index.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the change</summary>
+          <div class="reveal-body">
+            <pre><code>dSizes := make([]dirSize, len(dirs))
+for i, d := range dirs {
+	// ...
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="wrap-in-goroutine">
+      <div class="todo-item-head">
+        <input type="checkbox" id="wrap-in-goroutine-cb">
+        <label for="wrap-in-goroutine-cb">Add a <code>sync.WaitGroup</code>. Inside the loop: <code>wg.Add(1)</code>, then start a goroutine taking <code>i</code> and the entry's name as its own parameters (not captured from the loop), that computes the size and writes <code>dSizes[i] = dirSize{p, s}</code> directly — no <code>append</code>. Call <code>wg.Wait()</code> right after the loop, before sorting.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Pass <code>i</code> and <code>d.Name()</code> as arguments to the goroutine's function literal, rather than referring to the loop variables directly inside it — that's what makes each goroutine's copy of <code>i</code> and the name stable and its own, regardless of how far the loop has moved on by the time the goroutine actually runs.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the loop</summary>
+          <div class="reveal-body">
+            <pre><code>var wg sync.WaitGroup
+for i, d := range dirs {
+	wg.Add(1)
+	go func(i int, name string) {
+		defer wg.Done()
+		p := filepath.Join(root, name)
+		s, err := sizeOf(p)
+		if err != nil {
+			// handled next
+		}
+		dSizes[i] = dirSize{p, s}
+	}(i, d.Name())
+}
+wg.Wait()</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: getting an error out of a goroutine</h2>
+
+  <p>Lesson 7 of <a href="../../go_cli_basics/">Go CLI Basics</a> was explicit: never discard an error. But a goroutine has no return value anyone is watching — you can't <code>return err</code> out of one the way <code>sizeOf</code> does. What you need is one small piece of state every goroutine can report a failure into: a shared <code>error</code> variable, protected by a <a href="https://pkg.go.dev/sync#Mutex"><code>sync.Mutex</code></a> — a lock that only one goroutine can hold at a time, so two goroutines can never write to that variable simultaneously.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="mutex-error">
+      <div class="todo-item-head">
+        <input type="checkbox" id="mutex-error-cb">
+        <label for="mutex-error-cb">Add a <code>sync.Mutex</code> and a shared <code>error</code> variable. Inside the goroutine, if <code>sizeOf</code> fails: lock the mutex, record the error only if none has been recorded yet (keep the <em>first</em> one), unlock, and return early — skip the <code>dSizes[i]</code> write. After <code>wg.Wait()</code>, check that shared error and return it before sorting or printing anything.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the full function</summary>
+          <div class="reveal-body">
+            <pre><code>func duTop(root string, n int) error {
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+
+	dSizes := make([]dirSize, len(dirs))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
+	for i, d := range dirs {
+		wg.Add(1)
+		go func(i int, name string) {
+			defer wg.Done()
+			p := filepath.Join(root, name)
+			s, err := sizeOf(p)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
+			}
+			dSizes[i] = dirSize{p, s}
+		}(i, d.Name())
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+
+	sort.Slice(dSizes, func(i, j int) bool { return dSizes[i].Size > dSizes[j].Size })
+	n = min(len(dSizes), n)
+	for _, d := range dSizes[:n] {
+		fmt.Printf("%10d %q\n", d.Size, d.Name)
+	}
+	return nil
+}</code></pre>
+            <p>Add <code>"sync"</code> to your import block.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <p>Prove it against the same fixture Lesson 6 of <a href="../../go_cli_basics/">Go CLI Basics</a> used:</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="rebuild-fixture">
+      <div class="todo-item-head">
+        <input type="checkbox" id="rebuild-fixture-cb">
+        <label for="rebuild-fixture-cb">Rebuild (or reuse) a scratch directory with a 100-byte <code>big/</code>, a 20-byte <code>small/</code> (two 10-byte files), and an empty <code>empty/</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>mkdir -p scratch/big scratch/small scratch/empty
+head -c 100 /dev/zero > scratch/big/data.bin
+head -c 10 /dev/zero > scratch/small/a.bin
+head -c 10 /dev/zero > scratch/small/b.bin</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-parallel-dutop">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-parallel-dutop-cb">
+        <label for="run-parallel-dutop-cb">Run <code>burrow du top --path scratch --n 10</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Identical output to the serial version: <code>big</code> at <code>100</code>, <code>small</code> at <code>20</code>, <code>empty</code> at <code>0</code>, sorted descending — the parallel version has to produce exactly the same answer, just by a different route.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="race-check-dutop">
+      <div class="todo-item-head">
+        <input type="checkbox" id="race-check-dutop-cb">
+        <label for="race-check-dutop-cb">Run the same command under the race detector.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>go run -race . du top --path scratch --n 10</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Same output, no warnings. This is the actual proof the indexed-write pattern is safe — not just that it happened to work once.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Notice <code>dSizes[i] = ...</code> needed no mutex, but <code>firstErr</code> did. The difference isn't "one is a slice and one isn't" — it's whether two goroutines can ever touch the <em>same memory</em>. Every goroutine's index into <code>dSizes</code> is unique by construction, so two goroutines are never writing to the same slot; <code>firstErr</code>, by contrast, is exactly one variable every goroutine could write to. A mutex exists to protect memory multiple goroutines genuinely share — reach for one exactly there, and nowhere else, or you'll pay for locks you don't need.</p>
+  </div>
+
+  <p><code>burrow du top</code> is now actually concurrent — and, per the race detector, actually correct. Lesson 3 replaces the mutex-protected-error trick with a channel instead, and explains why Go's own advice leans that direction.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why the goroutine takes <code>i</code> and the name as parameters instead of reading the loop variables directly, why only the error needed a mutex, what would happen if you used <code>append</code> instead of an indexed write here, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://pkg.go.dev/sync#Mutex">pkg.go.dev, <code>sync.Mutex</code></a>; <a href="https://go.dev/doc/effective_go#concurrency">go.dev, "Effective Go": Concurrency</a> for the broader framing this course keeps building on.</p>
+
+  <div class="lesson-nav">
+    <a href="./0001-your-first-goroutine.html">← Lesson 1: Your First Goroutine</a>
+    <a href="../index.html">Course contents</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

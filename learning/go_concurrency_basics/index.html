@@ -1,0 +1,37 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_concurrency_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Go Concurrency Through burrow</title>
+<link rel="stylesheet" href="./assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Learning · Go Concurrency Through burrow</p>
+  <h1>Go Concurrency Through burrow</h1>
+  <p class="subtitle">Learn goroutines and channels by fixing a real bottleneck in <code>burrow</code>, the CLI tool from <a href="../go_cli_basics/">Go CLI Basics</a>: <code>du top</code> currently scans every subdirectory one at a time. Same format as that course — a checklist, not a script, with code hidden behind collapsed disclosures until you're stuck.</p>
+
+  <p class="lede">Nine lessons, each a self-contained page. Every lesson (from Lesson 2 on) opens by making you redo everything structural from prior lessons before teaching anything new. Only Lessons 1–2 are written so far; the rest are scoped below and will be built out in future sessions. This workspace assumes you already have a working <code>burrow</code> — built across <a href="../go_cli_basics/">Go CLI Basics</a>' lessons — on your own machine; lessons here tell you what to change in that existing code.</p>
+
+  <h2>Lessons</h2>
+  <ol>
+    <li><a href="./lessons/0001-your-first-goroutine.html">Your First Goroutine</a> — the <code>go</code> keyword, why it doesn't wait for anything, and <code>sync.WaitGroup</code> as the fix, on a small standalone demo before touching <code>burrow</code></li>
+    <li><a href="./lessons/0002-goroutines-that-do-real-work.html">Goroutines That Do Real Work</a> — parallelize <code>duTop</code>'s directory scanning for real: one goroutine per entry, an indexed slice write to collect results race-free, and a mutex-protected error so Lesson 7's "never discard an error" still holds</li>
+    <li><strong>Coming up — Share Memory By Communicating</strong> — introduce channels as Go's preferred alternative to a shared variable plus a lock, and send <code>duTop</code>'s results over one instead</li>
+    <li><strong>Coming up — A Real Data Race, On Purpose</strong> — deliberately break <code>duTop</code> with an unsynchronized <code>append</code>, catch it with <code>go run -race</code>, and see exactly why Lesson 2's indexed-write pattern never had this problem</li>
+    <li><strong>Coming up — Buffered vs. Unbuffered Channels</strong> — when a send actually blocks, and what changes (and doesn't) when a channel has room</li>
+    <li><strong>Coming up — <code>select</code> and Timeouts</strong> — read from more than one channel at once, and bound how long <code>du top</code> will wait on a slow subdirectory</li>
+    <li><strong>Coming up — Worker Pools: Bounded Concurrency</strong> — why "one goroutine per file" breaks down on a huge tree, and a fixed pool of workers pulling work off a channel instead</li>
+    <li><strong>Coming up — Upgrading to errgroup</strong> — replace the by-hand <code>WaitGroup</code> + mutex-protected-error pattern with <code>golang.org/x/sync/errgroup</code>, the real-world library answer, mirroring how <code>go_cli_basics</code> moved from by-hand dispatch to <code>cobra</code></li>
+    <li><strong>Coming up — Capstone: Concurrent burrow, Race-Free and Benchmarked</strong> — pull every technique together, compare serial vs. parallel wall-clock time on a large test tree, and defend every synchronization choice in the finished code</li>
+  </ol>
+
+  <div class="lesson-nav">
+    <a href="../">← All topics</a>
+    <a href="./lessons/0001-your-first-goroutine.html">Start: Lesson 1 →</a>
+  </div>
+</main>
+</body>
+</html>
