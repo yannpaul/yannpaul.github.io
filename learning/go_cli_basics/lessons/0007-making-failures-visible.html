@@ -1,0 +1,274 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_cli_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 7 · Making Failures Visible</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go CLI Basics · Lesson 7 of 13</p>
+  <h1>Making Failures Visible</h1>
+  <p class="subtitle">Rebuild Lessons 1–6 from memory first. Then learn why "it just does nothing" is almost never true — and what to reach for once errors can't hide anymore.</p>
+
+  <p class="lede">This lesson exists because of a bug you can very plausibly have right now: a subcommand case in <code>run</code> that calls a function returning <code>error</code>, without returning that error itself. It compiles clean. <code>go vet</code> says nothing. It just quietly does less than it should, some of the time, with no message at all. Today's job is learning to (1) stop that class of bug from hiding in the first place, and (2) actually watch a program's insides when something still goes wrong anyway.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–6</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-three-commands">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-three-commands-cb">
+        <label for="repeat-three-commands-cb">Confirm, from memory, that all three top-level commands still work: <code>burrow find name --pattern "*.go"</code>, <code>burrow du top --n 3</code>, and <code>burrow perm</code> (still a stub).</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Forgot the overall shape? Show the skeleton (bodies omitted)</summary>
+          <div class="reveal-body">
+            <pre><code>type Config struct {
+	Command string
+	Path    string
+	Pattern string
+	N       int
+}
+
+func getConfig() (Config, error) { /* dispatches on os.Args[1] to getFindConfig / getDuConfig / a perm flag set */ }
+func getFindConfig() (Config, error) { /* dispatches on os.Args[2]: "name" */ }
+func getDuConfig() (Config, error) { /* dispatches on os.Args[2]: "top" */ }
+
+func run(cfg Config) error {
+	switch cfg.Command {
+	case "find name":
+		return findName(cfg.Path, cfg.Pattern)
+	case "du top":
+		return duTop(cfg.Path, cfg.N)
+	case "perm":
+		fmt.Println("burrow perm: not implemented yet")
+		return nil
+	}
+	return nil
+}
+
+func main() {
+	cfg, err := getConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := run(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>All three commands print what you'd expect from Lessons 5–6, with no crashes, before you touch anything below. Pay close attention to <code>run</code>'s <code>"du top"</code> (or however you named that case) — you'll be looking hard at it in a moment.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: find the error you're already throwing away</h2>
+
+  <p>Look at every <code>case</code> inside your <code>run</code> function. Each one calls a function that returns <code>error</code> — <code>findName</code>, <code>duTop</code>, and eventually <code>perm</code>'s real implementation. A case that calls one of those functions but doesn't <code>return</code> its result has thrown the error away. If that function fails partway — a permission error, a path that doesn't exist, anything — your program will look like it succeeded: exit code <code>0</code>, no message, and whatever partial work got done before the failure, silently incomplete.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="audit-run">
+      <div class="todo-item-head">
+        <input type="checkbox" id="audit-run-cb">
+        <label for="audit-run-cb">Read every case in <code>run</code>. For each one that calls a function returning <code>error</code> without a <code>return</code> in front of it, add one.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the shape of the fix</summary>
+          <div class="reveal-body">
+            <pre><code>case "du top":
+	return duTop(cfg.Path, cfg.N)</code></pre>
+            <p>Not <code>duTop(cfg.Path, cfg.N)</code> on its own — that line runs the function and then throws away the only thing it told you about whether it worked.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-go-vet">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-go-vet-cb">
+        <label for="run-go-vet-cb">Before fixing anything, run <code>go vet ./...</code> against your code as it was — <em>including</em> the dropped-error case you just found.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>go vet ./...</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Exits with status <code>0</code> and prints nothing — even with the bug still in place. <code>go vet</code> catches real classes of mistakes (a <code>Printf</code> verb that doesn't match its argument, unreachable code, a few dozen others), but a discarded <code>error</code> return isn't one of them. Clean <code>vet</code> output is not the same thing as "no bugs."</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="install-errcheck">
+      <div class="todo-item-head">
+        <input type="checkbox" id="install-errcheck-cb">
+        <label for="install-errcheck-cb">Install <code>errcheck</code>, a linter built specifically to catch discarded error returns, and run it against your project.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>go install github.com/kisielk/errcheck@latest
+errcheck ./...</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>One line of output per discarded error, formatted <code>file:line:col:\t&lt;the expression whose error was ignored&gt;</code>. If you already applied the fix above, your <code>run</code> case won't be in the list anymore; if you haven't yet, it will be — that line is <code>errcheck</code> pointing at the exact bug this lesson opened with.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>This isn't an oversight in <code>go vet</code> — it's a deliberate consequence of how Go models errors. An <code>error</code> is just an ordinary value, returned like any other; there's no "must-use" marker forcing you to look at it, the way some languages warn on an unused <code>Result</code>. That's exactly why the <code>if err != nil { return err }</code> pattern this course has used since Lesson 1 is a habit you enforce yourself, not something the compiler enforces for you — and why a tool like <code>errcheck</code> exists to catch the moments discipline alone missed. Many teams wire it into <code>golangci-lint</code> and run it in CI for exactly this reason.</p>
+  </div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="trigger-real-failure">
+      <div class="todo-item-head">
+        <input type="checkbox" id="trigger-real-failure-cb">
+        <label for="trigger-real-failure-cb">With the fix in place, deliberately point a command at something that doesn't exist — <code>burrow du top --path /no/such/directory</code> — and confirm the failure is now visible.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>A real error message prints to stderr (something naming the missing path — the exact wording comes from <code>os.ReadDir</code>) and the process exits with a nonzero status. Before your fix, this same command would have printed nothing at all.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>Print debugging: fast, and completely legitimate</h2>
+
+  <p>Once errors can't hide, some bugs will still need real investigation — the logic ran, nothing failed, but the result is wrong. The fastest tool for that in Go is the same one you've probably already reached for without thinking of it as a technique: a <code>fmt.Println</code> or <code>fmt.Printf</code> dropped at a decision point to see what's actually happening. There's no special setup, no tooling to learn, and the edit-run loop (<code>go run .</code>) is fast enough that it's often the right first move, not a lesser one.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="find-old-print">
+      <div class="todo-item-head">
+        <input type="checkbox" id="find-old-print-cb">
+        <label for="find-old-print-cb">Look inside your <code>sizeOf</code> function from Lesson 6. If you've still got a stray <code>fmt.Printf</code> printing every path or filename it visits, you've already been print-debugging — that's exactly this technique, left running in production by accident.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>That's not a trick question — it's genuinely easy to leave a debug print in once it's done its job. Decide now: delete it, or leave it deliberately (some tools keep a <code>--verbose</code> flag around for exactly this kind of output — a real feature this course hasn't built yet, but worth remembering as the "grown-up" version of a debug print you didn't want to lose).</p>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>You've made a conscious decision either way — not left it in by accident.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Print debugging's real cost isn't that it's unsophisticated — it's that it's manual on both ends. You have to remember to add it, and remember to remove it (or it ships, the way that <code>sizeOf</code> print quietly did). It also only shows you what you thought to print, at the moment you thought to print it. For "is this branch running, and roughly what does this value look like," it's usually the fastest honest answer. For "let me pause here and look around," it isn't the right tool at all.</p>
+  </div>
+
+  <h2>delve: pausing the program instead of printing at it</h2>
+
+  <p><a href="https://github.com/go-delve/delve">Delve</a> (<code>dlv</code>) is Go's standard debugger — it runs your program under its control and lets you stop it at a specific line, inspect variables as they actually are in memory, and step forward one line at a time, without editing any code to do it.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="install-dlv">
+      <div class="todo-item-head">
+        <input type="checkbox" id="install-dlv-cb">
+        <label for="install-dlv-cb">Install delve.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>go install github.com/go-delve/delve/cmd/dlv@latest</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="dlv-breakpoint">
+      <div class="todo-item-head">
+        <input type="checkbox" id="dlv-breakpoint-cb">
+        <label for="dlv-breakpoint-cb">Start a debug session against <code>du top</code>, set a breakpoint at <code>sizeOf</code>, and run to it.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>dlv debug . -- du top --path . --n 5</code></pre>
+            <p>Once you're at the <code>(dlv)</code> prompt:</p>
+            <pre><code>break sizeOf
+continue</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Execution stops right at the top of <code>sizeOf</code>, before <code>totalSize</code> has even been declared — printing it right now would fail, since it doesn't exist in scope yet. That's expected, not a mistake.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="dlv-step-print">
+      <div class="todo-item-head">
+        <input type="checkbox" id="dlv-step-print-cb">
+        <label for="dlv-step-print-cb">Step forward a line at a time with <code>next</code>, and use <code>print totalSize</code> to watch its value once it exists.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>next
+next
+print totalSize</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>next</code> steps over the <code>filepath.WalkDir(...)</code> call as a single line — it runs the entire walk (every file under that root) in one step, since that's all one statement, rather than pausing inside the callback for each file. When you print <code>totalSize</code> afterward, you'll see the finished total for that one entry, not a running count. If you wanted to pause <em>inside</em> the walk instead, on each visited file, that's what <code>step</code> is for — it steps into a call instead of over it. Try setting a second breakpoint inside the callback itself (on the <code>totalSize += i.Size()</code> line, or whatever's on it) and <code>continue</code> to it if you want to see that instead.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="dlv-quit">
+      <div class="todo-item-head">
+        <input type="checkbox" id="dlv-quit-cb">
+        <label for="dlv-quit-cb">Let it run to completion with <code>continue</code> (it'll stop once per top-level entry, since your breakpoint is still armed), then exit with <code>quit</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>You're back at your normal shell prompt, and the program's usual output (the sorted size report) printed in between your breakpoint hits, exactly like a normal run — delve doesn't change what the program does, only your ability to watch it happen.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>The dividing line worth internalizing: reach for a print statement when you just need a quick fact ("is this branch running," "roughly what's in this variable") and the edit-run loop is fast. Reach for <code>delve</code> when you need to pause at a specific moment and look around — inspect a whole struct, walk a call stack, or step through a loop iteration by iteration without editing code each time you want to check something new. Neither replaces the other; this lesson's first half (never discard an error) prevents the largest category of bug that would otherwise send you to either one for nothing.</p>
+  </div>
+
+  <p>Put together, in order: stop swallowing errors first — most of what looks like a mystery turns out to be exactly that. Reach for a print statement for a fast fact. Reach for <code>delve</code> when you need to actually watch the program think.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why <code>go vet</code> doesn't catch discarded errors, the difference between <code>next</code> and <code>step</code> in delve, when a print statement should become a real <code>--verbose</code> flag instead of getting deleted, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://go.dev/doc/diagnostics">go.dev, "Diagnostics"</a> for the official overview of Go's debugging, profiling, and tracing tools; <a href="https://pkg.go.dev/cmd/vet">pkg.go.dev, <code>cmd/vet</code></a> for exactly which checks <code>go vet</code> runs (and by implication, which it doesn't); <a href="https://github.com/kisielk/errcheck">github.com/kisielk/errcheck</a>; <a href="https://github.com/go-delve/delve/tree/master/Documentation/cli">Delve CLI documentation</a> for the full command reference beyond <code>break</code>/<code>continue</code>/<code>next</code>/<code>step</code>/<code>print</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="./0006-sizes-sorting-and-structs.html">← Lesson 6: Sizes, Sorting, and Structs</a>
+    <a href="../index.html">Course contents</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

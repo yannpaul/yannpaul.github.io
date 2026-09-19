@@ -13,7 +13,7 @@
   <h1>Go Basics Through a CLI Tool</h1>
   <p class="subtitle">Learn Go by building <code>burrow</code> — a nested-subcommand CLI (<code>burrow find name --pattern "*.go"</code>) that finds files, reports disk usage like <code>ncdu</code>, and inspects file permissions. Every lesson is a checklist, not a script: what to build, never the code itself, with hints hidden behind collapsed disclosures for when you're stuck.</p>
 
-  <p class="lede">Twelve lessons, each a self-contained page. Every lesson (from Lesson 2 on) opens by making you redo everything structural from prior lessons before teaching anything new — that repetition is deliberate, not filler. Only Lessons 1–6 are written so far; the rest are scoped below and will be built out in future sessions.</p>
+  <p class="lede">Thirteen lessons, each a self-contained page. Every lesson (from Lesson 2 on) opens by making you redo everything structural from prior lessons before teaching anything new — that repetition is deliberate, not filler. Only Lessons 1–7 are written so far; the rest are scoped below and will be built out in future sessions.</p>
 
   <h2>Lessons</h2>
   <ol>
@@ -23,6 +23,7 @@
     <li><a href="./lessons/0004-nested-subcommands-by-hand.html">Nested Subcommands, By Hand</a> — dispatch on <code>os.Args</code> and give each of <code>find</code>, <code>du</code>, and <code>perm</code> its own <code>flag.NewFlagSet</code> — the first real <code>foo bar --arg val</code> shape</li>
     <li><a href="./lessons/0005-matching-names-and-globs.html">Matching Names and Globs</a> — use <code>filepath.Match</code> to implement <code>burrow find name --pattern</code> for real, three levels deep (<code>foo bar baz --arg val</code>)</li>
     <li><a href="./lessons/0006-sizes-sorting-and-structs.html">Sizes, Sorting, and Structs</a> — sum directory sizes recursively into a small struct, sort them, and implement <code>burrow du top --n</code> as an <code>ncdu</code>-style report</li>
+    <li><a href="./lessons/0007-making-failures-visible.html">Making Failures Visible</a> — stop silently discarding errors (and see why <code>go vet</code> won't catch it for you), then use print debugging and <code>delve</code> for what's left</li>
     <li><strong>Coming up — Permission Bits</strong> — read <code>os.FileMode</code> and use bitwise checks to implement <code>burrow perm check</code> for read/write/execute</li>
     <li><strong>Coming up — Who Owns This File</strong> — use <code>os/user</code> to implement <code>burrow perm who</code>, and the platform caveats that come with it</li>
     <li><strong>Coming up — Three Levels Deep</strong> — refactor the whole by-hand dispatcher into one clean <code>find name</code>/<code>find size</code>/<code>du top</code>/<code>perm check</code>/<code>perm who</code> tree</li>
