@@ -1,0 +1,228 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_cli_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 13 · Capstone: Polish and Recap</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go CLI Basics · Lesson 13 of 13</p>
+  <h1>Capstone: Polish and Recap</h1>
+  <p class="subtitle">Two small finishing touches. Then the whole course, from memory, with almost no hints left to lean on.</p>
+
+  <p class="lede"><code>burrow</code> already does everything it set out to do. Today: make its <code>--help</code> text actually explain itself, install it so it runs from anywhere without <code>go run</code> or a relative path, and then one long checklist — every idea from Lessons 1 through 12, in order, mostly without the safety net.</p>
+
+  <h2>New: real <code>--help</code> text</h2>
+
+  <p>Right now <code>burrow --help</code> lists <code>find</code>, <code>du</code>, and <code>perm</code> with no description next to any of them — Cobra shows whatever you gave it, and you never gave it anything. A <code>Short</code> field on any <code>*cobra.Command</code> is a one-line description shown in exactly that listing.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="add-short-descriptions">
+      <div class="todo-item-head">
+        <input type="checkbox" id="add-short-descriptions-cb">
+        <label for="add-short-descriptions-cb">Add a <code>Short</code> field to every command you built in Lesson 11: the root, <code>find</code>, <code>du</code>, <code>perm</code>, and all four leaves.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show one example</summary>
+          <div class="reveal-body">
+            <pre><code>rootCmd := &cobra.Command{
+	Use:           "burrow",
+	Short:         "burrow finds files, reports disk usage, and inspects permissions",
+	SilenceErrors: true,
+	SilenceUsage:  true,
+}</code></pre>
+            <p>Write your own wording for the rest — a short, accurate sentence for each, the same as you'd want to read if you'd never seen this tool before.</p>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>burrow --help</code> now shows a one-line description next to every command. <code>burrow find --help</code> shows one next to <code>name</code>.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="add-version">
+      <div class="todo-item-head">
+        <input type="checkbox" id="add-version-cb">
+        <label for="add-version-cb">Add a <code>Version</code> field to the root command.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the field</summary>
+          <div class="reveal-body">
+            <pre><code>Version: "0.1.0",</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>burrow --version</code> (and its shorthand, <code>burrow -v</code>) now prints it — a flag you never registered yourself. Cobra adds it automatically the moment <code>Version</code> is non-empty.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: installing it for real</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="go-install">
+      <div class="todo-item-head">
+        <input type="checkbox" id="go-install-cb">
+        <label for="go-install-cb">From your <code>burrow</code> directory, install it.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>go install .</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>A <code>burrow</code> binary now exists at <code>$(go env GOPATH)/bin/burrow</code> — check with <code>ls $(go env GOPATH)/bin</code>. If that directory is on your shell's <code>PATH</code> (a one-time setup step this lesson can't do for you — it's specific to your shell and OS), you can now run <code>burrow find name --pattern "*.go"</code> from any directory, with no <code>go run</code>, no <code>./</code>, no rebuilding.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>The recap</h2>
+
+  <p>Twelve lessons, in order. Each one below is something you demonstrated once and haven't been asked to repeat explicitly since. Do each from memory. The hints are down to a single line each — a pointer to which lesson to reread, not an answer — because this is the one lesson in the course actually meant to feel hard.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="recap-getconfig-run">
+      <div class="todo-item-head">
+        <input type="checkbox" id="recap-getconfig-run-cb">
+        <label for="recap-getconfig-run-cb">Explain, out loud or in writing, why <code>main</code> was kept almost empty from Lesson 1 onward — what specifically does keeping logic out of it buy you?</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 1, the section after the <code>getConfig</code>/<code>run</code> code.</p></div></details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="recap-flag-vs-pflag">
+      <div class="todo-item-head">
+        <input type="checkbox" id="recap-flag-vs-pflag-cb">
+        <label for="recap-flag-vs-pflag-cb">Explain the difference between the standard library's <code>flag</code> package and Cobra's <code>pflag</code> when it comes to single-dash versus double-dash flags — which one is forgiving, which one isn't, and why the strict one still won.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 2's idiom callout, then Lesson 11's.</p></div></details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="recap-walkdir">
+      <div class="todo-item-head">
+        <input type="checkbox" id="recap-walkdir-cb">
+        <label for="recap-walkdir-cb">Explain <code>filepath.WalkDir</code>'s callback signature from memory — all three parameters, what each return value does, and why it replaced <code>filepath.Walk</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 3.</p></div></details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="recap-nested-dispatch">
+      <div class="todo-item-head">
+        <input type="checkbox" id="recap-nested-dispatch-cb">
+        <label for="recap-nested-dispatch-cb">Even though Cobra replaced it, explain what <code>os.Args</code> actually contains and why a global <code>flag.Parse()</code> can't handle a verb-first CLI like <code>burrow find name --pattern x</code> on its own.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 4.</p></div></details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="recap-glob">
+      <div class="todo-item-head">
+        <input type="checkbox" id="recap-glob-cb">
+        <label for="recap-glob-cb">Explain what <code>filepath.Match</code> actually matches against — a full path or something narrower — and what that means for patterns containing a path separator.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 5's idiom callout.</p></div></details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="recap-sizing">
+      <div class="todo-item-head">
+        <input type="checkbox" id="recap-sizing-cb">
+        <label for="recap-sizing-cb">Explain why <code>dirSize</code> is a separate struct from anything else in this codebase, and what <code>sort.Slice</code>'s comparison function needs to return to sort descending instead of ascending.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 6.</p></div></details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="recap-debugging">
+      <div class="todo-item-head">
+        <input type="checkbox" id="recap-debugging-cb">
+        <label for="recap-debugging-cb">Name all three tools Lesson 7 introduced for a discarded-error bug that <code>go vet</code> won't catch, and say in one sentence each what makes them different from one another.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 7 in full — it's the longest one for a reason.</p></div></details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="recap-permbits">
+      <div class="todo-item-head">
+        <input type="checkbox" id="recap-permbits-cb">
+        <label for="recap-permbits-cb">Without looking, write the octal constant for "group write" and explain the bitwise operation that checks whether it's set in a given <code>os.FileMode</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 8.</p></div></details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="recap-ownership">
+      <div class="todo-item-head">
+        <input type="checkbox" id="recap-ownership-cb">
+        <label for="recap-ownership-cb">Explain why <code>perm who</code> won't cross-compile for Windows, in terms of what <code>.Sys()</code> actually returns and why that return type is platform-dependent at all.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 9's idiom callout.</p></div></details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="recap-dry">
+      <div class="todo-item-head">
+        <input type="checkbox" id="recap-dry-cb">
+        <label for="recap-dry-cb">Explain <code>newSubFlagSet</code>'s job in one sentence, and why Lesson 10 explicitly stopped refactoring there instead of building a bigger generic dispatcher by hand.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 10's idiom callout.</p></div></details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="recap-testing">
+      <div class="todo-item-head">
+        <input type="checkbox" id="recap-testing-cb">
+        <label for="recap-testing-cb">Explain why <code>perms</code> and <code>sizeOf</code> got tests and <code>findName</code>/<code>duTop</code>/<code>checkPerm</code>/<code>whoOwns</code> didn't — what property does a function need for a plain <code>go test</code> to be the natural tool?</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 12's idiom callout.</p></div></details>
+      </div>
+    </li>
+  </ul>
+
+  <h2>One last transfer question</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="transfer-checksum">
+      <div class="todo-item-head">
+        <input type="checkbox" id="transfer-checksum-cb">
+        <label for="transfer-checksum-cb">In words, not code: you want to add <code>burrow checksum --path &lt;file&gt;</code>, printing a file's SHA-256 hash. Name every piece you'd touch — which Cobra commands you'd create and where you'd attach them, which existing pattern in this codebase you'd copy for registering its flag, whether the function that computes the hash would be pure enough to test the way <code>perms</code> was, and what you'd need to change if it turned out you wanted <code>burrow checksum</code> to work on <em>every file under a directory</em> instead of just one.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>No hint for this one. If you can answer all four parts without opening another lesson, this course did its job.</p>
+      </div>
+    </li>
+  </ul>
+
+  <div class="callout good">
+    <span class="callout-label">Course complete</span>
+    <p><code>burrow</code> finds files, reports disk usage, and inspects permissions, through a real nested-subcommand CLI you wrote yourself — module to Cobra, one todo item at a time, with the code always coming from you first. That was the whole mission. <a href="../../go_concurrency_basics/">Go Concurrency Through burrow</a> picks this exact codebase back up if you want to keep going.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Anything from the recap that didn't come back easily — that's useful information, not a failure. Tell your teacher (me) which ones, and we can go deeper on exactly those before you consider this course finished.
+  </div>
+
+  <p class="cite">This lesson has no new primary sources — it's a review of everything Lessons 1–12 already cited. If a recap question felt shaky, that lesson's own citations are the right place to go back to.</p>
+
+  <div class="lesson-nav">
+    <a href="./0012-testing-what-you-built.html">← Lesson 12: Testing What You Built</a>
+    <a href="../index.html">Course contents</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

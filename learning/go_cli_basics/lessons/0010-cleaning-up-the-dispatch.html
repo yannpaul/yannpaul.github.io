@@ -1,0 +1,143 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_cli_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 10 · Cleaning Up the Dispatch</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go CLI Basics · Lesson 10 of 13</p>
+  <h1>Cleaning Up the Dispatch</h1>
+  <p class="subtitle">Rebuild Lessons 1–9 from memory first. No new subcommand today — a short lesson in noticing repetition and naming it.</p>
+
+  <p class="lede"><code>burrow</code> now has five working commands: <code>find name</code>, <code>du top</code>, <code>perm check</code>, <code>perm who</code>. Every single one of their <code>getXConfig</code> cases starts the exact same way — build a <code>flag.NewFlagSet</code>, register a <code>-path</code> flag, done. Today that repetition gets a name and a single definition. This is a small lesson on purpose: notice it, extract it, stop — Lesson 11 replaces the whole mechanism with a real library, so there's no point over-engineering a bigger version of this by hand first.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–9</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-all-five">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-all-five-cb">
+        <label for="repeat-all-five-cb">Confirm all five commands still work: <code>find name</code>, <code>du top</code>, <code>perm check</code>, <code>perm who</code>, and each of the "expected a subcommand" / "unknown subcommand" error paths for <code>find</code>, <code>du</code>, and <code>perm</code> alone.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>All five commands and all five error paths behave exactly as they did at the end of Lesson 9, before you touch anything below.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: naming the repetition</h2>
+
+  <p>Open <code>getFindConfig</code>, <code>getDuConfig</code>, and <code>getPermConfig</code> side by side. Every single <code>case</code> in all three starts with the same two lines: create a named <code>flag.NewFlagSet</code>, and register a <code>-path</code> string flag defaulting to <code>"."</code>. What follows differs (an extra <code>-pattern</code> here, an extra <code>-n</code> there, nothing extra in <code>perm</code>'s two cases) — but that opening pair never does.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-newsubflagset">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-newsubflagset-cb">
+        <label for="write-newsubflagset-cb">Write <code>newSubFlagSet(name string) (*flag.FlagSet, *string)</code>: build the named flag set, register the <code>-path</code> flag on it, and return both the flag set and the flag's pointer.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func newSubFlagSet(name string) (*flag.FlagSet, *string) {
+	fs := flag.NewFlagSet(name, flag.ExitOnError)
+	path := fs.String("path", ".", "path to inspect")
+	return fs, path
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="use-in-find">
+      <div class="todo-item-head">
+        <input type="checkbox" id="use-in-find-cb">
+        <label for="use-in-find-cb">Update <code>getFindConfig</code>'s <code>"name"</code> case to call <code>newSubFlagSet("find name")</code> instead of building its own flag set and <code>-path</code> flag by hand.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the case</summary>
+          <div class="reveal-body">
+            <pre><code>case "name":
+	fs, path := newSubFlagSet("find name")
+	pattern := fs.String("pattern", "*", "glob pattern to match filenames against")
+	fs.Parse(os.Args[3:])
+	return Config{Command: "find name", Path: *path, Pattern: *pattern}, nil</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="use-in-du-and-perm">
+      <div class="todo-item-head">
+        <input type="checkbox" id="use-in-du-and-perm-cb">
+        <label for="use-in-du-and-perm-cb">Do the same for <code>getDuConfig</code>'s <code>"top"</code> case and both of <code>getPermConfig</code>'s cases.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show all three</summary>
+          <div class="reveal-body">
+            <pre><code>// in getDuConfig
+case "top":
+	fs, path := newSubFlagSet("du top")
+	n := fs.Int("n", 10, "how many entries to show")
+	fs.Parse(os.Args[3:])
+	return Config{Command: "du top", Path: *path, N: *n}, nil
+
+// in getPermConfig
+case "check":
+	fs, path := newSubFlagSet("perm check")
+	fs.Parse(os.Args[3:])
+	return Config{Command: "perm check", Path: *path}, nil
+case "who":
+	fs, path := newSubFlagSet("perm who")
+	fs.Parse(os.Args[3:])
+	return Config{Command: "perm who", Path: *path}, nil</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="recheck-all-five">
+      <div class="todo-item-head">
+        <input type="checkbox" id="recheck-all-five-cb">
+        <label for="recheck-all-five-cb">Re-run every command and every error path from the warm-up above.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Byte-for-byte identical output to before the refactor — this change alters nothing about what <code>burrow</code> does, only how much of it is written down. <code>go vet ./...</code> is still clean.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>This is close to where hand-rolled deduplication of CLI dispatch should stop. You could keep going — a table mapping subcommand names to handler functions, reflection-based flag binding, a generic three-level tree walker — but at that point you're slowly rebuilding a worse version of a library that already exists and is already trusted by thousands of projects. Recognizing <em>that</em> point — "I'm about to reinvent a dependency" — is as much a part of writing idiomatic Go as any single syntax rule. Lesson 11 makes the swap.</p>
+  </div>
+
+  <p><code>newSubFlagSet</code> is a small change, but it's the right size for what it fixed: five repeated lines became one shared function, nothing about behavior moved, and every command is still exactly as easy to read as before. That's the bar for any refactor — smaller, not just different.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why this refactor stops here instead of going further, what a subcommand "registry" would even look like, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary source for this lesson: <a href="https://go.dev/doc/effective_go#functions">go.dev, "Effective Go": Functions</a> — the general Go guidance this lesson's one specific move is an example of: extract a function when the same few lines start appearing for the same reason in more than one place.</p>
+
+  <div class="lesson-nav">
+    <a href="./0009-who-owns-this-file.html">← Lesson 9: Who Owns This File</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0011-upgrading-to-cobra.html">Next: Upgrading to Cobra →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

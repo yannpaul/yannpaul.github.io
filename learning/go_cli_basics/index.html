@@ -13,7 +13,7 @@
   <h1>Go Basics Through a CLI Tool</h1>
   <p class="subtitle">Learn Go by building <code>burrow</code> — a nested-subcommand CLI (<code>burrow find name --pattern "*.go"</code>) that finds files, reports disk usage like <code>ncdu</code>, and inspects file permissions. Every lesson is a checklist, not a script: what to build, never the code itself, with hints hidden behind collapsed disclosures for when you're stuck.</p>
 
-  <p class="lede">Thirteen lessons, each a self-contained page. Every lesson (from Lesson 2 on) opens by making you redo everything structural from prior lessons before teaching anything new — that repetition is deliberate, not filler. Only Lessons 1–7 are written so far; the rest are scoped below and will be built out in future sessions.</p>
+  <p class="lede">Thirteen lessons, each a self-contained page. Every lesson (from Lesson 2 on) opens by making you redo everything structural from prior lessons before teaching anything new — that repetition is deliberate, not filler. All thirteen are now written; the course is complete. <a href="../go_concurrency_basics/">Go Concurrency Through burrow</a> picks the same codebase back up with goroutines and channels, if you want to keep going.</p>
 
   <h2>Lessons</h2>
   <ol>
@@ -24,12 +24,12 @@
     <li><a href="./lessons/0005-matching-names-and-globs.html">Matching Names and Globs</a> — use <code>filepath.Match</code> to implement <code>burrow find name --pattern</code> for real, three levels deep (<code>foo bar baz --arg val</code>)</li>
     <li><a href="./lessons/0006-sizes-sorting-and-structs.html">Sizes, Sorting, and Structs</a> — sum directory sizes recursively into a small struct, sort them, and implement <code>burrow du top --n</code> as an <code>ncdu</code>-style report</li>
     <li><a href="./lessons/0007-making-failures-visible.html">Making Failures Visible</a> — stop silently discarding errors (and see why <code>go vet</code> won't catch it for you), then use print debugging and <code>delve</code> for what's left</li>
-    <li><strong>Coming up — Permission Bits</strong> — read <code>os.FileMode</code> and use bitwise checks to implement <code>burrow perm check</code> for read/write/execute</li>
-    <li><strong>Coming up — Who Owns This File</strong> — use <code>os/user</code> to implement <code>burrow perm who</code>, and the platform caveats that come with it</li>
-    <li><strong>Coming up — Three Levels Deep</strong> — refactor the whole by-hand dispatcher into one clean <code>find name</code>/<code>find size</code>/<code>du top</code>/<code>perm check</code>/<code>perm who</code> tree</li>
-    <li><strong>Coming up — Upgrading to Cobra</strong> — rebuild the same command tree with <code>spf13/cobra</code>, the real-world library answer to "configure and capture command-line arguments," and compare it to Lesson 4's by-hand version</li>
-    <li><strong>Coming up — Testing What You Built</strong> — write table-driven <code>go test</code> cases for the pure functions underneath <code>find</code>, <code>du</code>, and <code>perm</code></li>
-    <li><strong>Coming up — Capstone: Polish and Recap</strong> — add proper <code>--help</code> text, <code>go install</code> it for real, and redo the full course's structural checklist from memory in one pass</li>
+    <li><a href="./lessons/0008-permission-bits.html">Permission Bits</a> — read <code>os.FileMode</code> and use bitwise checks to implement <code>burrow perm check</code> for read/write/execute</li>
+    <li><a href="./lessons/0009-who-owns-this-file.html">Who Owns This File</a> — use <code>os/user</code> and <code>syscall.Stat_t</code> to implement <code>burrow perm who</code>, and the platform caveat that comes with it</li>
+    <li><a href="./lessons/0010-cleaning-up-the-dispatch.html">Cleaning Up the Dispatch</a> — notice the repeated flag-set boilerplate across <code>find</code>/<code>du</code>/<code>perm</code>'s dispatchers and extract it into one shared helper, deliberately stopping short of a bigger hand-rolled registry</li>
+    <li><a href="./lessons/0011-upgrading-to-cobra.html">Upgrading to Cobra</a> — rebuild the whole command tree with <code>spf13/cobra</code>, the real-world library answer to "configure and capture command-line arguments," and get real generated <code>--help</code> text for free</li>
+    <li><a href="./lessons/0012-testing-what-you-built.html">Testing What You Built</a> — write a table-driven <code>go test</code> for a pure helper and a <code>t.TempDir()</code>-based test for one that touches disk</li>
+    <li><a href="./lessons/0013-capstone-polish-and-recap.html">Capstone: Polish and Recap</a> — add proper <code>--help</code> text, <code>go install</code> it for real, and redo the full course's structural checklist from memory in one pass</li>
   </ol>
 
   <div class="lesson-nav">

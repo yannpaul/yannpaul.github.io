@@ -1,0 +1,250 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_cli_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 8 · Permission Bits</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go CLI Basics · Lesson 8 of 13</p>
+  <h1>Permission Bits</h1>
+  <p class="subtitle">Rebuild Lessons 1–7 from memory first. Then give <code>perm</code> its first real behavior: <code>burrow perm check --path .</code>.</p>
+
+  <p class="lede">Today <code>perm</code> stops being a Lesson-4 stub. It gets the exact same nested-dispatch treatment <code>find</code> and <code>du</code> already got — its own <code>getPermConfig()</code>, dispatching to a <code>check</code> subcommand — and its real content: reading a file's Unix permission bits and reporting read/write/execute for owner, group, and other.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–7</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-baseline">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-baseline-cb">
+        <label for="repeat-baseline-cb">Confirm <code>burrow find name --pattern "*.go"</code> and <code>burrow du top --n 5</code> both still work, and that <code>burrow perm</code> alone still prints its Lesson 4 "not implemented yet" stub, before you touch anything below.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Forgot the overall dispatch shape? Show it</summary>
+          <div class="reveal-body">
+            <pre><code>func getConfig() (Config, error) {
+	if len(os.Args) < 2 {
+		return Config{}, fmt.Errorf("expected a subcommand: find, du, or perm")
+	}
+	switch os.Args[1] {
+	case "find":
+		return getFindConfig()
+	case "du":
+		return getDuConfig()
+	case "perm":
+		fs := flag.NewFlagSet("perm", flag.ExitOnError)
+		path := fs.String("path", ".", "path to inspect")
+		fs.Parse(os.Args[2:])
+		return Config{Command: "perm", Path: *path}, nil
+	default:
+		return Config{}, fmt.Errorf("unknown subcommand %q", os.Args[1])
+	}
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>All three commands behave exactly as they did at the end of Lesson 7. <code>go vet ./...</code> is still clean.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: <code>perm</code> dispatches too</h2>
+
+  <p><code>perm</code>'s current case in <code>getConfig()</code> is still the flat Lesson 4 shape — no second-level verb. Today it gets exactly what <code>find</code> got in Lesson 5 and <code>du</code> got in Lesson 6: its own <code>getPermConfig()</code>, dispatching on <code>os.Args[2]</code> to a <code>check</code> subcommand with its own flag set.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-getpermconfig">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-getpermconfig-cb">
+        <label for="write-getpermconfig-cb">Write <code>getPermConfig() (Config, error)</code>: same shape as <code>getFindConfig</code>/<code>getDuConfig</code> — check <code>len(os.Args)</code> is at least <code>3</code> (erroring "expected a perm subcommand: check" if not), switch on <code>os.Args[2]</code>, and for <code>"check"</code> build a <code>flag.NewFlagSet("perm check", flag.ExitOnError)</code> with a <code>-path</code> flag (default <code>"."</code>) parsed from <code>os.Args[3:]</code>. Add a <code>default</code> case for an unrecognized perm subcommand.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>By now this should feel entirely familiar — the fourth time you've written this exact shape.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func getPermConfig() (Config, error) {
+	if len(os.Args) < 3 {
+		return Config{}, fmt.Errorf("expected a perm subcommand: check")
+	}
+
+	switch os.Args[2] {
+	case "check":
+		fs := flag.NewFlagSet("perm check", flag.ExitOnError)
+		path := fs.String("path", ".", "path to inspect")
+		fs.Parse(os.Args[3:])
+		return Config{Command: "perm check", Path: *path}, nil
+	default:
+		return Config{}, fmt.Errorf("unknown perm subcommand %q", os.Args[2])
+	}
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="getconfig-calls-getpermconfig">
+      <div class="todo-item-head">
+        <input type="checkbox" id="getconfig-calls-getpermconfig-cb">
+        <label for="getconfig-calls-getpermconfig-cb">Replace <code>getConfig()</code>'s old flat <code>"perm"</code> case with a call to <code>getPermConfig()</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the case</summary>
+          <div class="reveal-body">
+            <pre><code>case "perm":
+	return getPermConfig()</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: reading permission bits</h2>
+
+  <p><a href="https://pkg.go.dev/os#Stat"><code>os.Stat(path)</code></a> returns an <code>fs.FileInfo</code>; its <code>.Mode()</code> method returns an <a href="https://pkg.go.dev/io/fs#FileMode"><code>fs.FileMode</code></a> — a bitmask. The bottom nine bits are the familiar Unix permission bits, three groups of three: owner, group, other, each read/write/execute. In octal, those are <code>0400</code>/<code>0200</code>/<code>0100</code> for owner read/write/execute, <code>0040</code>/<code>0020</code>/<code>0010</code> for group, and <code>0004</code>/<code>0002</code>/<code>0001</code> for other. To check whether a given bit is set, bitwise-AND the mode against that constant: if the result is nonzero, the bit is set.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-perms-helper">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-perms-helper-cb">
+        <label for="write-perms-helper-cb">Write a helper <code>perms(mode os.FileMode, r, w, x os.FileMode) string</code> that returns a comma-joined list of whichever of <code>"read"</code>, <code>"write"</code>, <code>"execute"</code> apply, or <code>"(none)"</code> if none do.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Build a <code>[]string</code>, append conditionally on each bitwise-AND check, then join it — this is a good place to reach for <code>strings.Join</code> rather than hand-building a string with trailing separators.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func perms(mode os.FileMode, r, w, x os.FileMode) string {
+	var parts []string
+	if mode&r != 0 {
+		parts = append(parts, "read")
+	}
+	if mode&w != 0 {
+		parts = append(parts, "write")
+	}
+	if mode&x != 0 {
+		parts = append(parts, "execute")
+	}
+	if len(parts) == 0 {
+		return "(none)"
+	}
+	return strings.Join(parts, ", ")
+}</code></pre>
+            <p>Add <code>"strings"</code> to your import block.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="write-checkperm">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-checkperm-cb">
+        <label for="write-checkperm-cb">Write <code>checkPerm(path string) error</code>: <code>os.Stat</code> the path, print the path, then one line each for owner/group/other using <code>perms</code> with the matching three octal constants.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func checkPerm(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	mode := info.Mode()
+
+	fmt.Println(path)
+	fmt.Println("  owner:", perms(mode, 0400, 0200, 0100))
+	fmt.Println("  group:", perms(mode, 0040, 0020, 0010))
+	fmt.Println("  other:", perms(mode, 0004, 0002, 0001))
+	return nil
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-calls-checkperm">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-calls-checkperm-cb">
+        <label for="run-calls-checkperm-cb">In <code>run</code>, replace the <code>"perm"</code> stub case with a <code>"perm check"</code> case calling <code>checkPerm(cfg.Path)</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the case</summary>
+          <div class="reveal-body">
+            <pre><code>case "perm check":
+	return checkPerm(cfg.Path)</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <p>Now prove it against files with known permissions:</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="try-perm-check">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-perm-check-cb">
+        <label for="try-perm-check-cb">Create three files with different, deliberately-set permissions, and check each one.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>touch rw.txt && chmod 644 rw.txt
+touch exec.sh && chmod 755 exec.sh
+touch private.txt && chmod 600 private.txt
+
+burrow perm check --path rw.txt
+burrow perm check --path exec.sh
+burrow perm check --path private.txt</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>rw.txt</code> (644): owner <code>read, write</code>, group <code>read</code>, other <code>read</code>. <code>exec.sh</code> (755): owner <code>read, write, execute</code>, group and other both <code>read, execute</code>. <code>private.txt</code> (600): owner <code>read, write</code>, group and other both <code>(none)</code>.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="try-perm-missing">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-perm-missing-cb">
+        <label for="try-perm-missing-cb">Run <code>burrow perm check --path does-not-exist</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>An error naming the missing path prints to stderr and the process exits nonzero — <code>os.Stat</code>'s own error, propagated the same way every other lesson has insisted on since Lesson 7.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p><code>fs.FileMode</code> packs more than just the nine permission bits — the high bits encode whether it's a directory, a symlink, and other special file types, which is exactly what <code>d.IsDir()</code> (Lesson 3) checks under the hood. Printing a <code>FileMode</code> directly with <code>%s</code> or <code>fmt.Println</code> gives you the familiar <code>ls -l</code>-style string (<code>-rw-r--r--</code>) for free, since <code>FileMode</code> has its own <code>String()</code> method — worth trying as a sanity check while you're testing above, even though today's <code>perms</code> helper reports the same information a different way on purpose, since the bitwise-AND technique is the actual point of this lesson.</p>
+  </div>
+
+  <p><code>perm check</code> is real now. Lesson 9 gives <code>perm</code> a second verb — <code>who</code> — to answer a question permission bits alone can't: whose file this actually is.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why bitwise-AND is the right tool here, what the octal constants actually represent bit by bit, what <code>FileMode.String()</code> is doing, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://pkg.go.dev/io/fs#FileMode">pkg.go.dev, <code>fs.FileMode</code></a> for the full bit layout, including the type bits beyond permissions; <a href="https://pkg.go.dev/os#Stat">pkg.go.dev, <code>os.Stat</code></a>.</p>
+
+  <div class="lesson-nav">
+    <a href="./0007-making-failures-visible.html">← Lesson 7: Making Failures Visible</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0009-who-owns-this-file.html">Next: Who Owns This File →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

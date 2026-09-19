@@ -1,0 +1,254 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_cli_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 11 · Upgrading to Cobra</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go CLI Basics · Lesson 11 of 13</p>
+  <h1>Upgrading to Cobra</h1>
+  <p class="subtitle">Rebuild Lessons 1–10 from memory first. Then replace the whole hand-rolled dispatch tree with <code>github.com/spf13/cobra</code> — the library answer to everything <code>getConfig</code> and friends have been doing by hand.</p>
+
+  <p class="lede"><a href="https://github.com/spf13/cobra">Cobra</a> is the de facto standard for nested CLI subcommands in Go — it's what powers <code>kubectl</code>, <code>hugo</code>, <code>gh</code>, and a long list of other real tools. Every mechanic you've built by hand since Lesson 4 — a command tree, per-subcommand flags, "unknown subcommand" errors — Cobra does natively, plus one thing you've never had: real <code>--help</code> text, generated automatically from the exact same code that parses your flags.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–10</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-all-five-again">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-all-five-again-cb">
+        <label for="repeat-all-five-again-cb">Confirm all five commands and all five error paths still work exactly as they did at the end of Lesson 10, before you touch <code>main.go</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>find name</code>, <code>du top</code>, <code>perm check</code>, <code>perm who</code>, and every "expected a subcommand"/"unknown subcommand" error all behave the same as always.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: installing Cobra</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="go-get-cobra">
+      <div class="todo-item-head">
+        <input type="checkbox" id="go-get-cobra-cb">
+        <label for="go-get-cobra-cb">Add Cobra as a real dependency.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>go get github.com/spf13/cobra</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go.mod</code> now has <code>require</code> lines for <code>github.com/spf13/cobra</code> and its own dependencies (<code>spf13/pflag</code>, <code>inconshreveable/mousetrap</code>) — the first time this course has depended on anything outside the standard library.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <p>A Cobra command is one type, <a href="https://pkg.go.dev/github.com/spf13/cobra#Command"><code>*cobra.Command</code></a>, used two ways: as a leaf that does something (it has a <code>RunE</code>) or as a container for subcommands (you call <code>.AddCommand(...)</code> on it, and it has no <code>RunE</code> of its own). Building the same tree you already have by hand means building one <code>*cobra.Command</code> per verb, nesting them with <code>AddCommand</code>.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="build-root">
+      <div class="todo-item-head">
+        <input type="checkbox" id="build-root-cb">
+        <label for="build-root-cb">Replace <code>main</code>'s body: build a root command (<code>Use: "burrow"</code>), and call <code>rootCmd.Execute()</code> in place of your old <code>getConfig</code>/<code>run</code> calls, printing any returned error the same way you always have.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Set <code>SilenceErrors: true</code> and <code>SilenceUsage: true</code> on the root command — without them, Cobra prints its own <code>"Error: ..."</code> line <em>and</em> a full usage dump on every failure, which fights with the error format this course has used since Lesson 1.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the skeleton</summary>
+          <div class="reveal-body">
+            <pre><code>func main() {
+	rootCmd := &cobra.Command{Use: "burrow", SilenceErrors: true, SilenceUsage: true}
+
+	// subcommands added below
+
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}</code></pre>
+            <p>Add <code>"github.com/spf13/cobra"</code> to your import block. Leave <code>findName</code>, <code>sizeOf</code>, <code>duTop</code>, <code>checkPerm</code>, and <code>whoOwns</code> exactly as they are — none of your actual logic changes today, only what calls it.</p>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go build</code> succeeds. Running <code>burrow</code> with no arguments now prints Cobra's own auto-generated usage listing and exits <code>0</code> — different from your old "expected a subcommand" error and its exit code <code>1</code>. That's an intentional, reasonable difference, not a bug to chase: no subcommands are registered yet, so there's nothing else to do.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: <code>find</code>, built fully as the worked example</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="build-find-cobra">
+      <div class="todo-item-head">
+        <input type="checkbox" id="build-find-cobra-cb">
+        <label for="build-find-cobra-cb">Build a <code>find</code> container command and a <code>name</code> leaf command under it. The leaf registers <code>--path</code> and <code>--pattern</code> flags and its <code>RunE</code> reads them back and calls your existing <code>findName</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <p><code>cmd.Flags().String(name, default, usage)</code> registers a flag on that specific command, the same idea as <code>flag.NewFlagSet</code> from Lesson 4 — but reading the value back inside <code>RunE</code> needs <code>cmd.Flags().GetString(name)</code>, which returns the value and an error (safe to ignore here — it only fails if you typo the flag's name, a programmer mistake you'd catch immediately, not a runtime condition).</p>
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>findCmd := &cobra.Command{Use: "find"}
+findNameCmd := &cobra.Command{
+	Use: "name",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		path, _ := cmd.Flags().GetString("path")
+		pattern, _ := cmd.Flags().GetString("pattern")
+		return findName(path, pattern)
+	},
+}
+findNameCmd.Flags().String("path", ".", "path to search")
+findNameCmd.Flags().String("pattern", "*", "glob pattern to match filenames against")
+findCmd.AddCommand(findNameCmd)
+rootCmd.AddCommand(findCmd)</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>burrow find name --pattern "*.go"</code> works exactly as before. Now try the same command with a single dash: <code>burrow find name -pattern "*.go"</code> — it fails, with an error about an unrecognized <em>shorthand</em> flag. That's expected; see the idiom callout below.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Cobra's flags are built on <a href="https://pkg.go.dev/github.com/spf13/pflag"><code>spf13/pflag</code></a>, not the standard library's <code>flag</code> package — and pflag draws a real distinction Lesson 2 told you didn't exist: a single dash is reserved for one-letter <strong>shorthand</strong> flags (<code>-h</code> for <code>--help</code>, which every Cobra command gets for free), and a long flag name always needs a double dash. <code>-pattern</code> isn't read as "the pattern flag" — pflag tries to parse it as a run of one-letter shorthands (<code>-p -a -t -t -e -r -n</code>) and fails on the first one that isn't registered. This is a genuine, common trip-up moving from stdlib <code>flag</code> to almost any other Go flag library, pflag included.</p>
+  </div>
+
+  <h2>New: <code>du</code> and <code>perm</code>, the same shape — your turn</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="build-du-cobra">
+      <div class="todo-item-head">
+        <input type="checkbox" id="build-du-cobra-cb">
+        <label for="build-du-cobra-cb">Build <code>du</code>/<code>top</code> the identical way: a container command, a leaf with <code>--path</code> and <code>--n</code> flags (<code>cmd.Flags().Int</code> this time), a <code>RunE</code> calling <code>duTop</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>duCmd := &cobra.Command{Use: "du"}
+duTopCmd := &cobra.Command{
+	Use: "top",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		path, _ := cmd.Flags().GetString("path")
+		n, _ := cmd.Flags().GetInt("n")
+		return duTop(path, n)
+	},
+}
+duTopCmd.Flags().String("path", ".", "path to inspect")
+duTopCmd.Flags().Int("n", 10, "how many entries to show")
+duCmd.AddCommand(duTopCmd)
+rootCmd.AddCommand(duCmd)</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>burrow du top --n 5</code> behaves exactly as before.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="build-perm-cobra">
+      <div class="todo-item-head">
+        <input type="checkbox" id="build-perm-cobra-cb">
+        <label for="build-perm-cobra-cb">Build <code>perm</code>/<code>check</code> and <code>perm</code>/<code>who</code> the same way — one container, two leaves, each with just a <code>--path</code> flag.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>permCmd := &cobra.Command{Use: "perm"}
+permCheckCmd := &cobra.Command{
+	Use: "check",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		path, _ := cmd.Flags().GetString("path")
+		return checkPerm(path)
+	},
+}
+permCheckCmd.Flags().String("path", ".", "path to inspect")
+permWhoCmd := &cobra.Command{
+	Use: "who",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		path, _ := cmd.Flags().GetString("path")
+		return whoOwns(path)
+	},
+}
+permWhoCmd.Flags().String("path", ".", "path to inspect")
+permCmd.AddCommand(permCheckCmd, permWhoCmd)
+rootCmd.AddCommand(permCmd)</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>burrow perm check --path .</code> and <code>burrow perm who --path .</code> both behave exactly as before.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: what you get for free</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="try-help">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-help-cb">
+        <label for="try-help-cb">Run <code>burrow --help</code>, <code>burrow find --help</code>, and <code>burrow find name --help</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Each one prints real, accurate usage text — <code>burrow find name --help</code> specifically lists <code>--path</code> and <code>--pattern</code> with their descriptions and defaults, generated straight from the <code>Flags().String(...)</code> calls you wrote. Nothing in this course's hand-rolled version ever had this — you would have had to write and maintain it by hand, separately from the flags themselves, and it would have drifted out of sync eventually.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="delete-old-dispatch">
+      <div class="todo-item-head">
+        <input type="checkbox" id="delete-old-dispatch-cb">
+        <label for="delete-old-dispatch-cb">Delete everything Cobra just replaced: <code>getConfig</code>, <code>getFindConfig</code>, <code>getDuConfig</code>, <code>getPermConfig</code>, <code>newSubFlagSet</code>, and the <code>Config</code> struct. Nothing calls any of them anymore.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go build</code> still succeeds with all of that gone — proof it was genuinely dead code, not something quietly still relied on. What's left: your five logic functions (<code>findName</code>, <code>sizeOf</code>, <code>duTop</code>, <code>checkPerm</code>, <code>whoOwns</code>, plus the small helpers each uses) and <code>main</code>'s Cobra tree. <code>Config</code> is gone entirely — each <code>RunE</code> reads its own flags directly, so there's no longer one struct threading values through <code>getConfig</code>/<code>run</code> to get there.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Every <code>RunE</code> above returns <code>error</code>, not <code>Run</code>'s no-return-value form — which exists in Cobra too, and would have quietly let a failure inside <code>findName</code> or <code>duTop</code> vanish the same way Lesson 7's opening bug did. <code>RunE</code> is what keeps this course's oldest standing rule intact through a whole library swap: an error is a value, and something must always look at it.</p>
+  </div>
+
+  <p><code>burrow</code> now has the same five commands, the same behavior, real generated help text, and roughly a third less hand-written dispatch code than it had this morning. Lesson 12 puts actual tests around the logic functions that haven't changed through any of this — <code>findName</code>'s pattern matching and <code>duTop</code>'s size math are exactly as testable now as they were before Cobra existed.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why <code>RunE</code> over <code>Run</code>, the single-dash/double-dash distinction, why deleting <code>Config</code> entirely is safe, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://github.com/spf13/cobra/blob/main/user_guide.md">Cobra's own user guide</a> for the full command/flag API beyond what this lesson used; <a href="https://pkg.go.dev/github.com/spf13/pflag">pkg.go.dev, <code>spf13/pflag</code></a> for the shorthand-vs-long-flag distinction behind today's idiom callout.</p>
+
+  <div class="lesson-nav">
+    <a href="./0010-cleaning-up-the-dispatch.html">← Lesson 10: Cleaning Up the Dispatch</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0012-testing-what-you-built.html">Next: Testing What You Built →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>
