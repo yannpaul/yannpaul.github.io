@@ -11,9 +11,9 @@
 <main>
   <p class="eyebrow">Go CLI Basics · Lesson 13 of 13</p>
   <h1>Capstone: Polish and Recap</h1>
-  <p class="subtitle">Two small finishing touches. Then the whole course, from memory, with almost no hints left to lean on.</p>
+  <p class="subtitle">Two small finishing touches. Then the whole course, one multiple-choice question per lesson, with immediate feedback either way.</p>
 
-  <p class="lede"><code>burrow</code> already does everything it set out to do. Today: make its <code>--help</code> text actually explain itself, install it so it runs from anywhere without <code>go run</code> or a relative path, and then one long checklist — every idea from Lessons 1 through 12, in order, mostly without the safety net.</p>
+  <p class="lede"><code>burrow</code> already does everything it set out to do. Today: make its <code>--help</code> text actually explain itself, install it so it runs from anywhere without <code>go run</code> or a relative path, and then a twelve-question quiz — one per lesson, testing the specific thing each one was actually about, not just whether you remember it existed.</p>
 
   <h2>New: real <code>--help</code> text</h2>
 
@@ -27,15 +27,17 @@
       </div>
       <div class="todo-item-body">
         <details class="reveal">
-          <summary>Stuck? Show one example</summary>
+          <summary>Stuck? Show two examples</summary>
           <div class="reveal-body">
             <pre><code>rootCmd := &cobra.Command{
 	Use:           "burrow",
 	Short:         "burrow finds files, reports disk usage, and inspects permissions",
 	SilenceErrors: true,
 	SilenceUsage:  true,
-}</code></pre>
-            <p>Write your own wording for the rest — a short, accurate sentence for each, the same as you'd want to read if you'd never seen this tool before.</p>
+}
+
+findCmd := &cobra.Command{Use: "find", Short: "Find files by name pattern"}</code></pre>
+            <p>A command's <code>Short</code> shows up wherever <em>that command</em> is listed — the root's appears as the one-line summary at the top of <code>burrow --help</code>; <code>find</code>'s appears next to its name in that same output's "Available Commands" table; <code>name</code>'s would appear next to <em>its</em> name in <code>burrow find --help</code>'s table. Each command only ever displays its own <code>Short</code>, never a parent's or a child's. Write your own wording for the remaining six commands (<code>du</code>, <code>perm</code>, and all four leaves) — a short, accurate sentence for each, the same as you'd want to read if you'd never seen this tool before.</p>
           </div>
         </details>
         <div class="checkpoint">
@@ -53,7 +55,13 @@
         <details class="reveal">
           <summary>Stuck? Show the field</summary>
           <div class="reveal-body">
-            <pre><code>Version: "0.1.0",</code></pre>
+            <pre><code>rootCmd := &cobra.Command{
+	Use:     "burrow",
+	Short:   "burrow finds files, reports disk usage, and inspects permissions",
+	Version: "0.1.0",
+	// ...
+}</code></pre>
+            <p>Any string works, but the convention — <code>major.minor.patch</code>, semantic versioning — is worth following even for a tool only you will ever run, since it's what <code>--version</code> output looks like almost everywhere else. The important mechanical detail: Cobra only adds the <code>--version</code>/<code>-v</code> flag at all when <code>Version</code> is non-empty. Leave it blank (the default, since you never set it before today) and the flag simply doesn't exist — that's why <code>burrow --version</code> hasn't worked until now.</p>
           </div>
         </details>
         <div class="checkpoint">
@@ -77,6 +85,7 @@
           <summary>Stuck? Show the command</summary>
           <div class="reveal-body">
             <pre><code>go install .</code></pre>
+            <p><code>go install</code> does what <code>go build</code> does — compiles your module's <code>main</code> package into a binary — but instead of leaving that binary in your current directory, it copies it to <code>$(go env GOPATH)/bin</code> (or <code>$GOBIN</code>, if you've set that environment variable). That's a single, fixed location every Go installation already has, which is exactly why putting <em>that one directory</em> on your shell's <code>PATH</code> once makes every tool you ever <code>go install</code> — this one included, and any future one — runnable by name from anywhere, permanently, with no further per-project setup.</p>
           </div>
         </details>
         <div class="checkpoint">
@@ -89,111 +98,143 @@
 
   <h2>The recap</h2>
 
-  <p>Twelve lessons, in order. Each one below is something you demonstrated once and haven't been asked to repeat explicitly since. Do each from memory. The hints are down to a single line each — a pointer to which lesson to reread, not an answer — because this is the one lesson in the course actually meant to feel hard.</p>
+  <p>Twelve questions, one per lesson, in order. Each tests the one thing that lesson was actually teaching — not "did this happen" but "do you understand why." Pick an answer; you'll get immediate feedback either way, including why the right answer is right. One attempt per question — this is retrieval practice, not a form to resubmit until it's correct.</p>
 
-  <ul class="todo">
-    <li class="todo-item" data-todo-id="recap-getconfig-run">
-      <div class="todo-item-head">
-        <input type="checkbox" id="recap-getconfig-run-cb">
-        <label for="recap-getconfig-run-cb">Explain, out loud or in writing, why <code>main</code> was kept almost empty from Lesson 1 onward — what specifically does keeping logic out of it buy you?</label>
-      </div>
-      <div class="todo-item-body">
-        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 1, the section after the <code>getConfig</code>/<code>run</code> code.</p></div></details>
-      </div>
-    </li>
-    <li class="todo-item" data-todo-id="recap-flag-vs-pflag">
-      <div class="todo-item-head">
-        <input type="checkbox" id="recap-flag-vs-pflag-cb">
-        <label for="recap-flag-vs-pflag-cb">Explain the difference between the standard library's <code>flag</code> package and Cobra's <code>pflag</code> when it comes to single-dash versus double-dash flags — which one is forgiving, which one isn't, and why the strict one still won.</label>
-      </div>
-      <div class="todo-item-body">
-        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 2's idiom callout, then Lesson 11's.</p></div></details>
-      </div>
-    </li>
-    <li class="todo-item" data-todo-id="recap-walkdir">
-      <div class="todo-item-head">
-        <input type="checkbox" id="recap-walkdir-cb">
-        <label for="recap-walkdir-cb">Explain <code>filepath.WalkDir</code>'s callback signature from memory — all three parameters, what each return value does, and why it replaced <code>filepath.Walk</code>.</label>
-      </div>
-      <div class="todo-item-body">
-        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 3.</p></div></details>
-      </div>
-    </li>
-    <li class="todo-item" data-todo-id="recap-nested-dispatch">
-      <div class="todo-item-head">
-        <input type="checkbox" id="recap-nested-dispatch-cb">
-        <label for="recap-nested-dispatch-cb">Even though Cobra replaced it, explain what <code>os.Args</code> actually contains and why a global <code>flag.Parse()</code> can't handle a verb-first CLI like <code>burrow find name --pattern x</code> on its own.</label>
-      </div>
-      <div class="todo-item-body">
-        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 4.</p></div></details>
-      </div>
-    </li>
-    <li class="todo-item" data-todo-id="recap-glob">
-      <div class="todo-item-head">
-        <input type="checkbox" id="recap-glob-cb">
-        <label for="recap-glob-cb">Explain what <code>filepath.Match</code> actually matches against — a full path or something narrower — and what that means for patterns containing a path separator.</label>
-      </div>
-      <div class="todo-item-body">
-        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 5's idiom callout.</p></div></details>
-      </div>
-    </li>
-    <li class="todo-item" data-todo-id="recap-sizing">
-      <div class="todo-item-head">
-        <input type="checkbox" id="recap-sizing-cb">
-        <label for="recap-sizing-cb">Explain why <code>dirSize</code> is a separate struct from anything else in this codebase, and what <code>sort.Slice</code>'s comparison function needs to return to sort descending instead of ascending.</label>
-      </div>
-      <div class="todo-item-body">
-        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 6.</p></div></details>
-      </div>
-    </li>
-    <li class="todo-item" data-todo-id="recap-debugging">
-      <div class="todo-item-head">
-        <input type="checkbox" id="recap-debugging-cb">
-        <label for="recap-debugging-cb">Name all three tools Lesson 7 introduced for a discarded-error bug that <code>go vet</code> won't catch, and say in one sentence each what makes them different from one another.</label>
-      </div>
-      <div class="todo-item-body">
-        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 7 in full — it's the longest one for a reason.</p></div></details>
-      </div>
-    </li>
-    <li class="todo-item" data-todo-id="recap-permbits">
-      <div class="todo-item-head">
-        <input type="checkbox" id="recap-permbits-cb">
-        <label for="recap-permbits-cb">Without looking, write the octal constant for "group write" and explain the bitwise operation that checks whether it's set in a given <code>os.FileMode</code>.</label>
-      </div>
-      <div class="todo-item-body">
-        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 8.</p></div></details>
-      </div>
-    </li>
-    <li class="todo-item" data-todo-id="recap-ownership">
-      <div class="todo-item-head">
-        <input type="checkbox" id="recap-ownership-cb">
-        <label for="recap-ownership-cb">Explain why <code>perm who</code> won't cross-compile for Windows, in terms of what <code>.Sys()</code> actually returns and why that return type is platform-dependent at all.</label>
-      </div>
-      <div class="todo-item-body">
-        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 9's idiom callout.</p></div></details>
-      </div>
-    </li>
-    <li class="todo-item" data-todo-id="recap-dry">
-      <div class="todo-item-head">
-        <input type="checkbox" id="recap-dry-cb">
-        <label for="recap-dry-cb">Explain <code>newSubFlagSet</code>'s job in one sentence, and why Lesson 10 explicitly stopped refactoring there instead of building a bigger generic dispatcher by hand.</label>
-      </div>
-      <div class="todo-item-body">
-        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 10's idiom callout.</p></div></details>
-      </div>
-    </li>
-    <li class="todo-item" data-todo-id="recap-testing">
-      <div class="todo-item-head">
-        <input type="checkbox" id="recap-testing-cb">
-        <label for="recap-testing-cb">Explain why <code>perms</code> and <code>sizeOf</code> got tests and <code>findName</code>/<code>duTop</code>/<code>checkPerm</code>/<code>whoOwns</code> didn't — what property does a function need for a plain <code>go test</code> to be the natural tool?</label>
-      </div>
-      <div class="todo-item-body">
-        <details class="reveal"><summary>Still stuck?</summary><div class="reveal-body"><p>Reread Lesson 12's idiom callout.</p></div></details>
-      </div>
-    </li>
-  </ul>
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">1. Why does <code>main</code> stay almost empty from Lesson 1 onward, wiring only <code>getConfig()</code> then <code>run()</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Go has no such requirement — a program with all its logic crammed into main() compiles and runs fine. This split is a convention this course adopted, not a language rule.">It's required by the Go compiler for any command-line program.</li>
+      <li data-option="b" data-explain="Keeping main() to just wiring means run() can be called directly — from a test, or from anywhere else — without going through os.Exit, and it keeps 'what are we configured to do' (getConfig) separate from 'now go do it' (run).">It keeps the real logic callable and testable without going through <code>os.Exit</code>, and separates configuration from execution.</li>
+      <li data-option="c" data-explain="This split has nothing to do with binary size — Go doesn't compile differently based on how you organize functions within main.">It produces a smaller compiled binary.</li>
+      <li data-option="d" data-explain="flag.Parse() can be called from any function, not just main — this was never a constraint on where getConfig() had to live.">Go's <code>flag.Parse()</code> only works when called directly inside <code>main</code>.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">2. Which statement about single-dash flags is correct?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="They don't — that's exactly the trap Lesson 11 walked into with -pattern.">The standard library's <code>flag</code> package and Cobra's <code>pflag</code> both treat <code>-name</code> and <code>--name</code> identically.</li>
+      <li data-option="b" data-explain="Exactly right. flag.String('path', ...) responds to both -path and --path. pflag reserves a single dash for one-character shorthands (like -h) — -pattern gets parsed as an attempt at several one-letter shorthands and fails on the first unrecognized one.">The stdlib <code>flag</code> package accepts both <code>-name</code> and <code>--name</code> for a long flag; <code>pflag</code> reserves a single dash for one-letter shorthands only.</li>
+      <li data-option="c" data-explain="Backwards — pflag is the strict one; stdlib flag is the forgiving one. Lesson 11's idiom callout covers exactly this reversal.">Cobra's <code>pflag</code> is more forgiving about dashes than the standard library's <code>flag</code> package.</li>
+      <li data-option="d" data-explain="Both libraries accept a single dash for something — stdlib flag for any flag name, pflag for one-letter shorthands specifically.">Neither library accepts a single dash for anything.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">3. What does returning <code>filepath.SkipDir</code> from a <code>filepath.WalkDir</code> callback actually do?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That's what any other non-nil error does. SkipDir is specifically the one value that does NOT stop the whole walk.">Stops the entire walk immediately, the same as any other non-nil error would.</li>
+      <li data-option="b" data-explain="Right — when the current entry is a directory, SkipDir skips descending into it (and the rest of its contents) without aborting the walk over everything else.">Skips the rest of the current directory's contents, without stopping the walk over everything else.</li>
+      <li data-option="c" data-explain="SkipDir's effect is about directories, not individual sibling files — returning nil, not SkipDir, is what lets the walk continue to the next entry normally.">Skips only the current file and moves on to the next sibling.</li>
+      <li data-option="d" data-explain="Nothing in WalkDir retries entries — this isn't what SkipDir does at all.">Retries the current entry after a short delay.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">4. Why couldn't a single global <code>flag.Parse()</code> handle <code>burrow find name --pattern x</code> on its own?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="os.Args[0] is always the program's own path, never a subcommand — flag.Parse() doesn't even look at it as a candidate flag.">Because <code>os.Args[0]</code> is the subcommand name, and <code>flag.Parse()</code> tries to read it as a flag.</li>
+      <li data-option="b" data-explain="Exactly it — flag.Parse() stops at the first argument that doesn't look like a flag. Since find is that first argument, everything after it (including --pattern) would never get parsed unless find came after the flags, which breaks the verb-first CLI shape burrow needed.">Because <code>flag.Parse()</code> stops parsing at the first non-flag argument, and a verb-first CLI needs the verb to come before its flags.</li>
+      <li data-option="c" data-explain="The flag package places no restriction on flag names like this — 'pattern' is a perfectly valid flag name.">Because the standard library's <code>flag</code> package doesn't support a flag named <code>pattern</code>.</li>
+      <li data-option="d" data-explain="flag.Parse() can be called from any function — this was never the actual constraint.">Because Go doesn't allow calling <code>flag.Parse()</code> outside of <code>main</code>.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">5. What does <code>filepath.Match(pattern, name)</code> actually compare the pattern against?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="It never sees the full path — filepath.WalkDir's callback calls Match against d.Name(), one path element, not the accumulated path.">The file's full path, including every directory separator along the way.</li>
+      <li data-option="b" data-explain="Right — Match compares against one path element (typically a base filename) at a time, and never matches a * across a path separator. That's why finding by pattern still needs WalkDir doing the recursion.">A single path element, like a base filename — it never matches across a path separator.</li>
+      <li data-option="c" data-explain="Match never opens or reads file contents — it's a pure string comparison against a name.">The file's contents.</li>
+      <li data-option="d" data-explain="Match doesn't concatenate ancestor directory names — it operates on one name string at a time.">Every ancestor directory name, concatenated together.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">6. In <code>sort.Slice(dSizes, func(i, j int) bool {...})</code>, which comparison sorts descending by size?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Less-than gives ascending order (smallest first) — the opposite of what du top wants to show.">dSizes[i].Size &lt; dSizes[j].Size</li>
+      <li data-option="b" data-explain="Equality isn't a valid 'less' function at all — sort.Slice needs a strict ordering, and this would leave the order undefined.">dSizes[i].Size == dSizes[j].Size</li>
+      <li data-option="c" data-explain="Right — flipping the comparison to greater-than is exactly what makes sort.Slice put the biggest entries first.">dSizes[i].Size &gt; dSizes[j].Size</li>
+      <li data-option="d" data-explain="sort.Slice has no default direction — the comparison function you write is the only thing that decides the order, every time.">It doesn't matter which — <code>sort.Slice</code> always sorts descending by default.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">7. Which of these does <code>go vet</code> actually catch on its own, with no extra tooling installed?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="This is the whole point of Lesson 7 — go vet does NOT catch this. It's why errcheck exists as a separate tool.">A discarded <code>error</code> return value from a function call.</li>
+      <li data-option="b" data-explain="Correct — this is one of go vet's real, well-known checks (its printf analyzer), and it's why 'go vet catches nothing useful' is the wrong lesson to take from Lesson 7. It catches real things; discarded errors just aren't one of them.">A <code>Printf</code>-style format string whose verbs don't match its arguments.</li>
+      <li data-option="c" data-explain="go vet is a static analysis tool — it doesn't run your program, so it can't observe whether a goroutine gets waited on.">A goroutine that's started but never waited on.</li>
+      <li data-option="d" data-explain="Data races need the -race build flag and an actual program run to detect — go vet alone won't find one.">A data race between two goroutines.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">8. Which octal constant checks the "group write" permission bit?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="0200 is owner-write. Owner's three bits (read/write/execute) are 0400/0200/0100.">0200</li>
+      <li data-option="b" data-explain="Right — group's three bits are 0040 (read), 0020 (write), 0010 (execute), the same read/write/execute order as owner and other, just shifted one octal digit.">0020</li>
+      <li data-option="c" data-explain="0002 is other-write, not group-write. Other's three bits are 0004/0002/0001.">0002</li>
+      <li data-option="d" data-explain="0700 is all three owner bits combined (0400+0200+0100), not a single group bit.">0700</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">9. Why does <code>perm who</code>'s code fail to even <em>compile</em> with <code>GOOS=windows</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="os.Stat exists and works fine on every platform Go supports, Windows included.">Because <code>os.Stat</code> doesn't exist on Windows.</li>
+      <li data-option="b" data-explain="Exactly — .Sys() returns any, and the concrete type behind it is platform-specific. syscall.Stat_t (with its Uid/Gid fields) simply isn't defined at all for GOOS=windows, so the type assertion is a compile error, not a runtime failure.">Because <code>.Sys()</code>'s concrete type is platform-dependent, and <code>syscall.Stat_t</code> isn't defined for Windows at all.</li>
+      <li data-option="c" data-explain="Path separators are unrelated to this failure — the break is in the .Sys() type assertion, not path handling.">Because Windows file paths use backslashes, which <code>os/user</code> can't parse.</li>
+      <li data-option="d" data-explain="user.LookupId itself is cross-platform — the actual compile failure is the syscall.Stat_t type assertion earlier in the function, before LookupId is ever reached.">Because <code>user.LookupId</code> is Unix-only and doesn't exist on Windows.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">10. Why did Lesson 10 stop the DRY refactor at one small helper (<code>newSubFlagSet</code>) instead of building a bigger generic subcommand registry by hand?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Go supports maps of functions and struct-based registries just fine — this isn't a language limitation.">Go doesn't support the map-of-functions pattern a registry would need.</li>
+      <li data-option="b" data-explain="Right — this is Lesson 10's actual idiom callout. Building a bigger hand-rolled registry would mean slowly reinventing a worse version of what Cobra already provides, and Lesson 11 was already going to replace the whole mechanism.">Because building a bigger registry by hand would mean reinventing a worse version of what Cobra (Lesson 11) already provides.</li>
+      <li data-option="c" data-explain="newSubFlagSet only extracted the shared -path flag-set setup — the command-specific flags and dispatch logic were still duplicated across getFindConfig/getDuConfig/getPermConfig.">Because <code>newSubFlagSet</code> already eliminated all the duplication, leaving nothing left to extract.</li>
+      <li data-option="d" data-explain="Nothing about a registry pattern requires global variables — this distractor doesn't correspond to any real constraint from the lesson.">Because a registry pattern only works with global variables, which this codebase avoids.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">11. Why did Lesson 11 use <code>RunE</code> instead of <code>Run</code> for every Cobra command?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Both Run and RunE work fine with commands that register flags — this isn't what distinguishes them.">Because <code>RunE</code> is required for any command that registers flags.</li>
+      <li data-option="b" data-explain="Correct — Run has no return value at all, so a failure inside findName or duTop would have nowhere to go, silently vanishing exactly like Lesson 7's opening bug. RunE's returned error is what main's error-handling wraps around Execute().">Because <code>Run</code> has no return value, so an error from a function it calls (like <code>findName</code>) would have no way to reach <code>main</code> — the exact discarded-error problem from Lesson 7.</li>
+      <li data-option="c" data-explain="Neither Run nor RunE skips flag validation, and RunE isn't faster — this is a fabricated distinction.">Because <code>RunE</code> runs faster since it skips flag validation.</li>
+      <li data-option="d" data-explain="Run isn't deprecated — both Run and RunE are supported, current Cobra APIs; they just have different signatures for different purposes.">Because <code>Run</code> is deprecated in current versions of Cobra.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">12. Why did <code>perms</code> and <code>sizeOf</code> get tests in Lesson 12, but <code>findName</code>, <code>duTop</code>, <code>checkPerm</code>, and <code>whoOwns</code> didn't?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That's not a real property go test checks for, and it's not why these two were chosen — plenty of untested functions in this codebase have no known bugs either.">Because <code>perms</code> and <code>sizeOf</code> are the only two functions in the codebase without bugs.</li>
+      <li data-option="b" data-explain="Right — perms takes arguments and returns a value with no side effects at all; sizeOf's one side effect (reading files) can be pointed at a disposable t.TempDir(). The other four either print straight to stdout or just call one of these two, which is harder to assert on without capturing output or mocking the filesystem.">Because <code>perms</code> has no side effects, and <code>sizeOf</code>'s only side effect (reading files) can be pointed at a disposable <code>t.TempDir()</code> — the other four either print directly or just call one of these two.</li>
+      <li data-option="c" data-explain="go test tests plenty of functions that return error — sizeOf itself returns (int64, error) and got tested anyway.">Because <code>go test</code> can't test any function that returns an <code>error</code>.</li>
+      <li data-option="d" data-explain="Table-driven tests work with any number of struct fields per case — this isn't a real constraint on the technique.">Because table-driven tests only work on functions with exactly one input parameter.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
 
   <h2>One last transfer question</h2>
+
+  <p>Not multiple choice, on purpose — this one asks you to design something, and four options would just hand you the answer.</p>
 
   <ul class="todo">
     <li class="todo-item" data-todo-id="transfer-checksum">
@@ -213,10 +254,10 @@
   </div>
 
   <div class="ask-your-teacher">
-    Anything from the recap that didn't come back easily — that's useful information, not a failure. Tell your teacher (me) which ones, and we can go deeper on exactly those before you consider this course finished.
+    Any quiz question that took more than one try to feel right, even if you got it correct — that's useful signal, not a failure. Tell your teacher (me) which numbers, and we can go deeper on exactly those before you consider this course finished.
   </div>
 
-  <p class="cite">This lesson has no new primary sources — it's a review of everything Lessons 1–12 already cited. If a recap question felt shaky, that lesson's own citations are the right place to go back to.</p>
+  <p class="cite">This lesson has no new primary sources — every quiz question is a review of something Lessons 1–12 already cited. If one felt shaky, that lesson's own citations (linked in its own "Primary sources" line) are the right place to go back to.</p>
 
   <div class="lesson-nav">
     <a href="./0012-testing-what-you-built.html">← Lesson 12: Testing What You Built</a>
@@ -224,5 +265,6 @@
   </div>
 </main>
 <script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
 </body>
 </html>

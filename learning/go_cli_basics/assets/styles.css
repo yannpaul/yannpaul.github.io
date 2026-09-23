@@ -319,6 +319,70 @@ li.todo-item.done .todo-item-head label {
   margin: 0 0 0.6rem;
 }
 
+/* --- Quiz component: multiple-choice retrieval practice, first used in
+   the Lesson 13 capstone recap. One attempt per question, immediate
+   feedback, then locked. Markup contract lives in assets/quiz.js. --- */
+.quiz {
+  background: var(--paper-raised);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 1.3rem 1.3rem 1.1rem;
+  margin: 1.4rem 0;
+}
+
+.quiz-question {
+  font-weight: 600;
+  margin: 0 0 1rem;
+}
+
+.quiz-options {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.quiz-options li {
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  padding: 0.6rem 0.8rem;
+  cursor: pointer;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.94rem;
+  transition: background 0.12s ease;
+}
+
+.quiz-options li:hover { background: var(--code-bg); }
+
+.quiz-options li.correct {
+  background: var(--good-soft);
+  border-color: var(--good);
+  cursor: default;
+}
+
+.quiz-options li.incorrect {
+  background: var(--bad-soft);
+  border-color: var(--bad);
+  cursor: default;
+}
+
+.quiz-options li.disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.quiz-feedback {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.9rem;
+  margin: 0.9rem 0 0;
+  padding-top: 0.8rem;
+  border-top: 1px dashed var(--rule);
+  display: none;
+}
+
+.quiz-feedback.visible { display: block; }
+
 .lesson-nav {
   margin-top: 3.5rem;
   padding-top: 1.4rem;
@@ -344,5 +408,6 @@ li.todo-item.done .todo-item-head label {
 @media print {
   body { padding: 0; font-size: 12pt; }
   details.reveal:not([open]) { display: none; }
+  .quiz-options li:hover { background: none; }
   a { color: inherit; }
 }
