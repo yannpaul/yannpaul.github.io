@@ -1,0 +1,225 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_concurrency_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 7 · Worker Pools</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go Concurrency Basics · Lesson 7 of 9</p>
+  <h1>Worker Pools: Bounded Concurrency</h1>
+  <p class="subtitle">Rebuild Lesson 6's <code>select</code>-guarded <code>duTop</code> from memory first. Then ask what happens when "one goroutine per entry" means ten thousand goroutines, not ten.</p>
+
+  <p class="lede">Every <code>duTop</code> so far starts exactly <code>len(dirs)</code> goroutines. For a directory with a dozen subdirectories, that's fine. For one with fifty thousand, you'd launch fifty thousand goroutines at once, all hammering the filesystem simultaneously — and on a real machine, more concurrent disk I/O than the disk can actually serve doesn't make the work finish faster, it just adds contention. A <strong>worker pool</strong> fixes the number of goroutines doing the work, no matter how much work there is.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–6</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-lesson6-dutop">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-lesson6-dutop-cb">
+        <label for="repeat-lesson6-dutop-cb">Confirm your <code>select</code>/<code>time.After</code>-guarded <code>duTop</code> from Lesson 6 still produces correct, race-free output on a normal scratch fixture.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run -race . du top --path scratch --n 10</code> prints your known-good sorted lines well within the timeout, no warnings.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: a fixed number of workers, pulling from a queue</h2>
+
+  <p>Instead of one goroutine per entry, start a small, fixed number of <strong>worker</strong> goroutines up front — say, four. Feed all the entry names into a <code>jobs</code> channel. Each worker loops, pulling one name off <code>jobs</code> at a time, computing its size, and sending the result — exactly the same as before, except now only four sizes are ever being computed at once, regardless of whether there are ten entries or ten thousand.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="add-maxworkers-const">
+      <div class="todo-item-head">
+        <input type="checkbox" id="add-maxworkers-const-cb">
+        <label for="add-maxworkers-const-cb">Add a package-level constant for how many workers to run at once, something like 4.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the constant</summary>
+          <div class="reveal-body">
+            <pre><code>const maxWorkers = 4</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="build-jobs-channel">
+      <div class="todo-item-head">
+        <input type="checkbox" id="build-jobs-channel-cb">
+        <label for="build-jobs-channel-cb">In <code>duTop</code>, make a buffered <code>jobs</code> channel of entry names, sized to <code>len(dirs)</code>. Send every entry's name into it, then <code>close</code> it — all before starting any workers.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>jobs := make(chan string, len(dirs))
+for _, d := range dirs {
+	jobs <- d.Name()
+}
+close(jobs)</code></pre>
+            <p>Sizing the buffer to <code>len(dirs)</code> means every send here completes immediately — nothing is waiting to receive yet, and nothing needs to. Closing <code>jobs</code> right after filling it doesn't discard the buffered values; a closed channel still delivers everything already sent before signaling "no more" to a <code>range</code> over it.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="launch-workers">
+      <div class="todo-item-head">
+        <input type="checkbox" id="launch-workers-cb">
+        <label for="launch-workers-cb">Start exactly <code>maxWorkers</code> goroutines, each looping with <code>for name := range jobs</code>, computing that entry's size, and sending a <code>sizeResult</code> into a buffered <code>results</code> channel. Track them with a <code>sync.WaitGroup</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>results := make(chan sizeResult, len(dirs))
+var wg sync.WaitGroup
+for w := 0; w < maxWorkers; w++ {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for name := range jobs {
+			p := filepath.Join(root, name)
+			s, err := sizeOf(p)
+			results <- sizeResult{Name: p, Size: s, Err: err}
+		}
+	}()
+}</code></pre>
+            <p>A <code>for range</code> over a channel keeps pulling values until the channel is closed <em>and</em> drained — that's what makes each worker keep working until <code>jobs</code> is genuinely exhausted, then exit its loop and return, letting <code>wg.Done()</code> fire.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="close-results-after-wait">
+      <div class="todo-item-head">
+        <input type="checkbox" id="close-results-after-wait-cb">
+        <label for="close-results-after-wait-cb">Start one more goroutine that calls <code>wg.Wait()</code> and then closes <code>results</code> — this is what lets the collection loop use <code>range</code> too, instead of counting receives by hand.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>go func() {
+	wg.Wait()
+	close(results)
+}()</code></pre>
+            <p>This has to run in its own goroutine — calling <code>wg.Wait()</code> directly in <code>duTop</code>'s main body would block before you ever start receiving from <code>results</code>, and the workers would deadlock trying to send into a channel nobody's draining yet.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="collect-with-range">
+      <div class="todo-item-head">
+        <input type="checkbox" id="collect-with-range-cb">
+        <label for="collect-with-range-cb">Replace the collection loop with <code>for r := range results</code> — no more counting to <code>len(dirs)</code> by hand, since the channel closing is what ends the loop now.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the full function</summary>
+          <div class="reveal-body">
+            <pre><code>const maxWorkers = 4
+
+func duTop(root string, n int) error {
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+
+	jobs := make(chan string, len(dirs))
+	for _, d := range dirs {
+		jobs <- d.Name()
+	}
+	close(jobs)
+
+	results := make(chan sizeResult, len(dirs))
+	var wg sync.WaitGroup
+	for w := 0; w < maxWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for name := range jobs {
+				p := filepath.Join(root, name)
+				s, err := sizeOf(p)
+				results <- sizeResult{Name: p, Size: s, Err: err}
+			}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var dSizes []dirSize
+	var firstErr error
+	for r := range results {
+		if r.Err != nil {
+			if firstErr == nil {
+				firstErr = r.Err
+			}
+			continue
+		}
+		dSizes = append(dSizes, dirSize{r.Name, r.Size})
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+
+	sort.Slice(dSizes, func(i, j int) bool { return dSizes[i].Size > dSizes[j].Size })
+	n = min(len(dSizes), n)
+	for _, d := range dSizes[:n] {
+		fmt.Printf("%10d %q\n", d.Size, d.Name)
+	}
+	return nil
+}</code></pre>
+            <p>This lesson drops Lesson 6's <code>select</code>/timeout for clarity — the two ideas compose fine (a worker pool can time out too), but layering them both into one lesson would bury the new idea. If you want both, the same <code>select</code>-with-<code>deadline</code> pattern from Lesson 6 slots into this collection loop unchanged.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="verify-worker-pool">
+      <div class="todo-item-head">
+        <input type="checkbox" id="verify-worker-pool-cb">
+        <label for="verify-worker-pool-cb">Run your scratch fixture, then run it again under <code>-race</code>, then run it five or six times in a row checking the line count each time.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Identical sorted output every time, <code>-race</code> stays silent, and every run prints the same number of lines — unlike Lesson 4's broken version, nothing here depends on how many goroutines happen to overlap, because only <code>maxWorkers</code> ever run at once and each only ever touches its own local variables before sending on a channel.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>The shape here — a buffered <code>jobs</code> channel filled and closed up front, a fixed number of workers ranging over it, a separate goroutine closing <code>results</code> once <code>wg.Wait()</code> returns — is one of the most common concurrency patterns in real Go code, precisely because it decouples <em>how much work there is</em> from <em>how much concurrency you allow</em>. <code>maxWorkers</code> is the one number you'd tune based on what you're bottlenecked on: CPU-bound work usually wants roughly <code>runtime.NumCPU()</code> workers, while I/O-bound work like this (waiting on disk, or a network call) can often support more workers than CPU cores, since most of each worker's time is spent waiting, not computing.</p>
+  </div>
+
+  <p>You now have every raw ingredient — goroutines, channels, <code>select</code>, and bounded pools. Lesson 8 shows you how little of it you'd actually hand-write in most real code, once a well-tested library exists for exactly this shape.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why closing <code>jobs</code> doesn't lose the values already sent, why the <code>wg.Wait()</code>/<code>close(results)</code> pair has to run in its own goroutine, how you'd pick a good value for <code>maxWorkers</code> for a specific workload, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary source for this lesson: <a href="https://go.dev/tour/concurrency/1">go.dev, "A Tour of Go": Goroutines</a> and the broader Tour concurrency section, whose exercises this worker-pool shape is directly modeled on.</p>
+
+  <div class="lesson-nav">
+    <a href="./0006-select-and-timeouts.html">← Lesson 6: select and Timeouts</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0008-upgrading-to-errgroup.html">Next: Upgrading to errgroup →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

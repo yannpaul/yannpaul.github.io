@@ -1,0 +1,236 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_concurrency_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 9 · Capstone</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go Concurrency Basics · Lesson 9 of 9</p>
+  <h1>Capstone: Concurrent burrow, Race-Free and Benchmarked</h1>
+  <p class="subtitle">Rebuild the final <code>errgroup</code>-based <code>duTop</code> from memory, put a real number on why any of this mattered, then defend it — no hints, same as <a href="../../go_cli_basics/lessons/0013-capstone-polish-and-recap.html">Go CLI Basics' capstone</a>.</p>
+
+  <p class="lede">Eight lessons, five rewrites of one function. Today: build the final version once more from memory, measure serial versus parallel wall-clock time so "concurrency" stops being an abstract word, then a recap that checks whether you actually retained the reasoning behind each rewrite — not just the syntax.</p>
+
+  <div class="repeat-banner">Warm-up — rebuild from memory, no hints</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="rebuild-final-dutop">
+      <div class="todo-item-head">
+        <input type="checkbox" id="rebuild-final-dutop-cb">
+        <label for="rebuild-final-dutop-cb">From memory, rebuild <code>duTop</code> exactly as Lesson 8 left it: an <code>errgroup.Group</code> with <code>SetLimit(maxWorkers)</code>, indexed writes into a pre-sized <code>dSizes</code> slice, <code>g.Wait()</code> for both synchronization and error collection.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>No reveal for this one — if you're stuck, that's useful information, and the honest move is to go reread Lesson 8 directly rather than lean on a hint here.</p>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run -race . du top --path scratch --n 10</code> matches every prior lesson's output, no warnings, with no <code>sync.WaitGroup</code>, no <code>sync.Mutex</code>, and no bare channel left anywhere in <code>duTop</code> — <code>errgroup</code> is the only synchronization primitive it uses now.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: putting a number on it</h2>
+
+  <p>Every lesson so far has argued concurrency helps without measuring it. On a small scratch directory with three or four entries, a parallel <code>duTop</code> and a serial one finish close enough in time that you can't feel the difference — the real payoff shows up on work that's actually slow per item. Rather than fighting with a real slow disk again, write a tiny standalone benchmark using a fake slow task, so the timing difference is unambiguous and reproducible on any machine.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-benchmark">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-benchmark-cb">
+        <label for="write-benchmark-cb">In a throwaway scratch file: write <code>slowTask(n int) int</code> that sleeps 200ms and returns <code>n * n</code>. Write a <code>serial</code> function that calls it once per element of an 8-element slice in a plain loop, and a <code>parallel</code> function that does the same work through an <code>errgroup.Group</code> with <code>SetLimit(4)</code>. Time both with <code>time.Now()</code>/<code>time.Since</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"fmt"
+	"time"
+
+	"golang.org/x/sync/errgroup"
+)
+
+func slowTask(n int) int {
+	time.Sleep(200 * time.Millisecond)
+	return n * n
+}
+
+func serial(inputs []int) []int {
+	out := make([]int, len(inputs))
+	for i, n := range inputs {
+		out[i] = slowTask(n)
+	}
+	return out
+}
+
+func parallel(inputs []int) []int {
+	out := make([]int, len(inputs))
+	var g errgroup.Group
+	g.SetLimit(4)
+	for i, n := range inputs {
+		g.Go(func() error {
+			out[i] = slowTask(n)
+			return nil
+		})
+	}
+	g.Wait()
+	return out
+}
+
+func main() {
+	inputs := []int{1, 2, 3, 4, 5, 6, 7, 8}
+
+	start := time.Now()
+	serial(inputs)
+	fmt.Println("serial:  ", time.Since(start))
+
+	start = time.Now()
+	parallel(inputs)
+	fmt.Println("parallel:", time.Since(start))
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>serial</code> takes roughly 1.6 seconds — 8 tasks times 200ms each, one after another. <code>parallel</code> takes roughly 400ms — 8 tasks through 4 workers means two batches of 4 running at once, 200ms per batch. That ratio (4x here, bounded by <code>SetLimit(4)</code>, not by the input size) is the entire, concrete payoff of everything this course covered. <code>go run -race .</code> stays silent on both.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Notice the parallel version isn't 8x faster, it's roughly <code>maxWorkers</code>x faster — bounded concurrency trades some theoretical speed for a predictable ceiling on resource use. If <code>duTop</code> ran one goroutine per entry with no limit at all (Lesson 2 through 6's approach), a directory with 8 entries would look 8x faster in a toy benchmark like this — but that number stops meaning anything once the directory has thousands of entries and the bottleneck becomes the disk itself, not the number of goroutines. Lesson 7's <code>maxWorkers</code> and Lesson 8's <code>SetLimit</code> exist for exactly that gap between a toy benchmark and reality.</p>
+  </div>
+
+  <h2>Recap — from memory, no hints</h2>
+
+  <p>Answer each question before checking — this is retrieval practice, not a reading exercise. Every option gets an explanation once you answer, right or wrong.</p>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">1. In Lesson 1, <code>go func() { fmt.Println("hi") }()</code> followed immediately by <code>main</code> returning often prints nothing at all. Why?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Go doesn't buffer stdout specially for goroutines — the missing print isn't an I/O timing issue, it's that the goroutine may never get scheduled before main exits.">Incorrect — it's a stdout buffering issue specific to goroutines.</li>
+      <li data-option="b" data-explain="The goroutine did start; starting isn't the problem. The problem is nothing makes main wait for it to finish.">Incorrect — the goroutine never actually starts running.</li>
+      <li data-option="c" data-explain="Right. The go keyword starts a goroutine and returns immediately, without waiting. If main reaches the end of the function and returns before the scheduler ever runs the new goroutine, the whole program exits and that goroutine's work is simply never completed — this is why Lesson 1 introduced sync.WaitGroup as the fix.">Correct — the program exits as soon as main returns, and nothing forces main to wait for the goroutine to run first.</li>
+      <li data-option="d" data-explain="fmt.Println works identically inside a goroutine as anywhere else — there's no special restriction on printing from one.">Incorrect — fmt.Println can't be safely called from inside a goroutine.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">2. Lesson 2's <code>duTop</code> wrote to <code>dSizes[i]</code> from multiple goroutines with no mutex, and <code>-race</code> stayed silent. Why was that safe?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Go's race detector reports every unsynchronized concurrent access to the same memory it observes during a run — it wasn't too small a sample here, the accesses genuinely never collided.">Incorrect — it was actually unsafe, the test fixture was just too small to trigger it.</li>
+      <li data-option="b" data-explain="Right. Because dSizes was pre-sized with make([]dirSize, len(dirs)) before any goroutine started, and each goroutine i only ever touches dSizes[i], every goroutine owns a distinct memory location. Nothing is ever shared, so there's nothing to race over — this is different from Lesson 4's append, where every goroutine touched the same slice header.">Correct — every goroutine wrote to a distinct index into a slice that was already sized to fit all of them, so no two goroutines ever touched the same memory.</li>
+      <li data-option="c" data-explain="slices in Go carry no built-in per-index locking of any kind — safety here came from the access pattern, not from the language protecting index writes for you.">Incorrect — Go slices have built-in per-element locking.</li>
+      <li data-option="d" data-explain="sync.WaitGroup only blocks until goroutines finish; it does nothing to prevent or detect concurrent writes to shared memory while they're running.">Incorrect — the sync.WaitGroup in that version was what made the writes safe.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">3. Lesson 3 replaced the mutex-protected <code>firstErr</code> with a channel. What specifically made receiving from that channel exactly <code>len(dirs)</code> times sufficient to replace <code>wg.Wait()</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Right. Since each goroutine sends exactly one result, and a receive only succeeds once a value has actually been sent, the loop can't finish its len(dirs) receives until every goroutine has sent — which only happens after each has finished its work. That's the same guarantee wg.Wait() gave, arrived at as a side effect of the channel's own blocking behavior.">Correct — receiving a value only completes once some goroutine has actually sent one, so finishing len(dirs) receives is only possible once every goroutine has finished and sent.</li>
+      <li data-option="b" data-explain="Channels in Go carry no automatic count of active goroutines — the receive loop's guarantee comes purely from send/receive blocking semantics, not from any goroutine bookkeeping.">Incorrect — channels automatically track how many goroutines are still running.</li>
+      <li data-option="c" data-explain="Buffering wasn't introduced until Lesson 5, and this channel was unbuffered in Lesson 3 — buffer capacity has nothing to do with why exactly len(dirs) receives was the right number.">Incorrect — the channel's buffer size was set to match the number of goroutines.</li>
+      <li data-option="d" data-explain="Lesson 3 explicitly deleted the sync.WaitGroup — nothing was waiting on one anymore.">Incorrect — a sync.WaitGroup was still running quietly behind the scenes.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">4. In Lesson 4, the broken <code>append</code>-based <code>duTop</code> sometimes printed 8 lines and sometimes 7, with no crash and no error message. What does that intermittent behavior tell you about a data race?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The exact opposite is the lesson's point: a run that looks fine tells you nothing, because a race's effects depend on scheduling timing that varies from run to run.">Incorrect — since it worked most of the time, it was mostly safe with just an occasional cosmetic glitch.</li>
+      <li data-option="b" data-explain="append doesn't panic on concurrent misuse — it silently produces a wrong result. A crash would actually be easier to catch than what actually happens.">Incorrect — Go always panics immediately when two goroutines write to the same slice concurrently.</li>
+      <li data-option="c" data-explain="-race is specifically designed to catch exactly this kind of intermittent, non-crashing corruption — that's the whole reason Lesson 4 introduced it as a separate, deliberate step rather than relying on normal test runs.">Incorrect — this kind of bug is undetectable by tooling and can only be found by manual review.</li>
+      <li data-option="d" data-explain="Correct. Undefined behavior from a data race isn't consistently broken or consistently fine — it depends on exact goroutine scheduling, which varies between runs. That's precisely why go run -race exists as a dedicated, deliberate check: it flags the unsynchronized access itself, independent of whether a given run happened to look correct.">Correct — a data race produces undefined behavior whose visible effect depends on scheduling timing, so it can look fine on many runs and wrong on others, with no reliable warning either way.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">5. Lesson 5's scratch demo showed a goroutine's "send completed" print appearing immediately with a buffered channel, but only after main's sleep with an unbuffered one. What's the underlying rule?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A receiver being slow to arrive is exactly what makes an unbuffered send block — the rule is about buffer capacity, not about how many receivers exist.">Incorrect — unbuffered channels always block because they can only have one receiver at a time.</li>
+      <li data-option="b" data-explain="Right. An unbuffered channel (capacity zero) can't hold a value in transit — a send only completes at the exact moment a receive is happening. A buffered channel with room left can accept a value into that buffer immediately, with nobody needing to be receiving yet at all.">Correct — a send on an unbuffered channel blocks until a receive is happening at that exact moment; a send on a buffered channel with room left completes immediately, independent of whether anyone is receiving yet.</li>
+      <li data-option="c" data-explain="Buffered channels aren't asynchronous in general — a send still blocks once the buffer fills up. The difference is about buffer capacity, not a blanket async/sync distinction.">Incorrect — buffered channels are asynchronous and unbuffered channels are synchronous, full stop, with no further nuance.</li>
+      <li data-option="d" data-explain="fmt.Println's behavior doesn't change based on what channel type is nearby — the timing difference comes entirely from when the channel send itself completes.">Incorrect — fmt.Println behaves differently depending on channel buffering.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">6. Lesson 6 added a <code>case &lt;-deadline</code> inside <code>duTop</code>'s <code>select</code>, using a <code>deadline := time.After(duTimeout)</code> created once before the loop. Why not call <code>time.After(duTimeout)</code> fresh inside the loop, once per iteration?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="select can hold as many cases as you want across any number of separate channels — there's no such restriction that would force reusing one channel.">Incorrect — select can only have exactly two cases, so the channel has to be created outside the loop to satisfy that limit.</li>
+      <li data-option="b" data-explain="time.After can be called freely inside a loop with no compile error — the problem with doing so here is purely about correctness of the timeout logic, not compilation.">Incorrect — calling time.After inside a loop doesn't compile in Go.</li>
+      <li data-option="c" data-explain="Correct. Calling time.After fresh on every iteration would reset the clock every time a result comes in, so duTop would only time out if a single receive took longer than duTimeout — not if the total wait across all entries did. Creating the deadline once, before the loop starts, makes it a real overall deadline for the whole collection process.">Correct — creating a fresh time.After on every iteration would reset the countdown every time a result arrives, so the timeout would only ever fire if one single receive took too long, not if the whole loop ran long overall.</li>
+      <li data-option="d" data-explain="time.After doesn't allocate meaningful memory per call in a way that would matter for a handful of directory entries — the real issue is what it does to the timeout's meaning, not performance.">Incorrect — it would leak memory too quickly to run even once.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">7. Lesson 7's worker pool started exactly <code>maxWorkers</code> goroutines instead of <code>len(dirs)</code>. What problem does that solve that Lessons 2–6's "one goroutine per entry" approach doesn't?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Right. One goroutine per entry means the number of goroutines — and the amount of simultaneous disk I/O — scales directly with how many entries exist, with no ceiling. A worker pool decouples the two: no matter how large dirs gets, at most maxWorkers pieces of work run at once, avoiding a huge, uncontrolled spike in concurrent work.">Correct — one-goroutine-per-entry has no ceiling on how much concurrent work runs at once, so a directory with a huge number of entries launches a huge number of simultaneous goroutines all contending for the same disk; a worker pool caps that at a fixed, chosen number.</li>
+      <li data-option="b" data-explain="A worker pool doesn't make individual goroutines run any faster — the benefit is about bounding how many run concurrently, not per-goroutine speed.">Incorrect — worker-pool goroutines execute faster than goroutines started directly with go.</li>
+      <li data-option="c" data-explain="Lesson 4's race was caused by an unsynchronized append, unrelated to how many goroutines were started or whether a pool was used — indexed writes and channels both already fixed that independently of pooling.">Incorrect — it fixes the data race from Lesson 4, which one-goroutine-per-entry could never avoid.</li>
+      <li data-option="d" data-explain="Lesson 6's select/time.After pattern works identically regardless of whether goroutines came from a pool or were started directly — pooling and timeouts are separate, composable concerns.">Incorrect — it's required to make Lesson 6's select/timeout pattern work at all.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">8. Lesson 8 replaced the hand-rolled worker pool with <code>errgroup.Group</code>. Which statement about <code>errgroup</code> is accurate?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="errgroup.Group's zero value is directly usable (var g errgroup.Group) — there's no separate constructor required, unlike sync.WaitGroup only in the sense that SetLimit is an extra optional method, not a required setup step.">Incorrect — a Group must be created with a special constructor function before use, unlike sync.WaitGroup.</li>
+      <li data-option="b" data-explain="g.Wait() returns only the first non-nil error any of the group's functions returned, not a combined list of all of them — this is a deliberate, documented simplification versus hand-rolling your own error collection.">Incorrect — g.Wait() returns a combined slice of every error returned by every function passed to Go.</li>
+      <li data-option="c" data-explain="SetLimit does exactly the opposite — it caps how many of the group's functions run concurrently. Leaving it uncalled (or calling with a non-positive value pattern this course didn't use) removes the cap, not the reverse.">Incorrect — SetLimit sets the minimum number of goroutines that must run before Wait can return.</li>
+      <li data-option="d" data-explain="Correct. g.Go(func() error { ... }) replaces the raw go statement, tracking the goroutine automatically — no manual wg.Add/Done needed. g.Wait() blocks until all of them finish and returns the first non-nil error any of them returned, replacing both the WaitGroup and the mutex-protected firstErr variable from earlier lessons in one type.">Correct — g.Go launches a tracked goroutine without any manual Add/Done bookkeeping, and g.Wait() blocks until they all finish while returning the first non-nil error any of them produced.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Transfer — open-ended, no hints</h2>
+
+  <p><a href="../../go_cli_basics/lessons/0013-capstone-polish-and-recap.html">Go CLI Basics' capstone</a> ended by having you design a hypothetical <code>burrow checksum</code> subcommand — compute a SHA-256 checksum for every file under a directory tree — without writing code. This course's transfer question is the same design, now with concurrency in the mix. This one stays open-ended rather than multiple choice on purpose: a real design question doesn't compress into four options without trivializing it.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="design-concurrent-checksum">
+      <div class="todo-item-head">
+        <input type="checkbox" id="design-concurrent-checksum-cb">
+        <label for="design-concurrent-checksum-cb">Design <code>burrow checksum</code>: it walks a directory tree and prints a SHA-256 checksum for every file it finds. Decide, and be ready to explain your reasoning: would you launch one goroutine per file, or use a bounded worker pool — and what would drive that choice for this specific task versus <code>duTop</code>'s? Would you use <code>errgroup</code>, plain channels, or something else to collect results and the first error? Would a timeout make sense here, and if so, guarding what? Sketch the shape (not full code) of the function you'd write.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>No hints, no checkpoint with a "right" answer — this is a synthesis exercise. Bring your answer to your teacher (me) and defend it; a reasonable design defended with real reasoning about tradeoffs is the actual goal, not matching one specific expected shape.</p>
+      </div>
+    </li>
+  </ul>
+
+  <p>That's the course. You went from a single unwaited-for goroutine to a bounded, race-free, benchmarked concurrent rewrite of a real tool's real bottleneck — every step verified, not just described. <code>context.Context</code> (mentioned in Lesson 6) is the natural next thing to learn, once you want cancellation and timeouts to compose across function boundaries instead of living inside one function.</p>
+
+  <div class="ask-your-teacher">
+    Bring your <code>burrow checksum</code> design here — this is exactly the kind of open-ended tradeoff discussion this format exists for.
+  </div>
+
+  <p class="cite">This capstone deliberately cites no new source — every idea it exercises was already sourced in Lessons 1 through 8.</p>
+
+  <div class="lesson-nav">
+    <a href="./0008-upgrading-to-errgroup.html">← Lesson 8: Upgrading to errgroup</a>
+    <a href="../index.html">Course contents</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

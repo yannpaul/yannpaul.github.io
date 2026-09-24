@@ -1,0 +1,156 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_concurrency_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 8 · Upgrading to errgroup</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go Concurrency Basics · Lesson 8 of 9</p>
+  <h1>Upgrading to <code>errgroup</code></h1>
+  <p class="subtitle">Rebuild Lesson 7's worker-pool <code>duTop</code> from memory first. Then delete most of it, and let a well-tested library carry the parts you've been hand-writing since Lesson 2.</p>
+
+  <p class="lede">Look back at what Lesson 7 actually built: a <code>jobs</code> channel, a fixed number of workers, a <code>WaitGroup</code>, a second goroutine just to close <code>results</code> at the right time. Every piece was worth learning, because you'll recognize this shape everywhere in real Go code — but almost nobody hand-writes it from scratch anymore. <code>golang.org/x/sync/errgroup</code> is the standard answer: a small, official-adjacent library that does exactly this, with the error-handling Lesson 2's mutex was protecting built in from the start. This is the same move <a href="../../go_cli_basics/">Go CLI Basics</a> made when Lesson 11 replaced by-hand dispatch with Cobra.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–7</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-lesson7-dutop">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-lesson7-dutop-cb">
+        <label for="repeat-lesson7-dutop-cb">Confirm your worker-pool <code>duTop</code> from Lesson 7 — <code>jobs</code>/<code>results</code> channels, <code>maxWorkers</code> goroutines, a <code>WaitGroup</code> — still produces correct, race-free output.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run -race . du top --path scratch --n 10</code> prints your known-good sorted lines, no warnings — this is what you're about to replace.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: <code>errgroup.Group</code></h2>
+
+  <p>An <a href="https://pkg.go.dev/golang.org/x/sync/errgroup"><code>errgroup.Group</code></a> is a <code>sync.WaitGroup</code> that also knows how to collect an error. Call <code>g.Go(func() error { ... })</code> instead of <code>go func() { ... }()</code>, and instead of <code>wg.Add(1)</code>/<code>defer wg.Done()</code>, the group tracks the goroutine for you. Call <code>g.Wait()</code> instead of <code>wg.Wait()</code>, and it returns the <em>first</em> non-nil error any of your functions returned — no mutex, no <code>firstErr</code> variable, built into the type itself. <code>g.SetLimit(n)</code> caps how many of your functions run at once, replacing Lesson 7's entire <code>jobs</code>-channel-plus-worker-loop mechanism with one method call.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="add-errgroup-dependency">
+      <div class="todo-item-head">
+        <input type="checkbox" id="add-errgroup-dependency-cb">
+        <label for="add-errgroup-dependency-cb">Add the dependency to your module.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>go get golang.org/x/sync/errgroup</code></pre>
+            <p>Despite the <code>golang.org/x</code> import path, this isn't part of the standard library you get for free — it's a separate module, maintained by the Go team, that you add like any other dependency.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="rewrite-dutop-errgroup">
+      <div class="todo-item-head">
+        <input type="checkbox" id="rewrite-dutop-errgroup-cb">
+        <label for="rewrite-dutop-errgroup-cb">Rewrite <code>duTop</code>: go back to Lesson 2's indexed-slice-write shape (<code>dSizes := make([]dirSize, len(dirs))</code>, writing to <code>dSizes[i]</code>), but launch each entry's work with <code>g.Go</code> on an <code>errgroup.Group</code> that has <code>SetLimit(maxWorkers)</code> called on it, instead of a raw <code>go</code> statement.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>import "golang.org/x/sync/errgroup"
+
+const maxWorkers = 4
+
+func duTop(root string, n int) error {
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+
+	dSizes := make([]dirSize, len(dirs))
+	var g errgroup.Group
+	g.SetLimit(maxWorkers)
+
+	for i, d := range dirs {
+		g.Go(func() error {
+			p := filepath.Join(root, d.Name())
+			s, err := sizeOf(p)
+			if err != nil {
+				return err
+			}
+			dSizes[i] = dirSize{p, s}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	sort.Slice(dSizes, func(i, j int) bool { return dSizes[i].Size > dSizes[j].Size })
+	n = min(len(dSizes), n)
+	for _, d := range dSizes[:n] {
+		fmt.Printf("%10d %q\n", d.Size, d.Name)
+	}
+	return nil
+}</code></pre>
+            <p>Notice <code>i</code> and <code>d</code> are used directly inside the closure passed to <code>g.Go</code>, with no <code>func(i int, name string) { ... }(i, d.Name())</code> wrapper like every earlier lesson needed. Since Go 1.22, each loop iteration gets its own copy of <code>i</code> and <code>d</code> automatically — the classic "closure captures the loop variable and every goroutine sees the last value" bug is gone. On an older Go version this same code would be a real bug; if you're ever unsure which behavior you're getting, the explicit-parameter version from Lessons 2–7 always works regardless of version.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="delete-worker-pool-machinery">
+      <div class="todo-item-head">
+        <input type="checkbox" id="delete-worker-pool-machinery-cb">
+        <label for="delete-worker-pool-machinery-cb">Delete the <code>jobs</code> channel, the manual worker loop, the <code>results</code> channel, the <code>WaitGroup</code>, and the goroutine that closed <code>results</code> — none of it is needed anymore. If nothing else in your file uses <code>"sync"</code>, remove that import too.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go build ./...</code> succeeds with all of that gone — <code>errgroup.Group</code> was doing the job of every piece you just deleted.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="verify-errgroup-version">
+      <div class="todo-item-head">
+        <input type="checkbox" id="verify-errgroup-version-cb">
+        <label for="verify-errgroup-version-cb">Run your scratch fixture, then again under <code>-race</code>, then five or six times checking the output stays identical.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Same sorted output as Lesson 7, every time, <code>-race</code> silent. Fewer moving parts, identical guarantee: at most <code>maxWorkers</code> entries are being sized at once, indexed writes mean no two goroutines ever touch the same slice slot, and the first real error — try pointing <code>--path</code> at a directory you can't read — comes back from <code>g.Wait()</code> exactly like <code>firstErr</code> used to.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>This is a pattern worth internalizing beyond just <code>duTop</code>: learn the primitives by hand first — <code>go</code>, <code>WaitGroup</code>, channels, <code>select</code>, a worker pool built from scratch — so that when you reach for a library that packages them up, you know exactly what it's doing underneath and can debug it when something goes wrong. <code>errgroup</code> isn't magic; it's a <code>WaitGroup</code>, a mutex-protected error, and (with <code>SetLimit</code>) a semaphore, wearing a smaller API. Reaching for the library first, without having built the primitives yourself even once, is how you end up unable to explain why your own code works.</p>
+  </div>
+
+  <p>You've now rebuilt <code>duTop</code> five times: serial, indexed-writes-plus-mutex, channel-based, worker-pool, and <code>errgroup</code>. Lesson 9 puts a number on why any of this mattered in the first place, and asks you to defend the final version's every synchronization choice from memory.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why <code>errgroup</code> only returns the <em>first</em> error instead of collecting all of them, what <code>SetLimit</code> is doing internally, whether the Go 1.22 loop-variable change means you should stop writing the explicit-parameter version everywhere, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary source for this lesson: <a href="https://pkg.go.dev/golang.org/x/sync/errgroup">pkg.go.dev, golang.org/x/sync/errgroup</a> for the exact API and guarantees of <code>Group</code>, <code>Go</code>, <code>Wait</code>, and <code>SetLimit</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="./0007-worker-pools.html">← Lesson 7: Worker Pools</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0009-capstone.html">Next: Capstone →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

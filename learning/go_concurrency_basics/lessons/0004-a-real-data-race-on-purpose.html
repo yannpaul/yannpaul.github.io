@@ -1,0 +1,171 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_concurrency_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 4 · A Real Data Race, On Purpose</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go Concurrency Basics · Lesson 4 of 9</p>
+  <h1>A Real Data Race, On Purpose</h1>
+  <p class="subtitle">Rebuild Lesson 3's channel-based <code>duTop</code> from memory first. Then deliberately break it, and watch what actually happens — not just what the textbook says happens.</p>
+
+  <p class="lede">Every lesson so far has told you a data race is dangerous. Today you cause one on purpose, in code you already trust, and see for yourself that it doesn't crash, doesn't always misbehave, and doesn't announce itself — which is exactly why <code>go run -race</code> exists as a separate, deliberate step, not something you'd notice by just running the program and watching.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–3</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-lesson3-dutop">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-lesson3-dutop-cb">
+        <label for="repeat-lesson3-dutop-cb">Confirm your channel-based <code>duTop</code> from Lesson 3 still produces correct, race-free output on your scratch fixture.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run -race . du top --path scratch --n 10</code> prints the same three sorted lines it always has, no warnings — your known-good baseline before you break anything.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: breaking it back to a shared <code>append</code></h2>
+
+  <p>Set your Lesson 3 <code>duTop</code> aside for a moment (comment it out, or copy it to a scratch file — you'll want it back at the end). Today's version starts each goroutine the way Lesson 2 warned you not to: computing a size, then calling <code>append</code> directly on one shared <code>dSizes</code> slice, with nothing coordinating who appends when.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-broken-dutop">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-broken-dutop-cb">
+        <label for="write-broken-dutop-cb">Write a <code>duTop</code> that starts a goroutine per entry, each one calling <code>dSizes = append(dSizes, dirSize{p, s})</code> directly on a shared, empty-started slice — no channel, no mutex, no indexed writes. Use a <code>sync.WaitGroup</code> just to wait for all goroutines to finish before sorting and printing, same as Lesson 2's <code>Add</code>/<code>Done</code>/<code>Wait</code> shape.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func duTop(root string, n int) error {
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+
+	var dSizes []dirSize
+	var wg sync.WaitGroup
+	for _, d := range dirs {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			p := filepath.Join(root, name)
+			s, err := sizeOf(p)
+			if err != nil {
+				return
+			}
+			dSizes = append(dSizes, dirSize{p, s})
+		}(d.Name())
+	}
+	wg.Wait()
+
+	sort.Slice(dSizes, func(i, j int) bool { return dSizes[i].Size > dSizes[j].Size })
+	n = min(len(dSizes), n)
+	for _, d := range dSizes[:n] {
+		fmt.Printf("%10d %q\n", d.Size, d.Name)
+	}
+	return nil
+}</code></pre>
+            <p>This compiles and runs cleanly — that's the point. Nothing here is a syntax problem.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <p>Build a scratch directory with several entries — the more there are, the more likely two goroutines actually overlap:</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="build-many-entry-scratch">
+      <div class="todo-item-head">
+        <input type="checkbox" id="build-many-entry-scratch-cb">
+        <label for="build-many-entry-scratch-cb">Make a directory with at least eight subdirectories, each holding one small file.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>mkdir -p race-test/{a,b,c,d,e,f,g,h}
+for d in a b c d e f g h; do head -c 10 /dev/zero > race-test/$d/f.bin; done</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-broken-repeatedly">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-broken-repeatedly-cb">
+        <label for="run-broken-repeatedly-cb">Run <code>burrow du top --path race-test --n 10</code> five or six times in a row, counting how many lines print each time.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>You should see 8 lines most of the time — and, on at least one run, 7, or some other number less than 8. Nothing crashes, no error prints. An entry's result simply never made it into <code>dSizes</code> that time, because two goroutines' concurrent <code>append</code> calls collided — one <code>append</code> can silently overwrite or lose another's write when both are racing to grow the same underlying array. If you don't see it drop a line in five or six tries, that's not proof it's safe — it's exactly the danger this lesson is about: a race that only sometimes shows itself.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-broken-race">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-broken-race-cb">
+        <label for="run-broken-race-cb">Now run the exact same command under the race detector.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>go run -race . du top --path race-test --n 10</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>A <code>WARNING: DATA RACE</code> block prints, naming two goroutines both reading and writing at the same memory address, with a stack trace pointing directly at your <code>append</code> line in both. This is the tool doing exactly what Lesson 7 of <a href="../../go_cli_basics/">Go CLI Basics</a> described: it only reports a race that actually happened during this run, but when it fires, it's not a false alarm — it's telling you precisely where two goroutines touched the same memory unsafely.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p><code>append</code> isn't one atomic operation — it reads the slice's current length and capacity, decides whether the backing array needs to grow, possibly allocates a new one, copies data, and writes the new element and the new length back into the slice header your variable holds. When two goroutines run all of that concurrently against the same shared slice variable, they can both read the same starting length, both decide independently where their new element goes, and one goroutine's write can be silently overwritten by the other's — not a crash, just quietly wrong data. This is precisely why Lesson 2 insisted on indexed writes into a pre-sized slice (each goroutine owns a distinct memory location, so there's nothing to collide over) and why Lesson 3's channel moved the only <code>append</code> call into a single goroutine that never runs concurrently with itself.</p>
+  </div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="restore-channel-version">
+      <div class="todo-item-head">
+        <input type="checkbox" id="restore-channel-version-cb">
+        <label for="restore-channel-version-cb">Delete today's broken <code>duTop</code> and restore your Lesson 3 channel-based version.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run -race . du top --path race-test --n 10</code> now reliably prints all 8 lines, every time, with no warning — the same fixture that just silently dropped data a moment ago.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <p>A data race is not "usually fine, occasionally slow." It's undefined behavior that happens to look fine most of the time on your machine, today, with this input size — and silently wrong the rest of the time. <code>-race</code> is how you find out which one you actually have, instead of hoping.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why <code>append</code> specifically is unsafe here when indexed writes weren't, why the plain (non-<code>-race</code>) run doesn't always show the corruption, what would happen with a much larger number of entries, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://go.dev/doc/articles/race_detector">go.dev, "Data Race Detector"</a> for what <code>-race</code> guarantees and what it doesn't; <a href="https://go.dev/ref/mem">go.dev, "The Go Memory Model"</a> for the formal statement of why unsynchronized concurrent access to the same memory has no defined outcome.</p>
+
+  <div class="lesson-nav">
+    <a href="./0003-share-memory-by-communicating.html">← Lesson 3: Share Memory By Communicating</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0005-buffered-vs-unbuffered-channels.html">Next: Buffered vs. Unbuffered Channels →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>
