@@ -1,0 +1,143 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_context_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 2 · WithCancel and WithTimeout on duTop</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">context.Context in Go · Lesson 2 of 7</p>
+  <h1>WithCancel and WithTimeout on duTop</h1>
+  <p class="subtitle">Rebuild Lesson 1's <code>watch</code>/<code>cancel</code> demo from memory first. Then replace <code>duTop</code>'s hand-rolled timeout with the real thing.</p>
+
+  <p class="lede"><a href="../../go_concurrency_basics/lessons/0006-select-and-timeouts.html">Go Concurrency Basics' Lesson 6</a> left <code>duTop</code> with a package-level <code>const duTimeout</code> and a <code>select</code> racing a real channel against <code>time.After(duTimeout)</code>. It works, but the deadline lives entirely inside <code>duTop</code> — nothing about it can be handed to a caller, shortened by an outer function, or shared with anything else that also needs to know "has this operation run out of time." <code>context.WithTimeout</code> fixes all of that with one change: the deadline becomes a real context, created by whoever calls <code>duTop</code>, not a constant baked into the function itself.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lesson 1</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-lesson1-demo">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-lesson1-demo-cb">
+        <label for="repeat-lesson1-demo-cb">Confirm your Lesson 1 <code>watch</code>/<code>cancel</code> demo still behaves the same way, and that calling <code>cancel</code> twice is still a safe no-op.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Same ordering as before: <code>main: doing some work</code>, <code>main: calling cancel</code>, then <code>watch: context is done, reason: context canceled</code>.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: duTop takes a context</h2>
+
+  <p><code>context.WithTimeout(parent, d)</code> is <code>context.WithCancel</code> plus a built-in timer: the returned context cancels itself automatically once <code>d</code> elapses, with the exact same <code>Done()</code>/<code>Err()</code> mechanics from Lesson 1 — you just get <code>context.DeadlineExceeded</code> back instead of <code>context.Canceled</code> when it fires on its own.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="add-ctx-param">
+      <div class="todo-item-head">
+        <input type="checkbox" id="add-ctx-param-cb">
+        <label for="add-ctx-param-cb">Give <code>duTop</code> a new first parameter, <code>ctx context.Context</code>. Delete the package-level <code>duTimeout</code> constant and the <code>deadline := time.After(duTimeout)</code> line — the context you're handed now <em>is</em> the deadline.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the signature change</summary>
+          <div class="reveal-body">
+            <pre><code>func duTop(ctx context.Context, root string, n int) error {
+	// ... unchanged: os.ReadDir, launching goroutines, the results channel ...
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="swap-select-case">
+      <div class="todo-item-head">
+        <input type="checkbox" id="swap-select-case-cb">
+        <label for="swap-select-case-cb">In the collection loop's <code>select</code>, replace <code>case &lt;-deadline:</code> with <code>case &lt;-ctx.Done():</code>, and change the error it returns to wrap <code>ctx.Err()</code> instead of naming <code>duTimeout</code> directly.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the loop</summary>
+          <div class="reveal-body">
+            <pre><code>var dSizes []dirSize
+var firstErr error
+for i := 0; i < len(dirs); i++ {
+	select {
+	case r := <-results:
+		if r.Err != nil {
+			if firstErr == nil {
+				firstErr = r.Err
+			}
+			continue
+		}
+		dSizes = append(dSizes, dirSize{r.Name, r.Size})
+	case <-ctx.Done():
+		return fmt.Errorf("du top: %w waiting for %d of %d entries", ctx.Err(), len(dirs)-i, len(dirs))
+	}
+}</code></pre>
+            <p><code>%w</code> wraps <code>ctx.Err()</code> inside the returned error rather than just interpolating its text — this preserves it as a real wrapped error, so a caller could later check it with <code>errors.Is(err, context.DeadlineExceeded)</code> if it ever needed to distinguish "timed out" from any other failure programmatically, not just read it in a message.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="create-timeout-in-main">
+      <div class="todo-item-head">
+        <input type="checkbox" id="create-timeout-in-main-cb">
+        <label for="create-timeout-in-main-cb">In whichever function calls <code>duTop</code> (your <code>du top</code> Cobra command's <code>RunE</code>, most likely), create the timeout context there instead, and pass it in.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the call site</summary>
+          <div class="reveal-body">
+            <pre><code>ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+defer cancel()
+
+if err := duTop(ctx, path, n); err != nil {
+	return err
+}</code></pre>
+            <p><code>defer cancel()</code> here matters even though the timeout will often fire (or the function will simply return) before the full duration elapses — it releases the timer immediately on every exit path, rather than leaving it running uselessly until its own deadline arrives.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="verify-fast-and-slow">
+      <div class="todo-item-head">
+        <input type="checkbox" id="verify-fast-and-slow-cb">
+        <label for="verify-fast-and-slow-cb">Run against your normal scratch fixture, then against a fixture with a deliberately slow entry (the same <code>slowdir</code>-marker trick from <code>go_concurrency_basics</code> Lesson 6, if you still have it), then under <code>-race</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The normal fixture completes well under the timeout, same output as always. The fixture with a slow entry now fails with an error containing exactly <code>context deadline exceeded</code> (not a message naming <code>duTimeout</code>, since that constant no longer exists) at right around your configured timeout. <code>-race</code> stays silent on the fast path.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Notice what moved: the timeout's actual duration used to be a constant baked directly inside <code>duTop</code>; now it's a choice made by whoever calls <code>duTop</code>, at the moment they call it. This is the real payoff of taking a <code>context.Context</code> as a parameter instead of managing a deadline internally — the function that does the work no longer decides how long it's allowed to take. A caller in a hurry can pass a short timeout; a caller running as a background batch job could pass <code>context.Background()</code> with no timeout at all; a caller already inside its own deadline (once Lesson 3 covers context trees) can pass that same context straight through. <code>duTop</code> itself doesn't need to change for any of those cases — it just respects whatever context it's handed.</p>
+  </div>
+
+  <p><code>duTop</code> now takes its deadline from the outside, using the real cancellation mechanism the standard library gives every function that might need to stop early. Lesson 3 goes one level further: what happens once a context is passed through more than one layer of function calls, and why canceling the top of that chain reliably cancels everything underneath it.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why the error wraps <code>ctx.Err()</code> with <code>%w</code> instead of just including its text, what changes if you pass <code>context.Background()</code> with no timeout at all, why the timeout is created in the caller instead of inside <code>duTop</code> itself, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://pkg.go.dev/context">pkg.go.dev, package <code>context</code></a> for <code>WithTimeout</code>'s exact contract and the <code>DeadlineExceeded</code>/<code>Canceled</code> distinction; <a href="https://go.dev/tour/concurrency/5">go.dev, "A Tour of Go": select</a>, revisited here since the replacement is still a <code>select</code> at heart.</p>
+
+  <div class="lesson-nav">
+    <a href="./0001-what-context-is-for.html">← Lesson 1: What context.Context Is For</a>
+    <a href="../index.html">Course contents</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

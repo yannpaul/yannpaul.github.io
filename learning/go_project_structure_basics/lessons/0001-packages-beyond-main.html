@@ -1,0 +1,150 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_project_structure_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1 · Packages Beyond main</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go Programs Beyond One main.go · Lesson 1 of 7</p>
+  <h1>Packages Beyond <code>main</code></h1>
+  <p class="subtitle">A small standalone demo today — not <code>burrow</code> yet. Lesson 2 applies this for real.</p>
+
+  <p class="lede">Every Go file you've written so far starts with <code>package main</code> — the one special package that produces something runnable. But <code>package main</code> is just one package among many a module can have, and understanding what a package actually is, and how visibility works between them, is the whole foundation Lesson 2 needs to pull real logic out of <code>burrow</code>'s <code>main.go</code>. Today: a second package, from scratch, small enough to see the whole mechanism at once.</p>
+
+  <h2>Before you start</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="scratch-dir">
+      <div class="todo-item-head">
+        <input type="checkbox" id="scratch-dir-cb">
+        <label for="scratch-dir-cb">Create a throwaway scratch module, separate from <code>burrow</code>, for today's demo.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>mkdir -p greetdemo/greet
+cd greetdemo
+go mod init greetdemo</code></pre>
+            <p>Two directories: <code>greetdemo/</code> (the module root, where <code>main.go</code> will live) and <code>greetdemo/greet/</code> (a second package).</p>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: a directory is a package</h2>
+
+  <p>A Go <strong>package</strong> is a directory of <code>.go</code> files that all declare the same <code>package</code> name at the top. There's no separate "create a package" command — you make a directory, put a file in it with a <code>package</code> clause, and that directory is now importable by anything in the same module.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-greet-package">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-greet-package-cb">
+        <label for="write-greet-package-cb">Write <code>greet/greet.go</code>: <code>package greet</code>, an unexported package-level variable holding a default name, and one exported function, <code>Hello(name string) string</code>, that uses the default when <code>name</code> is empty.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>// Package greet builds greeting messages.
+package greet
+
+var defaultName = "friend"
+
+func Hello(name string) string {
+	if name == "" {
+		name = defaultName
+	}
+	return "Hello, " + name + "!"
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="write-main-imports-greet">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-main-imports-greet-cb">
+        <label for="write-main-imports-greet-cb">Write <code>main.go</code> at the module root: import <code>greetdemo/greet</code> and call <code>greet.Hello(...)</code> twice, once with a name and once with an empty string.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"fmt"
+
+	"greetdemo/greet"
+)
+
+func main() {
+	fmt.Println(greet.Hello("Ada"))
+	fmt.Println(greet.Hello(""))
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run .</code> prints <code>Hello, Ada!</code> then <code>Hello, friend!</code>. The import path <code>greetdemo/greet</code> is your module's name (from <code>go.mod</code>) plus the package directory's path — nothing about it references your filesystem's absolute path.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Notice <code>greet.go</code>'s doc comment — <code>// Package greet builds greeting messages.</code> — sits directly above the <code>package</code> clause with no blank line between them. That's not decoration; a comment in exactly that position is a package's doc comment, shown by <code>go doc</code> and by <a href="https://pkg.go.dev/">pkg.go.dev</a> for any package published publicly. Get in the habit of writing one for every package you create, even one this small — it's the first thing anyone (including future you) sees when trying to understand what a package is for before reading its code.</p>
+  </div>
+
+  <h2>New: exported versus unexported</h2>
+
+  <p>Go's entire visibility rule is capitalization, checked by the compiler, not a convention you can accidentally violate without consequence. A name starting with an uppercase letter (<code>Hello</code>) is <strong>exported</strong> — visible to any package that imports this one. A name starting with lowercase (<code>defaultName</code>) is <strong>unexported</strong> — visible only inside the package that declares it, full stop.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="try-unexported-access">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-unexported-access-cb">
+        <label for="try-unexported-access-cb">In <code>main.go</code>, temporarily try to read <code>greet.defaultName</code> directly from <code>package main</code>, and attempt to build.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the line to add</summary>
+          <div class="reveal-body">
+            <pre><code>fmt.Println(greet.defaultName) // add this line temporarily</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go build .</code> refuses to compile, with exactly this error: <code>name defaultName not exported by package greet</code>. This isn't a linter warning or a style suggestion — the build fails outright. Remove the line again before moving on; <code>go run .</code> is back to printing its original two lines.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Default to unexported. Start every new function, type, and variable lowercase, and only capitalize it the moment something outside the package genuinely needs to call or read it. Once a name is exported, it becomes part of your package's public contract — other code (possibly code you don't control, once a package is shared) can come to depend on it, which makes it harder to freely rename or remove later. An unexported identifier has no such obligation: you can change it freely, because nothing outside the package could have depended on it in the first place. <code>Hello</code> is exported here because <code>main</code> genuinely needs to call it; <code>defaultName</code> stays unexported because nothing outside <code>greet</code> has any legitimate reason to read it directly.</p>
+  </div>
+
+  <p>That's the whole mechanism: a directory with a <code>package</code> clause is a package, and capitalization is the entire visibility rule the compiler enforces. Lesson 2 puts this to work for real — pulling actual logic out of <code>burrow</code>'s <code>main.go</code> into its own package, then building a second binary that reuses it.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why the doc comment has to sit directly above <code>package</code> with no blank line, what "not exported" actually means for the compiler versus a style linter, when you'd choose to export something versus keep it unexported, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://go.dev/doc/code">go.dev, "How to Write Go Code"</a> for the package/module/import model; <a href="https://go.dev/doc/effective_go#names">go.dev, "Effective Go": Package names / exported names</a> for the exported/unexported convention and its rationale.</p>
+
+  <div class="lesson-nav">
+    <a href="../index.html">Course contents</a>
+    <a href="./0002-a-library-and-a-second-binary.html">Next: A Library Package and a Second Binary →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>
