@@ -13,17 +13,17 @@
   <h1>context.Context in Go</h1>
   <p class="subtitle">Learn Go's <code>context</code> package by replacing a real hand-rolled timeout in <code>burrow</code>, the CLI tool from <a href="../go_cli_basics/">Go CLI Basics</a>, with the real thing. Same format as the other Go workspaces — a checklist, not a script, with code hidden behind collapsed disclosures until you're stuck.</p>
 
-  <p class="lede">Seven lessons, each a self-contained page. Every lesson (from Lesson 2 on) opens by making you redo everything structural from prior lessons before teaching anything new. Only Lessons 1–2 are written so far; the rest are scoped below and will be built out in future sessions. <a href="../go_concurrency_basics/lessons/0006-select-and-timeouts.html">Go Concurrency Basics' Lesson 6</a> built <code>duTop</code> a timeout using a bare <code>select</code> and <code>time.After</code>, and named <code>context.WithTimeout</code> as the natural next step — this workspace is that next step, and assumes you already have a working <code>burrow</code> with that lesson's timeout in place.</p>
+  <p class="lede">Seven lessons, each a self-contained page. Every lesson (from Lesson 2 on) opens by making you redo everything structural from prior lessons before teaching anything new. All seven are now written; the course is complete. <a href="../go_concurrency_basics/lessons/0006-select-and-timeouts.html">Go Concurrency Basics' Lesson 6</a> built <code>duTop</code> a timeout using a bare <code>select</code> and <code>time.After</code>, and named <code>context.WithTimeout</code> as the natural next step — this workspace is that next step, and assumes you already have a working <code>burrow</code> with that lesson's timeout in place.</p>
 
   <h2>Lessons</h2>
   <ol>
     <li><a href="./lessons/0001-what-context-is-for.html">What context.Context Is For</a> — the <code>Done()</code> channel, <code>context.WithCancel</code>, and watching a goroutine unblock the moment it's canceled, on a small standalone demo before touching <code>burrow</code></li>
     <li><a href="./lessons/0002-withtimeout-on-dutop.html">WithCancel and WithTimeout on duTop</a> — replace <code>go_concurrency_basics</code>' hand-rolled <code>select</code>/<code>time.After</code> timeout with a real <code>context.WithTimeout</code>, propagated in from <code>main</code></li>
-    <li><strong>Coming up — Propagating Context Through Call Chains</strong> — context trees: a child context created from a parent, and why canceling the parent cancels every child automatically</li>
-    <li><strong>Coming up — Cancellation on Interrupt</strong> — wire a real Ctrl+C, via <code>os/signal.NotifyContext</code>, to cancel a long-running <code>du top</code> from outside</li>
-    <li><strong>Coming up — context.WithValue</strong> — what it's for, why it's narrowly scoped to request-scoped metadata, and the concrete downside of overusing it</li>
-    <li><strong>Coming up — Context and errgroup</strong> — <code>errgroup.WithContext</code>: canceling sibling goroutines the moment one of them fails, tying back to <code>go_concurrency_basics</code>' capstone</li>
-    <li><strong>Coming up — Capstone</strong> — pull every technique together and defend every cancellation/timeout decision in the finished code</li>
+    <li><a href="./lessons/0003-propagating-context-through-call-chains.html">Propagating Context Through Call Chains</a> — context trees: a child context created from a parent, why canceling the parent cancels every child automatically, and wiring a real one into <code>burrow</code> via Cobra's <code>ExecuteContext</code></li>
+    <li><a href="./lessons/0004-cancellation-on-interrupt.html">Cancellation on Interrupt</a> — wire a real Ctrl+C, via <code>os/signal.NotifyContext</code>, to cancel a long-running <code>du top</code> from outside</li>
+    <li><a href="./lessons/0005-context-withvalue.html">context.WithValue</a> — what it's for, why it's narrowly scoped to request-scoped metadata, and a real, demonstrated key-collision bug from overusing it</li>
+    <li><a href="./lessons/0006-context-and-errgroup.html">Context and errgroup</a> — <code>errgroup.WithContext</code>: canceling sibling goroutines the moment one of them fails, measured against <code>go_concurrency_basics</code>' plain <code>errgroup.Group</code></li>
+    <li><a href="./lessons/0007-capstone.html">Capstone</a> — pull every technique together, measure the concrete payoff, and defend every cancellation/timeout decision in the finished code plus one open-ended design question</li>
   </ol>
 
   <div class="lesson-nav">

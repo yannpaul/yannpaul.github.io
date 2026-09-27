@@ -1,0 +1,189 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_context_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 6 · Context and errgroup</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">context.Context in Go · Lesson 6 of 7</p>
+  <h1>Context and errgroup</h1>
+  <p class="subtitle">Rebuild Lesson 5's <code>WithValue</code> collision demo from memory first. Then watch <code>duTop</code> waste five real seconds — and fix it with one function you already know.</p>
+
+  <p class="lede"><code>go_concurrency_basics</code> Lesson 8 replaced <code>duTop</code>'s hand-rolled worker pool with a plain <code>errgroup.Group</code>: <code>g.Go</code>, <code>g.SetLimit</code>, <code>g.Wait()</code> returning the first error. That version has a real gap you haven't seen yet: when one goroutine fails, the others have no idea. They keep running — potentially for a long time — computing results nobody's going to use, because the whole call is about to fail anyway. <code>errgroup.WithContext</code> closes that gap using exactly the cancellation mechanism this course has spent five lessons on.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–5</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-lesson5-collision">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-lesson5-collision-cb">
+        <label for="repeat-lesson5-collision-cb">Confirm your Lesson 5 bare-string-key collision demo still shows component B's value silently overwriting component A's.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Same output as before: the second print shows <code>3</code>, not <code>abc-123</code>.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: seeing the gap for real</h2>
+
+  <p>Give <code>sizeOf</code> a deliberately broken entry (returns an error instantly) alongside a deliberately slow one (takes 5 real seconds), both handled by a plain <code>errgroup.Group</code> the way Lesson 8 of <code>go_concurrency_basics</code> left it.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="observe-wasted-wait">
+      <div class="todo-item-head">
+        <input type="checkbox" id="observe-wasted-wait-cb">
+        <label for="observe-wasted-wait-cb">Build a fixture with one entry that makes <code>sizeOf</code> return an error immediately and a separate entry that makes it sleep 5 real seconds (no context check at all). Run your plain-<code>errgroup.Group</code> <code>duTop</code> against it and time the whole call.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>duTop</code> takes the full ~5 seconds to return, even though the broken entry failed almost instantly. <code>g.Wait()</code> still has to wait for every goroutine to actually finish — including the one whose result nobody will ever see, since the whole call is already doomed to return that first error.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: errgroup.WithContext</h2>
+
+  <p><code>errgroup.WithContext(parent)</code> returns a group exactly like before, plus a derived context. The moment any goroutine started with <code>g.Go</code> returns a non-nil error, that context is canceled — automatically, no extra code. Any other goroutine that's watching <code>ctx.Done()</code> can notice and stop early instead of running to completion pointlessly.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="scratch-errgroup-withcontext">
+      <div class="todo-item-head">
+        <input type="checkbox" id="scratch-errgroup-withcontext-cb">
+        <label for="scratch-errgroup-withcontext-cb">In a throwaway scratch file: use <code>errgroup.WithContext</code> to run three goroutines — one that fails immediately, one that would take 5 seconds but watches <code>ctx.Done()</code>, one identical to it. Time <code>g.Wait()</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"golang.org/x/sync/errgroup"
+)
+
+func slowTask(ctx context.Context, name string, d time.Duration) error {
+	select {
+	case <-time.After(d):
+		fmt.Println(name, "finished normally")
+		return nil
+	case <-ctx.Done():
+		fmt.Println(name, "stopped early:", ctx.Err())
+		return ctx.Err()
+	}
+}
+
+func main() {
+	g, ctx := errgroup.WithContext(context.Background())
+
+	g.Go(func() error {
+		return slowTask(ctx, "task-fails-fast", 100*time.Millisecond)
+	})
+	g.Go(func() error {
+		return errors.New("deliberate failure")
+	})
+	g.Go(func() error {
+		return slowTask(ctx, "task-would-run-5s", 5*time.Second)
+	})
+
+	start := time.Now()
+	err := g.Wait()
+	fmt.Println("g.Wait() returned after", time.Since(start), "with err:", err)
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>g.Wait()</code> returns in well under a second — not 5 — with <code>err: deliberate failure</code>. Both other goroutines print <code>stopped early: context canceled</code>. The one deliberate failure canceled <code>ctx</code>, and everything watching it noticed almost immediately.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="apply-to-dutop">
+      <div class="todo-item-head">
+        <input type="checkbox" id="apply-to-dutop-cb">
+        <label for="apply-to-dutop-cb">Rebuild <code>duTop</code> with <code>errgroup.WithContext</code>: give <code>sizeOf</code> a <code>ctx context.Context</code> parameter, have it check <code>ctx.Done()</code> during its slow path, and use the errgroup's derived <code>ctx</code> (not the one you were passed in) inside each <code>g.Go</code> call.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func duTop(ctx context.Context, root string, n int) error {
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+
+	dSizes := make([]dirSize, len(dirs))
+	g, ctx := errgroup.WithContext(ctx) // shadows the parameter on purpose
+	g.SetLimit(maxWorkers)
+
+	for i, d := range dirs {
+		g.Go(func() error {
+			p := filepath.Join(root, d.Name())
+			s, err := sizeOf(ctx, p)
+			if err != nil {
+				return err
+			}
+			dSizes[i] = dirSize{p, s}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	sort.Slice(dSizes, func(i, j int) bool { return dSizes[i].Size > dSizes[j].Size })
+	n = min(len(dSizes), n)
+	for _, d := range dSizes[:n] {
+		fmt.Printf("%10d %q\n", d.Size, d.Name)
+	}
+	return nil
+}</code></pre>
+            <p>Shadowing <code>ctx</code> with the errgroup's own derived one is deliberate, not an accident to fix — every goroutine started after that line should watch the errgroup's context (which also carries <code>duTop</code>'s own timeout as its parent, from Lesson 2, plus the root's cancellation from Lesson 4), not a stale reference to the one <code>duTop</code> was originally called with.</p>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Re-run the same broken-plus-slow fixture. <code>duTop</code> now returns in well under a second — not 5 — with the broken entry's error. The slow entry's <code>sizeOf</code> call noticed the canceled context and gave up almost immediately, instead of finishing a computation nobody needed. <code>go run -race .</code> stays clean.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>This only works because <code>sizeOf</code> actually checks <code>ctx.Done()</code> somewhere in its slow path. A canceled context doesn't reach into running code and stop it by force — nothing in Go does that safely. Every function on the hot path of something that might need to give up early has to cooperate, by checking its context at the points where waiting could actually be long: before a slow operation, inside a loop over many items, around a blocking read. <code>errgroup.WithContext</code> gives you the cancellation signal for free; propagating it into every place that could actually benefit from checking it is still your job.</p>
+  </div>
+
+  <p>You've now used context cancellation to stop <code>duTop</code> on a timeout (Lesson 2), from a real Ctrl+C (Lesson 4), and now from a sibling goroutine's own failure — three different sources, the same <code>Done()</code>/<code>Err()</code> mechanism underneath all of them. Lesson 7 pulls all of it into one final version and asks you to defend every choice in it.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why shadowing <code>ctx</code> with the errgroup's derived one is intentional rather than a naming accident, what happens if a goroutine never checks <code>ctx.Done()</code> at all, whether <code>errgroup.WithContext</code>'s cancellation composes with the timeout from Lesson 2 and the interrupt from Lesson 4, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary source for this lesson: <a href="https://pkg.go.dev/golang.org/x/sync/errgroup">pkg.go.dev, golang.org/x/sync/errgroup</a> for <code>WithContext</code>'s exact contract — the derived context is canceled the first time any function passed to <code>Go</code> returns a non-nil error, or when <code>Wait</code> returns.</p>
+
+  <div class="lesson-nav">
+    <a href="./0005-context-withvalue.html">← Lesson 5: context.WithValue</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0007-capstone.html">Next: Capstone →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>
