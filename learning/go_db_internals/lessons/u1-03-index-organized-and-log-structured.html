@@ -1,0 +1,264 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 1 · Lesson 3 · Index-Organized and Log-Structured Storage</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 1 · Lesson 3</p>
+  <h1>Index-Organized and Log-Structured Storage</h1>
+  <p class="subtitle">Two alternatives to slotted heap pages: keeping a table's tuples inside an index, and never updating anything in place.</p>
+
+  <p class="lede">Lesson 2 ended with the costs of tuple-oriented storage (fragmentation, useless disk I/O and random disk I/O) and with storage systems that can't overwrite a page at all, only create new ones. Lecture #05 presents two other page layouts. Index-organized storage keeps a table's tuples sorted inside an index. Log-structured storage never updates in place: it appends every change, sorts the changes in memory, writes them out sequentially and merges them later. RocksDB uses the second design, and log-structured storage managers are more common today than in previous decades.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Lesson 1: why does a disk-oriented DBMS try to maximize sequential access?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Operating systems support random reads and writes to files. The DBMS prefers sequential access because it is faster.">The operating system only supports sequential reads and writes to database files.</li>
+      <li data-option="b" data-explain="Atomicity comes from the hardware page size, not from the access pattern.">Sequential writes are atomic, while random writes can be torn by a crash.</li>
+      <li data-option="c" data-explain="Slide 10 of lecture #03: random access on non-volatile storage is almost always slower than sequential access, so the DBMS reduces writes to random pages and allocates pages in extents.">Random access on non-volatile storage is almost always slower than sequential access.</li>
+      <li data-option="d" data-explain="DRAM is byte-addressable and fast at random access. It's disk that is block-addressable.">DRAM is block-addressable, so it can only be read sequentially.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question"><code>scores(name, pts)</code> holds (A, 30), (B, 20), (C, 20), (D, 20), (E, 10). For D, what are <code>RANK() OVER (ORDER BY pts DESC)</code> and <code>ROW_NUMBER() OVER (ORDER BY pts DESC, name)</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="B, C and D tie on 20 points, so all three share rank 2 (and E gets rank 5). ROW_NUMBER never repeats: ordered by points and then name, D is the fourth row. Checked in DuckDB.">RANK 2, ROW_NUMBER 4</li>
+      <li data-option="b" data-explain="RANK gives tied rows the same rank, the position of the first of them. D ties with B and C at rank 2.">RANK 4, ROW_NUMBER 4</li>
+      <li data-option="c" data-explain="ROW_NUMBER numbers rows consecutively and ignores ties, so D, the fourth row, gets 4.">RANK 2, ROW_NUMBER 2</li>
+      <li data-option="d" data-explain="RANK doesn't number tied rows one after another. That would be ROW_NUMBER.">RANK 3, ROW_NUMBER 4</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">R(a, b) holds (x, 1), (y, 2), (y, 3), (y, 4). How many tuples does Π<sub>a</sub>(σ<sub>b&gt;1</sub>(R)) contain in relational algebra, and how many rows does <code>SELECT a FROM R WHERE b &gt; 1;</code> return?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="SQL works on bags and keeps duplicates unless you write DISTINCT.">1 tuple; 1 row</li>
+      <li data-option="b" data-explain="Relational algebra works on sets, so the three y values collapse into one tuple.">3 tuples; 3 rows</li>
+      <li data-option="c" data-explain="This swaps the set and bag behaviors.">3 tuples; 1 row</li>
+      <li data-option="d" data-explain="σ keeps the three y tuples and Π keeps only a. The algebra is set-based, so the result is {y}. SQL is bag-based and returns y three times; DISTINCT would give one row. Checked in DuckDB.">1 tuple; 3 rows</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Index-organized storage</h2>
+
+  <p>A heap table is unsorted. To fetch a tuple by record ID, the DBMS checks the page directory, fetches the page and follows the slot array, but to find a tuple by its <em>value</em> it needs a separate index. Slotted-page heaps and the log-structured storage later in this lesson both work that way.</p>
+
+  <p>In <strong>index-organized storage</strong>, the DBMS instead stores a table's tuples as the <em>value</em> of an index data structure, such as a B+tree, a skip list or a trie, so the index keeps them sorted. The pages still look like slotted pages, with a key→offset array in place of the slot array, and tuples are typically sorted within each page by key. The lecture lists SQLite, MySQL, Oracle and SQL Server as examples.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L05-index-organized-p50.png" alt="Left: a small tree with a root, two inner nodes and four leaf nodes. Right: one leaf node enlarged. It has a header followed by a key-to-offset array of three entries that grows to the right, and tuples #3, #2 and #6 that grow from the end of the page to the left. Each key-to-offset entry points to one tuple." loading="lazy">
+    <figcaption>The tuples live in the index's leaf nodes. A leaf is laid out like a slotted page, but its array maps keys to offsets, and its entries are kept in key order (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/05-storage2.pdf#page=50">Lecture #05, slide 18</a>).</figcaption>
+  </figure>
+
+  <p>How a B+tree stays sorted and balanced as tuples come and go is the subject of Unit 3, and you'll build one in Project 2.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=2_sTdS4h-bY&amp;t=1105s">#05 Database Storage II, "Index-organized storage" (18:25)</a>: from reading a tuple by record ID to storing the tuples inside the index itself.</p>
+
+  <h2>Log-structured storage</h2>
+
+  <p>Some storage systems (HDFS, Google Colossus, S3 Express) can't overwrite data in a page; they can only create new pages. <strong>Log-structured storage</strong> is designed for them. Instead of storing tuples in pages and updating them in place, the DBMS keeps a log of changes to tuples. Each entry records one PUT (the tuple's new contents) or one DELETE. The idea comes from log-structured file systems and from log-structured merge trees (LSM trees), first proposed in 1996.</p>
+
+  <p>Each log record must contain the tuple's unique identifier, its key. A PUT record also contains the tuple's contents, and a DELETE record marks the tuple as deleted. As the application changes the database, the DBMS appends records <em>without checking previous log records</em>: a PUT doesn't look for an older version to overwrite, and a DELETE doesn't look for the tuple it deletes.</p>
+
+  <div class="callout">
+    <p class="callout-label">Not the recovery log</p>
+    <p>This log <em>is</em> the table: it's how the data is stored. It has nothing to do with the write-ahead log a DBMS keeps for crash recovery, which comes in Unit 9.</p>
+  </div>
+
+  <h3>Writes: from MemTable to SSTable</h3>
+
+  <p>Changes first go into an in-memory structure called the <strong>MemTable</strong>, which is fast. When it fills up, the DBMS sorts its contents by key and writes them out sequentially to disk as a <strong>sorted-string table</strong> (<strong>SSTable</strong>). In the lecture's example, the MemTable receives PUT(key101, a1), PUT(key102, b1), PUT(key101, a2) and PUT(key103, c1), and the flushed SSTable holds three records, in key order: PUT(key101, a2), PUT(key102, b1), PUT(key103, c1). Only key101's latest value is written.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L05-lsm-memtable-sstable-levels-p67.png" alt="Top half, labelled Memory: an empty MemTable, an arrow to an SSTable holding PUT key101 a2, PUT key102 b1 and PUT key103 c1, and a downward arrow labelled Key Low to High. Bottom half, labelled Disk: Level #0, Level #1 and Level #2, with an arrow labelled Newest to Oldest; Level #2 holds one larger SSTable." loading="lazy">
+    <figcaption>A full MemTable is written out as an SSTable sorted by key, holding only key101's latest value (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/05-storage2.pdf#page=67">Lecture #05, slide 22</a>).</figcaption>
+  </figure>
+
+  <p>Because SSTables are immutable and written sequentially, this design causes less random disk I/O, and it maps well onto append-only cloud storage. Flushed SSTables land in <strong>Level #0</strong>, ordered from newest to oldest, and are later merged into Level #1, Level #2 and so on.</p>
+
+  <h3>Reads</h3>
+
+  <p>To answer <code>GET(key101)</code>, the DBMS checks the MemTable first. If the key isn't there, it checks the SSTables. The brute-force way is to go from the newest SSTable to the oldest, binary-searching each, until it finds the key's most recent record. That can be slow, so the DBMS keeps an in-memory <strong>SummaryTable</strong> with the minimum and maximum key of each SSTable and a key filter per level (for example a Bloom filter), which lets it skip SSTables that can't contain the key.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L05-lsm-read-path-p69.png" alt="GET key101 goes first to the MemTable in memory, drawn as a small tree, and to a SummaryTable box listing Min/Max Key Per SSTable and Key Filter Per Level. Red arrows lead from the SummaryTable down to the SSTables in Levels #0, #1 and #2 on disk." loading="lazy">
+    <figcaption>A read checks the MemTable, then uses the SummaryTable's per-SSTable key ranges and per-level key filters to decide which SSTables on disk to search (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/05-storage2.pdf#page=69">Lecture #05, slide 22</a>).</figcaption>
+  </figure>
+
+  <p>Only the most recent record for the key counts. If that record is a DELETE, the tuple is gone, even though older SSTables still hold PUTs for it.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=2_sTdS4h-bY&amp;t=1954s">#05 Database Storage II, "Log-structured storage" (32:34)</a>: the write path, step by step. The next chapter, "Log-structured reads and deletes" (39:39), covers GET, the SummaryTable and the record format.</p>
+
+  <h2>Compaction</h2>
+
+  <p>A write-heavy workload piles up a large number of SSTables on disk. So the DBMS periodically <strong>compacts</strong> them: a sort-merge over several SSTables that keeps only the most recent change for each key. That reclaims wasted space and speeds up reads.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L05-compaction-merge-p77.png" alt="Two SSTables merged into one. The newer one holds DEL key100, PUT key101 a3, PUT key102 b2 and PUT key103 c1. The older one holds PUT key101 a2, PUT key102 b1, DEL key103 and PUT key104 d2; the first three are crossed out. The result holds DEL key100, PUT key101 a3, PUT key102 b2, PUT key103 c1 and PUT key104 d2. An arrow labelled Newest to Oldest runs under the inputs." loading="lazy">
+    <figcaption>Compaction keeps the newest record per key. The older a2, b1 and DEL(key103) are dropped: key103's newer PUT wins over its older DELETE, and DEL(key100), the newest record for key100, stays in the output (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/05-storage2.pdf#page=77">Lecture #05, slide 24</a>).</figcaption>
+  </figure>
+
+  <p>The lecture shows two strategies for deciding what to merge, and when.</p>
+
+  <p><strong>Leveled compaction</strong> organizes the data into levels, with a size limit for the SSTables of each level. Within a level, SSTables have non-overlapping key ranges, except in Level #0, which holds freshly flushed SSTables whose ranges can overlap. A compaction merges a file from one level into the next lower level, keeping that level's ranges sorted and non-overlapping. Leveled compaction is better for read-heavy workloads.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L05-leveled-compaction-p85.png" alt="Level #1 holds three SSTables with key ranges a to h, i to r and s to z, arranged by key from low to high. A bracket joins the a-to-h and i-to-r SSTables, which merge into one SSTable a to r in Level #2." loading="lazy">
+    <figcaption>In leveled compaction, Level #1's SSTables cover disjoint key ranges, and two of them merge into one larger, still non-overlapping SSTable in Level #2 (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/05-storage2.pdf#page=85">Lecture #05, slide 25</a>).</figcaption>
+  </figure>
+
+  <p><strong>Universal compaction</strong> keeps every SSTable in a single "universal" level, with no hierarchy. The DBMS triggers a compaction when too many SSTables overlap in key range or when they exceed size thresholds. Universal compaction is better for insert-heavy workloads and time-oriented queries.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L05-universal-compaction-p90.png" alt="One row of SSTables ordered from newest to oldest, with key ranges c to y, a to x and a to q. A bracket joins the adjacent c-to-y and a-to-x SSTables, which merge into one SSTable a to y." loading="lazy">
+    <figcaption>In universal compaction, all SSTables sit in one level, and adjacent SSTables with overlapping ranges merge (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/05-storage2.pdf#page=90">Lecture #05, slide 26</a>).</figcaption>
+  </figure>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=2_sTdS4h-bY&amp;t=2708s">#05 Database Storage II, "Compaction process" (45:08)</a>: the sort-merge example. The chapters "Leveled compaction" (50:11) and "Universal compaction" (59:07) follow.</p>
+
+  <h2>Trade-offs</h2>
+
+  <p>Log-structured storage managers are more common today than in previous decades, partly because of RocksDB. In the lecture's summary, the design gives fast sequential writes, which suit append-only storage. In exchange, reads may be slow, because a key's latest record can be in the MemTable or in any of several SSTables, and compaction is expensive. Compaction also causes <strong>write amplification</strong>: one logical write can turn into several physical writes, because compaction rewrites a record every time it merges the SSTable that holds it.</p>
+
+  <p>The lecture's conclusion: log-structured storage is an alternative to the tuple-oriented architecture, ideal for write-heavy workloads because it maximizes sequential disk I/O.</p>
+
+  <h2>Work it out: trace an LSM</h2>
+
+  <p>Follow one sequence of operations through the MemTable, two flushes and one compaction. Keys are k1 to k4; assume the MemTable is flushed exactly when the task says.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u1l3-first-flush">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u1l3-first-flush-cb">
+        <label for="u1l3-first-flush-cb">The MemTable receives PUT(k3, c1), PUT(k1, a1), PUT(k2, b1) and PUT(k1, a2), then is flushed to SSTable S1. Write down S1's records in order.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>An SSTable is sorted by key. Which of k1's two PUTs ends up in it?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Keep the latest record per key, as the lecture's example does with key101, then sort the survivors by key, low to high.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>S1 = [PUT(k1, a2), PUT(k2, b1), PUT(k3, c1)]. PUT(k1, a1) never reaches disk.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u1l3-get-after-delete">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u1l3-get-after-delete-cb">
+        <label for="u1l3-get-after-delete-cb">Next, DEL(k2), PUT(k4, d1) and PUT(k3, c2) arrive and are flushed to SSTable S2. Write down S2, then work out what GET(k2) returns and which SSTables it has to look at.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>A read wants the most recent record for the key. Where does it look first, and can it stop early?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Sort S2 by key. For GET(k2), check the MemTable (empty right after the flush), then the SSTables from newest to oldest, and stop at the first record for k2.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>S2 = [DEL(k2), PUT(k3, c2), PUT(k4, d1)]. GET(k2) finds DEL(k2) in S2, the newest SSTable, so k2 is not found. S1 is never consulted, even though it still holds PUT(k2, b1).</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u1l3-compact">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u1l3-compact-cb">
+        <label for="u1l3-compact-cb">Compact S2 (newer) with S1 (older) the way slide 24 does. Write down the output, then count how many times k1's record has now been written to disk.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>For each key, which input holds its newest record? What does slide 24 do with a DELETE that is the newest record for its key?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Merge the two sorted inputs key by key. When both hold the key, keep S2's record. Keep a DELETE that is the newest record for its key, as DEL(key100) is kept on the slide. Then count k1's writes: the flush wrote it once, and compaction writes the merged output out again.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>[PUT(k1, a2), DEL(k2), PUT(k3, c2), PUT(k4, d1)]. k1 was written once at the flush and once by this compaction, so twice for one logical write, and once more for every later compaction that includes it. That is write amplification.</p></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Which statement describes index-organized storage as presented in lecture #05?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is log-structured storage (slide 21).">Changes are appended as PUT and DELETE records to a MemTable and flushed to sorted SSTables.</li>
+      <li data-option="b" data-explain="Slide 18: the DBMS stores a table's tuples as the value of an index data structure, still uses a page layout that looks like a slotted page, and typically sorts tuples in the page by key.">The table's tuples are stored inside an index data structure, such as a B+tree, sorted by key.</li>
+      <li data-option="c" data-explain="That is tuple-oriented heap storage plus a separate index, which the lecture contrasts with index-organized storage: heap tables are inherently unsorted and rely on an index to find tuples.">The tuples live in an unordered heap file, and a separate index stores record IDs that point into it.</li>
+      <li data-option="d" data-explain="Storing each attribute in its own pages is a column store (Lesson 4), not index-organized storage.">Each attribute is stored in its own pages, and an index maps keys to positions in those pages.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Which statement about compaction strategies matches the slides?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Universal compaction keeps all SSTables in a single &quot;universal&quot; level, with no multi-level hierarchy.">Universal compaction keeps SSTables in several levels with non-overlapping key ranges, and is better for read-heavy workloads.</li>
+      <li data-option="b" data-explain="Each SSTable is sorted internally, but Level #0 holds SSTables recently flushed from memory, whose key ranges overlap.">Level #0 SSTables never overlap in key range, because each one was sorted before it was flushed.</li>
+      <li data-option="c" data-explain="That is what the slides say about universal compaction, not leveled.">Leveled compaction is better for insert-heavy workloads and time-oriented queries.</li>
+      <li data-option="d" data-explain="Slide 25: SSTables in a level are non-overlapping on key ranges (except Level #0), and leveled compaction is better for read-heavy workloads.">Leveled compaction keeps each level's key ranges apart (except Level #0) and suits read-heavy workloads.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">HW2 Q1(a): which set lists exactly the problems that CMU's official solution associates with log-structured storage?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Official solution: log-structured storage is particularly beneficial for write-intensive workloads such as append-only data, but it incurs write amplification due to compaction.">Write amplification only</li>
+      <li data-option="b" data-explain="The official solution rules out random reads: a log-structured DBMS may have to read several pages to find a tuple, but those are sequential I/Os, not random reads.">Write amplification and increased random reads</li>
+      <li data-option="c" data-explain="Neither is selected. Writes are sequential appends of SSTables, and compaction exists to reclaim wasted space.">Increased random writes and fragmentation</li>
+      <li data-option="d" data-explain="That is the official answer for slotted-page storage (HW2 Q1b, Lesson 2).">Increased random reads, increased random writes, and fragmentation</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">HW2 Q1(c): you compare log-structured storage with slotted-page storage for a new system, ignoring indexes and metadata overhead. Which pair contains only statements that the official solution marks true?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="&quot;Requires less disk space&quot; is not selected in the official answer; log-structured files also accumulate stale records that compaction has to reclaim.">"Log-structured storage requires less disk space" and "Both support variable-length tuples"</li>
+      <li data-option="b" data-explain="The schema statement is false: tuples don't store schema metadata, because the catalogs hold it (Lesson 2).">"Slotted-page storage requires storing schema metadata with each tuple" and "For an append-only workload, both achieve comparable performance"</li>
+      <li data-option="c" data-explain="These are the two statements the official answer selects. Slotted pages hold fixed- and variable-length tuple data, and PUT records carry whole tuples. Official: without indexes and metadata, a slotted-page design under an append-only workload becomes the log-structured architecture.">"Both support variable-length tuples" and "For an append-only workload, both achieve comparable performance"</li>
+      <li data-option="d" data-explain="Official: after lots of inserts, updates and deletes, slotted pages may also benefit from maintenance, to reclaim empty space or compact partially empty pages.">"After lots of inserts, updates and deletes, only log-structured storage benefits from maintenance" and "Both support variable-length tuples"</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why DEL(key100) stays in the output of the compaction on slide 24, why the official HW2 answer says log-structured reads are sequential rather than random, or how leveled and universal compaction differ in what they merge. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 lecture #05, Database Storage II (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/05-storage2.pdf">slides</a> 17–28, <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/05-storage2.pdf">notes</a> §2–4, and the lecture video's chapter list); Homework #2 Q1(a) and Q1(c) with the official solutions.</p>
+
+  <div class="lesson-nav">
+    <a href="./u1-02-slotted-pages.html">← Inside a Page: Slotted Pages, Record IDs, and Tuple Layout</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u1-04-storage-models.html">Next: Storage Models: NSM, DSM, and PAX →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

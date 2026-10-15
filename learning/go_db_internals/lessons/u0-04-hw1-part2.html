@@ -1,0 +1,333 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 0 · Lesson 4 · HW1 Hands-On, Part 2: Q4–Q6</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 0 · Lesson 4</p>
+  <h1>HW1 Hands-On, Part 2: Q4–Q6</h1>
+  <p class="subtitle">Write the last three queries of Homework #1: one built from CTEs that tests two conditions on the same team-year, a lateral query that keeps one row per Hall-of-Famer, and an upsert with DuckDB's <code>ON CONFLICT</code> clause.</p>
+
+  <p class="lede">The last three questions carry 60 of the homework's 100 points. Q4 can be read in several ways, each with a different answer, and Q6 needs a statement that Lectures #01 and #02 don't teach and changes the database when it runs. You'll keep working in the folder and database from Lesson 3.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">In a project lesson, how do you know that you've finished a stage?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The stubs have bodies that return zero values or panic, so the starter already compiles. A clean build says nothing about any stage."><code>go build ./...</code> finishes without errors.</li>
+      <li data-option="b" data-explain="Tests for the stages you haven't reached still call stubs, so the package keeps failing until every stage is done."><code>go test ./...</code> prints <code>ok</code> for every package.</li>
+      <li data-option="c" data-explain="Each stage's checkpoint is a go test -run command whose pattern selects only that stage's tests. The stage is done when that command prints ok.">The stage's own <code>go test -run</code> command prints <code>ok</code>.</li>
+      <li data-option="d" data-explain="Replacing the panic is where a stage starts. Only the stage's tests show whether the new code behaves correctly.">The stage's methods no longer panic with <code>TODO(P1)</code>.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Lesson 1's music-store tables hold Artist ids 101–103, Album ids 11, 22 and 33, and the ArtistAlbum rows (101, 11), (101, 22), (103, 22) and (102, 22), with <code>PRIMARY KEY (artist_id, album_id)</code>. Which statement does DuckDB reject?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The primary key is the pair, and (103, 22) is already there, so DuckDB reports a duplicate key that violates the primary key constraint. Q6 meets the same kind of conflict on the three-column key of teams."><code>INSERT INTO ArtistAlbum VALUES (103, 22);</code></li>
+      <li data-option="b" data-explain="Artist 102 already appears in ArtistAlbum, but the key is the whole pair, and (102, 11) is new. Both ids exist in their own tables, so the foreign keys hold too."><code>INSERT INTO ArtistAlbum VALUES (102, 11);</code></li>
+      <li data-option="c" data-explain="Artist's key is id alone, and 104 is unused. A second artist with the same name breaks no constraint, and 1990 passes CHECK (year &gt; 1900)."><code>INSERT INTO Artist VALUES (104, 'GZA', 1990, 'USA');</code></li>
+      <li data-option="d" data-explain="Album's key is id, and 44 is unused. Nothing in Album requires names to be unique."><code>INSERT INTO Album VALUES (44, 'Liquid Swords', 1995);</code></li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">On Lesson 2's example database, which query returns exactly one row, course 15-799?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The subquery ignores the outer course, so it returns the same five rows for every course. NOT EXISTS is then false everywhere, and the query returns nothing."><code>SELECT * FROM course WHERE NOT EXISTS (SELECT * FROM enrolled);</code></li>
+      <li data-option="b" data-explain="This keeps the courses that have at least one enrolled row: 15-445, 15-721 and 15-826."><code>SELECT * FROM course WHERE EXISTS (SELECT * FROM enrolled WHERE course.cid = enrolled.cid);</code></li>
+      <li data-option="c" data-explain="An uncorrelated EXISTS is true for every course as long as enrolled has rows, so all four courses come back."><code>SELECT * FROM course WHERE EXISTS (SELECT * FROM enrolled);</code></li>
+      <li data-option="d" data-explain="The inner query refers to the outer course.cid, so it runs once per course and finds no rows only for 15-799. Q4 checks the manager award with the same correlated pattern, using EXISTS."><code>SELECT * FROM course WHERE NOT EXISTS (SELECT * FROM enrolled WHERE course.cid = enrolled.cid);</code></li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Q4: two conditions on the same team-year</h2>
+
+  <p>Q4 defines an event E: "for a given (team, year), the team has more than 5 distinct players win an award and some manager has won an award in the same year." Neither award table has a team column, so each half of E needs a join that finds the team. As Lesson 3's join paths showed, a player's team comes from <code>appearances</code> and a manager's team from <code>managers</code>.</p>
+
+  <p>The HW page suggests breaking the problem into sub-problems. The tools all come from Lesson 2:</p>
+  <ul>
+    <li>A CTE (<code>WITH name AS (…)</code>) gives each sub-problem's result a name that the rest of the statement reads like a table. One <code>WITH</code> can declare several CTEs, separated by commas, so the whole answer stays a single statement.</li>
+    <li><code>GROUP BY</code> with <code>HAVING</code> keeps the groups whose aggregate passes a test. <code>COUNT(DISTINCT playerID)</code> counts each player once, however many awards he won that year.</li>
+    <li>A correlated <code>EXISTS</code> keeps an outer row only when its subquery finds a matching row. It is Lesson 2's <code>NOT EXISTS</code> example without the <code>NOT</code>.</li>
+  </ul>
+
+  <p>CMU's official answer reads the question as follows, and the checkpoint matches only this reading:</p>
+  <ul>
+    <li>"More than 5" means <code>&gt; 5</code>, counting distinct players.</li>
+    <li>A player's award counts for the team he appeared for in the award's year and league.</li>
+    <li>"Some manager" is the team's own manager: a person with a <code>managers</code> row for that team and year who won a manager award that year, in the team's league. The 62 of 228 manager awards filed under <code>ML</code> never count, because no team plays in <code>ML</code>.</li>
+    <li>Both halves of E must hold for the same league, team and year.</li>
+    <li>E is counted per team name, the <code>name</code> column of <code>teams</code>, not per <code>teamID</code>. Cleveland had E in 1995 and 2016 as the Cleveland Indians and in 2022 as the Cleveland Guardians, so the Indians appear with 2 and the Guardians, with 1, drop out.</li>
+    <li>The <code>league</code> column holds the league's full name from <code>leagues</code>, such as "National League".</li>
+  </ul>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=O5gU9NQjCAs">#02 Modern SQL, slides 30–31</a>: common table expressions, a temporary result that the rest of a query can reference, with the highest-id example.</p>
+
+  <h2>Q5: one row per player with a lateral join</h2>
+
+  <p>Q5 asks for one teammate per inducted Hall-of-Famer, picked out of many candidates. Lesson 2 handled the same shape with a lateral subquery ending in <code>ORDER BY … LIMIT 1</code>: the subquery runs once for each outer row, can use that row's columns, and keeps the best candidate. In Q5 the outer rows are the inducted players, and the candidates are the other players who appeared for the same team in the same year.</p>
+
+  <p>Finding the candidates takes a <strong>self-join</strong>, a join of a table with itself under two aliases. One copy of <code>appearances</code> holds the Hall-of-Famer's rows, and the other holds everyone's rows for the same team and year. DuckDB accepts the lateral join written with a comma, as in Lesson 2 (<code>FROM hof, LATERAL (…) AS t</code>), or as <code>FROM hof JOIN LATERAL (…) AS t ON TRUE</code>; the two give the same rows.</p>
+
+  <p>The official answer settles three details:</p>
+  <ul>
+    <li>The Hall-of-Famer is left out of his own candidates. Without that condition, 8 of the first 10 rows name the player as his own earliest teammate.</li>
+    <li>"Earliest" compares years first. The teammate's constructed name only breaks ties within that year.</li>
+    <li>An inducted player is a <code>halloffame</code> row with <code>inducted = 'Y'</code>. There are 363 such rows for 362 people, because Minnie Minoso was inducted twice, and 70 of the 362 have no rows in <code>appearances</code>. A lateral subquery that returns nothing produces no output row, as 15-799 vanished from Lesson 2's best-GPA query, so those 70 drop out. Without its final <code>LIMIT 10</code>, the official answer returns 293 rows, Minoso's twice.</li>
+  </ul>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=O5gU9NQjCAs">#02 Modern SQL, slides 28–29</a>: lateral joins, explained as a for loop that runs a query for each tuple.</p>
+
+  <h2>Inserting or updating in one statement</h2>
+
+  <p>Q6 needs a statement that Lectures #01 and #02 don't cover. Lesson 1 showed that a primary key rejects a second row with the same key, and Lesson 2 used <code>INSERT INTO … SELECT</code> to add a query's result to an existing table. When a plain <code>INSERT</code> meets a duplicate key, DuckDB rejects the whole statement, and none of its rows are added. An <strong>upsert</strong> (update or insert) decides row by row instead: a row with a new key is inserted, and a row whose key already exists either updates the existing row or is skipped. DuckDB writes it as an <code>ON CONFLICT</code> clause at the end of the <code>INSERT</code>.</p>
+
+<pre><code>CREATE TABLE stock (item VARCHAR PRIMARY KEY, qty INTEGER);
+INSERT INTO stock VALUES ('apple', 5), ('pear', 2);</code></pre>
+
+  <p>Starting each time from these two rows, here is what <code>INSERT INTO stock VALUES ('pear', 7), ('plum', 3)</code> does with each ending:</p>
+
+  <table>
+    <tr><th>Ending</th><th>DuckDB reports</th><th><code>stock</code> afterwards</th></tr>
+    <tr><td>none</td><td><code>Constraint Error: Duplicate key "item: pear" violates primary key constraint.</code></td><td>apple 5, pear 2</td></tr>
+    <tr><td><code>ON CONFLICT DO NOTHING</code></td><td>a count of 1</td><td>apple 5, pear 2, plum 3</td></tr>
+    <tr><td><code>ON CONFLICT DO UPDATE SET qty = -1</code></td><td>a count of 2</td><td>apple 5, pear -1, plum 3</td></tr>
+    <tr><td><code>ON CONFLICT (item) DO UPDATE SET qty = EXCLUDED.qty</code></td><td>a count of 2</td><td>apple 5, pear 7, plum 3</td></tr>
+  </table>
+
+  <ul>
+    <li><code>DO NOTHING</code> skips each row whose key already exists and inserts the rest. <code>DO UPDATE SET …</code> updates the existing row instead.</li>
+    <li>In the <code>SET</code> clause, a plain column name such as <code>qty</code> is the existing row's value, and <code>EXCLUDED.qty</code> is the value from the row that couldn't be inserted.</li>
+    <li>The parenthesized column list after <code>ON CONFLICT</code>, the <strong>conflict target</strong>, names the key that must conflict. When the primary key is a table's only key, as in <code>teams</code>, you can leave it out. When a table has several keys, such as a primary key and a <code>UNIQUE</code> column, DuckDB requires the target for <code>DO UPDATE</code>.</li>
+    <li>The count is the number of rows inserted plus the number updated.</li>
+    <li>The rows to insert can come from a <code>SELECT</code> on the same table, which is what Q6 does.</li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">In Go terms</span>
+    <p>Picture the table as a map keyed by its primary key. For each incoming row <code>r</code>, an upsert checks <code>_, ok := m[r.key]</code>. If the key is absent, it stores <code>r</code>. If it is present, <code>DO NOTHING</code> moves on, and <code>DO UPDATE</code> rewrites <code>m[r.key]</code>, where a plain column name reads the stored row and <code>EXCLUDED</code> reads <code>r</code>.</p>
+  </div>
+
+  <h2>Q6: what the upsert has to produce</h2>
+
+  <p>Q6 adds, for every 2024 team, a row whose <code>teamID</code> is the team's <code>franchID</code>. The key of <code>teams</code> is <code>(yearID, lgID, teamID)</code>, so each new row's key is (2024, the team's league, its <code>franchID</code>). Of the 30 teams in 2024, 17 already use their <code>franchID</code> as their <code>teamID</code>: their new row conflicts with the existing one, and the existing row's <code>attendance</code> becomes -1. The other 13 have a different code (Kansas City's <code>teamID</code> is <code>KCA</code> and its <code>franchID</code> is <code>KCR</code>), so 13 rows are added and 2024 ends with 43 rows.</p>
+
+  <p>The official answer fills only part of each new row. <code>yearID</code>, <code>lgID</code>, <code>teamRank</code> and <code>attendance</code> come from the 2024 row, <code>franchID</code> goes into <code>teamID</code>, and every other column stays NULL, <code>franchID</code> included. The grading query shows <code>franchID</code>, so your new rows must leave it NULL to match the checkpoint.</p>
+
+  <div class="callout bad">
+    <p class="callout-label">Pitfall: Q6 changes the database</p>
+    <p>Run Q6 once, on a fresh copy of the pristine file. A second run of the official statement fails with <code>Constraint Error: NOT NULL constraint failed: teams.teamID</code>, because its <code>SELECT</code> now also reads the 13 new rows, whose <code>franchID</code> is NULL, and tries to insert NULL as their <code>teamID</code>. To try again, start from a new copy.</p>
+  </div>
+
+<pre><code>cp lahman-pristine.db lahman-q6.db    # a fresh copy for each attempt
+duckdb lahman-q6.db &lt; q6.sql          # the upsert, once
+duckdb lahman-q6.db &lt; check6.sql      # the HW page's grading query</code></pre>
+
+  <p>Save the grading query from the question as <code>check6.sql</code>. Q1 to Q5 keep reading <code>lahman.db</code>, which Q6 never touches.</p>
+
+  <h2>Build it: Q4 to Q6</h2>
+
+  <p>Save the answers in <code>~/cmu-db/hw1</code> as <code>q4.sql</code>, <code>q5.sql</code> and <code>q6.sql</code>, and run Q4 and Q5 against <code>lahman.db</code> as in Lesson 3. Try each question before you open a hint. Each checkpoint gives the row count and first rows of the official answer's output.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u0-04-q4">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u0-04-q4-cb">
+        <label for="u0-04-q4-cb">Q4 (30 points): find the teams where event E happened more than once, and save the query as q4.sql.</label>
+      </div>
+      <div class="todo-item-body">
+        <blockquote>
+          <p>Consider the event <code>E</code>: for a given (team, year), the team has more than 5 distinct players win an award and some manager has won an award in the same year. For all active leagues, find the teams where the event <code>E</code> has happened more than once. Order the results by the number of event <code>E</code> occurrences from most to least, and then by team name alphabetically.</p>
+          <p>Hints: You might find <a href="https://duckdb.org/docs/stable/sql/expressions/subqueries.html#correlated-subqueries">Correlated Subqueries</a> and <a href="https://duckdb.org/docs/stable/sql/query_syntax/with.html">CTEs</a> in DuckDB useful. Consider breaking the problem into sub-problems and combining their results.</p>
+          <p>Your output should look like this: <code>league|team_name|distinct_years</code></p>
+          <p>One of the rows in the output looks like the following: <code>National League|Atlanta Braves|3</code></p>
+        </blockquote>
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>E joins two facts about the same team-year, and each comes from a different table. Write down the three columns that identify a team-year in <code>teams</code>. For each half of E, which tables lead from an award to those three columns?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Build two CTEs. The first joins <code>awardsplayers</code> to an active league and to the player's <code>appearances</code> in the same year and league, groups by league, team and year, and keeps the groups with more than five distinct players. The second joins <code>awardsmanagers</code> to an active league and to <code>managers</code> on the same person and year, and keeps the distinct (award league, team, year) triples. In the final query, join <code>teams</code> (for the team name) and <code>leagues</code> (for the league name) to the first CTE on all three columns, and keep a row only if the second CTE holds the same triple. Then group by league name and team name, keep the groups with more than one distinct year, and sort.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>HAVING COUNT(DISTINCT awardsplayers.playerID) &gt; 5
+…
+AND EXISTS (SELECT 1 FROM b
+             WHERE b.lgID = teams.lgID AND b.teamID = teams.teamID
+               AND b.yearID = teams.yearID)</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Run <code>duckdb lahman.db &lt; q4.sql</code> (or <code>.read q4.sql</code>). Expect 7 rows, the whole answer:</p>
+<pre><code>league|team_name|distinct_years
+National League|Atlanta Braves|3
+American League|Chicago White Sox|3
+American League|Baltimore Orioles|2
+American League|Boston Red Sox|2
+American League|Cleveland Indians|2
+American League|New York Yankees|2
+National League|St. Louis Cardinals|2</code></pre>
+          <p>Each other reading of the question gives a different result, so a mismatch points to the choice to revisit:</p>
+          <ul>
+            <li>18 rows, with Atlanta at 8: you kept teams with five or more winners.</li>
+            <li>25 rows, with Atlanta at 10: you counted award rows, so a player with two awards in a year counted twice.</li>
+            <li>9 rows, with the Yankees and Cardinals at 4: a manager award counted whatever league it was filed under, for example because the league came from <code>managers</code> rather than from the award.</li>
+            <li>26 rows, with the Yankees at 22: the manager check ignores the year.</li>
+            <li>Cleveland at 3: you grouped by <code>teamID</code> instead of the team's name.</li>
+          </ul>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u0-04-q5">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u0-04-q5-cb">
+        <label for="u0-04-q5-cb">Q5 (20 points): find the earliest teammate of each inducted Hall-of-Famer, keep the first ten players by name, and save the query as q5.sql.</label>
+      </div>
+      <div class="todo-item-body">
+        <blockquote>
+          <p>Find 10 Hall of Fame players who were inducted. For each inducted player, find the earliest teammate that they appeared with. If there are multiple teammates, pick the first teammate ordered by the teammate's constructed name alphabetically. Order by the hall of fame player's constructed name alphabetically.</p>
+          <p>Details: To find a player's teammates, find <code>appearances</code> where both players were playing for the same team in the same year.</p>
+          <p>Hints: You might find <a href="https://duckdb.org/docs/sql/query_syntax/from.html#lateral-joins">Lateral Joins</a> in DuckDB useful. All names should be assembled as <code>{FIRST} ({GIVEN}) {LAST}</code>.</p>
+          <p>Your output should look like this: <code>hof_player_name|earliest_teammate_name|earliest_teammate_year</code></p>
+          <p>Your first row should look like this: <code>Addie (Adrian) Joss|Bill (William Henry) Bernhard|1902</code></p>
+        </blockquote>
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>For each inducted player you want one row chosen from many candidates, which is a small top-1 query per outer row. What makes someone a candidate, and which condition keeps the player from matching his own appearances? Rank the candidates the way the question does: year first, then name.</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Start from the <code>halloffame</code> rows with <code>inducted = 'Y'</code>, joined to <code>people</code> for the constructed name. For each of them, run a lateral subquery that joins two copies of <code>appearances</code> (his rows, and every other player's rows on the same team in the same year), adds the teammate's name from <code>people</code>, sorts by year and then by that name, and keeps one row. Sort the outer result by the Hall-of-Famer's name and keep ten rows.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>JOIN LATERAL (
+  SELECT … FROM appearances AS a1, appearances AS a2, people AS p2
+   WHERE a1.playerID = hof.playerID AND a2.playerID &lt;&gt; a1.playerID …
+   ORDER BY a2.yearID, name LIMIT 1
+) AS teammate ON TRUE</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Run <code>duckdb lahman.db &lt; q5.sql</code> (or <code>.read q5.sql</code>). Expect 10 rows; the first five are:</p>
+<pre><code>hof_player_name|earliest_teammate_name|earliest_teammate_year
+Addie (Adrian) Joss|Bill (William Henry) Bernhard|1902
+Adrian (Adrian) Beltre|Alex (Jose Alexander) Cora|1998
+Al (Albert Goodwill) Spalding|Cal (Calvin Alexander) McVey|1871
+Al (Albert William) Kaline|Al (Albert Julius) Aber|1953
+Al (Alfonso Ramon) Lopez|Arnold (Arnold John) Statz|1928</code></pre>
+          <p>If a row pairs a player with himself, such as <code>Addie (Adrian) Joss|Addie (Adrian) Joss|1902</code>, his own appearances are still among the candidates. If the first row is <code>Addie (Adrian) Joss|Alex (Alexander Franklin) Pearson|1903</code>, you sorted the candidates by name alone. Without its <code>LIMIT 10</code>, the official answer returns 293 rows.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u0-04-q6">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u0-04-q6-cb">
+        <label for="u0-04-q6-cb">Q6 (10 points): add a row keyed by its franchise ID for every 2024 team, set attendance to -1 on the rows that conflict, and save the statement as q6.sql.</label>
+      </div>
+      <div class="todo-item-body">
+        <blockquote>
+          <p>The league director wants you to insert new records into the <code>teams</code> table. For all teams in 2024, insert a new record using the <code>franchID</code> as the <code>teamID</code>. If the insert fails due to a conflict, set the existing record's <code>attendance</code> to -1.</p>
+          <p>Details: We will evaluate by selecting all teams in 2024 from the table and sorting by each column in order.</p>
+<pre><code>SELECT yearID, lgID, teamID, franchID, teamRank, attendance
+FROM teams
+WHERE yearID = 2024
+ORDER BY lgID, teamID, franchID, teamRank, attendance;</code></pre>
+          <p>Hints Consider how you might be able to insert and update existing rows in a single statement.</p>
+          <p>After running the select statement, the following two rows should exist:</p>
+<pre><code>2024|AL|HOU|HOU|1|-1
+2024|AL|KCA|KCR|2|1658347</code></pre>
+        </blockquote>
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>For a 2024 team, the new row's key is (2024, its league, its <code>franchID</code>). For which teams does a row with that key already exist? What must happen to those teams, and what to the others?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Write one <code>INSERT INTO teams</code> with an explicit column list, fed by a <code>SELECT</code> over the 2024 rows of <code>teams</code>. List the columns the official reading fills (<code>yearID</code>, <code>lgID</code>, <code>teamID</code>, <code>teamRank</code>, <code>attendance</code>), select <code>franchID</code> in the position of <code>teamID</code>, and end the statement with a conflict clause whose update sets <code>attendance</code> to -1.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>INSERT INTO teams (yearID, lgID, teamID, …)
+SELECT yearID, lgID, franchID, … FROM teams …</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Run the three commands from the Q6 section on a fresh copy. The upsert reports a count of 30: 13 rows inserted and 17 updated. The grading query then returns 43 rows; the first five are:</p>
+<pre><code>yearID|lgID|teamID|franchID|teamRank|attendance
+2024|AL|ANA|NULL|5|2577597
+2024|AL|BAL|BAL|2|-1
+2024|AL|BOS|BOS|3|-1
+2024|AL|CHA|CHW|5|1380733
+2024|AL|CHW|NULL|5|1380733</code></pre>
+          <p>The HW page's two rows are rows 8 and 9. The rows above write NULL as <code>NULL</code>; your shell may display it differently. If a new row shows a code where the checkpoint has NULL, such as <code>2024|AL|ANA|ANA|5|2577597</code>, your <code>INSERT</code> also copied <code>franchID</code>.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">wins(team, year, player, award) holds (ATL, 1995, p1, MVP), (ATL, 1995, p1, Gold Glove), (ATL, 1995, p2, Gold Glove), (NYA, 1995, p3, MVP), (NYA, 1995, p4, Gold Glove) and (NYA, 1995, p5, Silver Slugger). What does <code>SELECT team FROM wins GROUP BY team, year HAVING COUNT(DISTINCT player) &gt; 2;</code> return?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is the result of COUNT(*) &gt; 2. ATL has three award rows, but two of them belong to p1.">ATL and NYA</li>
+      <li data-option="b" data-explain="COUNT(DISTINCT player) counts p1 once, so ATL has 2 distinct winners and NYA has 3, and only 3 &gt; 2. Q4 counts distinct players for the same reason.">NYA only</li>
+      <li data-option="c" data-explain="NYA has three different winners, p3, p4 and p5, and 3 &gt; 2.">Neither team</li>
+      <li data-option="d" data-explain="COUNT accepts DISTINCT wherever an aggregate is allowed, HAVING included. Only WHERE rejects aggregates.">An error, because DISTINCT can't appear inside an aggregate in HAVING</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">stock(item PRIMARY KEY, qty) holds ('apple', 5) and ('pear', 2). What does it hold after <code>INSERT INTO stock VALUES ('pear', 7), ('plum', 3) ON CONFLICT DO UPDATE SET qty = qty + EXCLUDED.qty;</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is the result of SET qty = EXCLUDED.qty. A plain qty in the SET clause is the existing row's value, 2.">apple 5, pear 7, plum 3</li>
+      <li data-option="b" data-explain="That is what ON CONFLICT DO NOTHING leaves. DO UPDATE changes the existing pear row.">apple 5, pear 2, plum 3</li>
+      <li data-option="c" data-explain="That is what a plain INSERT does. The ON CONFLICT clause turns the duplicate key into an update.">apple 5, pear 2: the duplicate key rejects the statement</li>
+      <li data-option="d" data-explain="qty is the existing 2 and EXCLUDED.qty is the 7 that couldn't be inserted, so pear becomes 9. plum has no conflict and is inserted.">apple 5, pear 9, plum 3</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">In Q5, the lateral subquery finds no candidates for a Hall-of-Famer who has no rows in <code>appearances</code>. With <code>JOIN LATERAL (…) AS teammate ON TRUE</code>, what happens to that player before the final <code>LIMIT 10</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Pairing an outer row with zero rows produces nothing, as 15-799 vanished from Lesson 2's LIMIT 1 query. That is how the 70 inductees without appearances drop out of Q5.">He disappears from the result.</li>
+      <li data-option="b" data-explain="Nothing fills in NULLs here. The subquery returned no row to pair him with, so no output row is produced.">He stays, with NULL for the teammate's name and year.</li>
+      <li data-option="c" data-explain="With no rows in appearances he has no candidates at all, himself included, and a2.playerID &lt;&gt; a1.playerID would exclude him anyway.">He stays, listed as his own earliest teammate.</li>
+      <li data-option="d" data-explain="A lateral subquery may return zero rows. The outer row then simply produces no output.">The query fails, because each lateral subquery must return a row.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Stuck? For example: your Q4 result has a row count that none of the readings above explains, the Q5 subquery doesn't seem to see the outer player, or Q6 fails when you run it again. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/homework1/">Homework #1</a> (questions, dataset and grading rules), Lecture #01 <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/01-relationalmodel.pdf">slides</a> and Lecture #02 <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/02-modernsql.pdf">slides</a>. Checkpoint rows are the output of CMU's official solutions in DuckDB 1.5.6, and the <code>ON CONFLICT</code> results come from DuckDB 1.5.6. For the rest of the syntax, see DuckDB's <a href="https://duckdb.org/docs/stable/sql/statements/insert.html">INSERT documentation</a>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u0-03-hw1-part1.html">← HW1 Hands-On, Part 1: DuckDB, the Lahman Database, and Q1–Q3</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u1-01-disk-oriented-storage.html">Next: Disk-Oriented Storage: Files, Pages, and Heap Files →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

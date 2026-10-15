@@ -1,0 +1,300 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 2 · Lesson 1 · Buffer Pools: Frames, Page Tables, Pins, and Dirty Pages</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 2 · Lesson 1</p>
+  <h1>Buffer Pools: Frames, Page Tables, Pins, and Dirty Pages</h1>
+  <p class="subtitle">Explain why a DBMS keeps its own buffer pool instead of relying on the operating system, and name the parts Project 1 builds it from: frames, the page table, pin counts, dirty flags, latches and the disk scheduler.</p>
+
+  <p class="lede">Unit 1 dealt with the first of the storage layer's two problems: how the DBMS lays the database out in pages on disk. This unit deals with the second: how the DBMS manages its memory and moves pages between memory and disk. The CPU can only work on data that is in memory, yet the database can be much larger than memory. The <strong>buffer pool</strong> bridges that gap. It keeps copies of some pages in memory and lets the rest of the system behave as if the whole database were there. In Project 1 you build one in Go.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">BusTub pages are 8 KB (8,192 bytes). A heap file keeps its pages in a single file, numbered from 0. Using the lecture's formula, at what byte offset does page #9 begin?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="9 × 4,096 = 36,864 uses the 4 KB hardware or OS page size, not the 8 KB database page.">36,864</li>
+      <li data-option="b" data-explain="8 × 8,192 = 65,536 numbers the pages from 1. They are numbered from 0, so page #9 is the tenth page.">65,536</li>
+      <li data-option="c" data-explain="10 × 8,192 = 81,920 is where page #10 begins, just past the end of page #9.">81,920</li>
+      <li data-option="d" data-explain="Offset = Page# × PageSize = 9 × 8,192 = 73,728.">73,728</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">HW2 Q2(c) asks how many pages, at minimum, the DBMS reads from disk for <code>SELECT MIN(player_id) FROM P WHERE HR = (SELECT MIN(HR) FROM P)</code> under DSM with implicit offsets. P has four equal-width attributes stored in 200 pages (50 per attribute), its contents are the worst case for the query, and memory is unlimited. The official answer is 100 pages, not 150. Why?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The outer WHERE clause compares each tuple's HR with the minimum, so it needs the HR values. Implicit offsets only let the DBMS find the matching position in another column.">Implicit offsets let the outer query skip the HR column and read only the player_id pages.</li>
+      <li data-option="b" data-explain="DSM stores each attribute in its own pages, 50 per attribute here. That is why the inner query alone costs 50 pages.">Under DSM, HR and player_id values sit on the same pages, so one scan reads both columns.</li>
+      <li data-option="c" data-explain="Official solution: 50 pages for the inner select and 50 for player_id, since the buffer pool still holds the HR pages. HW2 assumes memory can hold every page, so nothing is evicted in between.">The 50 HR pages read for the inner query are still in memory when the outer query needs them.</li>
+      <li data-option="d" data-explain="A minimum depends on every value, and with worst-case contents nothing lets the scan stop early. The inner query reads all 50 HR pages.">The inner query can stop after one HR page, because it only needs the column's minimum.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Lecture #01 compares σ<sub>b_id=102</sub>(R ⋈ S) with R ⋈ (σ<sub>b_id=102</sub>(S)). What does it conclude?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="If S has a billion tuples and only one has b_id = 102, filtering first is far cheaper. An algebra expression fixes the order of its steps, so SQL states only the result and lets the DBMS choose the order.">They always return the same result, but one can be far cheaper, so the DBMS should choose the order.</li>
+      <li data-option="b" data-explain="Both are valid expressions over the same relations, and they always produce the same answer. Only the amount of work differs.">Only the second expression is valid, because in relational algebra a selection must come before a join.</li>
+      <li data-option="c" data-explain="The lecture says the opposite: an algebra expression fixes the order of its high-level steps. That is why the two can cost so differently.">The two cost the same, because relational algebra leaves the order of evaluation to the DBMS.</li>
+      <li data-option="d" data-explain="The notes state that the two expressions always produce the same answer, whatever the data.">They return different results when S has many tuples with b_id = 102, so they aren't interchangeable.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>The buffer pool's job</h2>
+
+  <p>On a Von Neumann machine, data must be in memory before the CPU can operate on it. A disk-oriented DBMS keeps the primary copy of the database on disk, so every page a query touches must first be copied into memory. The <strong>buffer pool manager</strong> (BPM) moves pages between disk and memory, and it also acts as a cache: frequently used pages stay in memory, and cold ones are evicted back to storage.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L04-disk-oriented-dbms-p10.png" alt="Diagram split into memory (top) and disk (bottom). The database file on disk holds a directory and pages 1 to 5, each with a header. The buffer pool in memory holds a copy of the directory and a set of frames, one of which now contains page 2. Arrows show the execution engine sending 'Get Page #2' to the buffer pool and receiving 'Pointer to Page #2' back." loading="lazy">
+    <figcaption>The execution engine asks the buffer pool for page #2. The buffer pool copies the page from the database file into a free frame and returns a pointer to it. Notice that the pool also holds a copy of the file's directory (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf#page=10">Lecture #04, slide 6</a>).</figcaption>
+  </figure>
+
+  <p>To the rest of the DBMS, the buffer pool should make it look as if the entire database were in memory. A component such as the execution engine asks for a page by its ID and doesn't need to know whether the page is already in memory or must be read from disk. In the other direction, the buffer pool never interprets a page's bytes; it only needs to know which page is where. Because only some pages have to be in memory at any moment, a machine with 1 GB of RAM can work with a 2 GB database, which is the Project 1 writeup's own example.</p>
+
+  <p>Lecture #04 splits the storage layer's work into two kinds of control. Unit 1 covered the first, and the buffer pool does the second:</p>
+  <ul>
+    <li><strong>Spatial control</strong> decides <em>where</em> pages are written on disk, keeping pages that are used together physically close.</li>
+    <li><strong>Temporal control</strong> decides <em>when</em> pages are read into memory and when changed pages are written back, so that queries stall on the disk as rarely as possible.</li>
+  </ul>
+
+  <p class="sidenote">Not all of a DBMS's memory is buffer pool. Slide 7 lists other pools: sort and join buffers, query caches, maintenance buffers, log buffers and dictionary caches. These are not always backed by disk, and the notes say they can simply use an ordinary memory allocator.</p>
+
+  <h2>Why not let the operating system do it?</h2>
+
+  <p>The operating system already moves file pages in and out of memory. With <code>mmap</code>, a program maps a file into its virtual address space and then reads and writes the file as ordinary memory. The OS loads pages on demand and evicts them when physical memory runs short.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L04-mmap-stall-p27.png" alt="Slide text on the left explains mmap. On the right, four file pages are mapped into virtual memory, but physical memory holds only page1 and page3. A red arrow with question marks points at page2 in virtual memory, next to a drawing of a person asleep at a desk." loading="lazy">
+    <figcaption>All four of the file's pages are mapped, but physical memory holds only two. A thread that touches page2 page-faults and sleeps until the OS has read the page in (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf#page=27">Lecture #04, slide 13</a>).</figcaption>
+  </figure>
+
+  <p>Lecture #04 lists four problems with letting the OS manage database pages this way:</p>
+  <ol>
+    <li>Transaction safety: the OS can flush dirty pages to disk at any time, including before the DBMS considers a change safe to write.</li>
+    <li>I/O stalls: the DBMS doesn't know which pages are in memory, so any access can stall a thread on a page fault.</li>
+    <li>Error handling: pages are hard to validate, and any access can raise a <code>SIGBUS</code> signal that the DBMS must handle.</li>
+    <li>Performance: contention on the OS's internal data structures, and TLB shootdowns.</li>
+  </ol>
+
+  <p>System calls can patch some of this. <code>madvise</code> tells the OS how pages will be read, <code>mlock</code> stops ranges from being paged out, and <code>msync</code> flushes ranges to disk. The lecture's verdict is that using these calls to make the OS behave correctly "is just as onerous as managing memory yourself." The DBMS knows more about its workload than the OS does, so it can do better at flushing dirty pages in the correct order, at prefetching, at choosing which page to evict, and at scheduling its threads. The slide sums it up as "The OS is not your friend." The CMU group's paper <a href="https://db.cs.cmu.edu/mmap-cidr2022">Are You Sure You Want to Use MMAP in Your Database Management System?</a> (CIDR 2022) makes the full case.</p>
+
+  <h2>Frames hold pages</h2>
+
+  <p>The buffer pool is a region of memory organized as an array of fixed-size slots, and each slot is a <strong>frame</strong>. When the DBMS requests a page, the buffer pool places an exact copy of that page into one of the frames. The Project 1 writeup defines the two terms:</p>
+  <ul>
+    <li>A <strong>page</strong> is 8 KB of logical data. It can be on disk, in memory, or both, and its <strong>page ID</strong> identifies it.</li>
+    <li>A frame is a fixed 8 KB block of memory that holds one page at a time. Its <strong>frame ID</strong> is its index in the pool.</li>
+  </ul>
+  <p>In the writeup's words, the buffer pool stores logical pages inside physical, fixed frames. Frames are reused: over the system's lifetime one frame holds many different pages. A page ID is therefore a page's permanent name, while a frame ID only says where in memory the page sits right now. If page 12 is evicted from frame 3 and read back later, it may well land in frame 5.</p>
+
+  <p>In the Go module (<code>intro_to_db/bufferpool</code>), the sizes and IDs come from <code>common</code>: <code>common.PageSize</code> is 8192, and page and frame IDs have the types <code>common.PageID</code> and <code>common.FrameID</code>. A pre-built <code>FrameHeader</code> (<code>frame_header.go</code>) describes each frame. Its fields are <code>frameID</code>, <code>data</code> (a <code>[]byte</code> of <code>common.PageSize</code> bytes), <code>pinCount</code>, <code>isDirty</code> and <code>rwlatch</code>. The <code>BufferPoolManager</code> keeps the headers in <code>frames []*FrameHeader</code>. <code>NewBufferPoolManager</code> puts every frame ID on <code>freeFrames</code>, the <strong>free list</strong> of frames that hold no page yet. New page IDs come from <code>NewPage</code>, which hands them out from an atomic counter that only ever increases.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p><code>common.PageID</code> and <code>common.FrameID</code> are both <code>int32</code> underneath, but they are distinct named types. Go never converts between named types implicitly, so passing a <code>PageID</code> variable where a <code>FrameID</code> is expected doesn't compile without an explicit conversion. That catches a page/frame mix-up that is easy to make in this project. Untyped constants still convert silently, though: in a test call such as <code>RecordAccess(1, 1, AccessUnknown)</code>, nothing stops you from swapping the frame and page arguments.</p>
+  </div>
+
+  <h2>The page table and the page directory</h2>
+
+  <p>Pages don't sit in the buffer pool in the same order as on disk, so the BPM needs an index of what is where. The <strong>page table</strong> tracks the pages currently in memory, mapping each resident page ID to the frame that holds it. The slide notes that it is usually a fixed-size hash table protected by latches. In the Go module it is <code>pageTable map[common.PageID]common.FrameID</code>, guarded by <code>bpmLatch</code>.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L04-page-table-p19.png" alt="Slide text lists page table facts and per-page metadata: dirty flag, pin/reference counter, access tracking information. On the right, page table entries for page1, page3 and page2, each with metadata, point to frames in the buffer pool holding page1, page3 and page2. Pin icons mark the entries for page3 and page2. The fourth frame, frame4, is empty. The on-disk file below holds page1 to page4." loading="lazy">
+    <figcaption>Each page-table entry points to the frame holding that page and carries per-page metadata. The pins mark page3 and page2 as in use, and frame4 is still free (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf#page=19">Lecture #04, slide 10</a>).</figcaption>
+  </figure>
+
+  <p>The slide lists three pieces of per-page metadata: a dirty flag, a pin/reference counter, and access tracking information, which the notes describe as recording which transactions or threads are accessing the page. In Project 1 the first two are fields of <code>FrameHeader</code>, and tracking accesses is the replacer's job, the subject of the next lesson.</p>
+
+  <p>The BPM also uses the page table to keep only one copy of each page in memory. The writeup shows what goes wrong otherwise. Thread T1 loads page X into a frame and starts changing it, producing version X2. Thread T2 loads the same page into a different frame and changes it into X3. T2 writes X3 to disk, then T1 writes X2 over it, and T2's changes are lost. Because every request for page X goes through the page table and finds the same frame, all threads work on a single copy.</p>
+
+  <p>Don't confuse the page table with the page directory from Unit 1. They answer different questions:</p>
+
+  <table>
+    <tr><th></th><th>Page directory</th><th>Page table</th></tr>
+    <tr><td>Maps a page ID to</td><td>the page's location in the database files</td><td>the buffer-pool frame holding a copy of the page</td></tr>
+    <tr><td>Lives</td><td>on disk; often also cached in memory</td><td>only in memory</td></tr>
+    <tr><td>After a restart</td><td>must still be correct, so every change is recorded on disk</td><td>starts empty; nothing to recover</td></tr>
+    <tr><td>In this course's code</td><td><code>disk.FileManager</code>'s map from page ID to file offset (Unit 1, Lesson 1)</td><td><code>BufferPoolManager.pageTable</code></td></tr>
+  </table>
+
+  <p>The <code>FileManager</code> map does the directory's job of locating pages, but like BusTub's disk manager it lives only in memory, so a new <code>FileManager</code> starts with no pages. Project 1 never restarts a database, so that is enough. The BPM never looks inside that map: it hands page IDs to the disk layer and gets bytes back.</p>
+
+  <p class="sidenote">Operating systems also have "page tables", which map virtual addresses to physical memory. In this course, "page table" always means the buffer pool's map from page IDs to frames.</p>
+
+  <h2>Pins and dirty flags</h2>
+
+  <p>The <strong>pin count</strong> of a frame is the number of threads currently using its page, for reading or for writing. A thread must increment it before touching the page, and while the pin count is above zero the BPM may not evict the page. A pin promises nothing more. The notes stress that pinning does not stop other threads from accessing the page at the same time; keeping readers and writers apart is a latch's job.</p>
+
+  <p>In the Go code the count is <code>FrameHeader.pinCount</code>, an <code>atomic.Int64</code>. The replacer keeps its own record of which frames may be evicted, set with <code>ArcReplacer.SetEvictable</code>, and the writeup tells you to keep the two in sync: when a page's pin count drops to 0, its frame must be marked evictable. If every frame is pinned and a request needs a frame, the buffer pool is out of memory. The notes say an error is thrown; in Project 1, <code>CheckedReadPage</code> and <code>CheckedWritePage</code> return <code>(nil, false)</code>. The writeup says plainly that, unlike the replacer's own lists, the buffer pool <em>will</em> run out of frames.</p>
+
+  <p>The <strong>dirty flag</strong> (<code>FrameHeader.isDirty</code>) is set when a thread modifies the page. It means the in-memory copy differs from disk and must be written back before the frame is reused. The buffer pool is a <strong>write-back cache</strong>: changes stay in memory and reach disk later. A <strong>write-through cache</strong> would send every change to disk immediately. Eviction therefore has two paths (slide 32):</p>
+  <ul>
+    <li>On the <strong>fast path</strong>, the victim is clean, so the BPM simply drops it and reuses the frame.</li>
+    <li>On the <strong>slow path</strong>, the victim is dirty, so the BPM must write it back to disk before reusing the frame.</li>
+  </ul>
+  <p>The lecture calls this a trade-off between fast evictions and writing out dirty pages that may never be read again. One way to avoid the slow path is <strong>background writing</strong>, also called page cleaning or buffer flushing: the DBMS periodically walks the page table, writes dirty pages out early, and then either evicts them or just clears their dirty flags. The slide adds a warning that a dirty page must not reach disk before its log records do, which Unit 9 explains. Project 1 has no background writer. Its BPM writes a page when it evicts a dirty victim or when told to flush. The flush methods are <code>FlushPage</code>, <code>FlushAllPages</code>, their <code>Unsafe</code> variants, and a guard's <code>Flush()</code>, and they write pages out without evicting them.</p>
+
+  <h2>Latches versus locks</h2>
+
+  <p>Many threads use the buffer pool at once, so its data structures need protection. Lecture #04 separates two kinds of protection that everyday programming lumps together as "locks":</p>
+
+  <table>
+    <tr><th></th><th>Lock</th><th>Latch</th></tr>
+    <tr><td>Protects</td><td>the database's logical contents (tuples, tables) from other <em>transactions</em></td><td>critical sections of the DBMS's internal data structures from other <em>threads</em></td></tr>
+    <tr><td>Held for</td><td>the whole transaction</td><td>one operation</td></tr>
+    <tr><td>Rollback</td><td>must be able to roll changes back</td><td>doesn't need to</td></tr>
+    <tr><td>Nature</td><td>a higher-level, logical primitive; the DBMS can show users which locks are held</td><td>a low-level primitive, often a mutex or a condition variable</td></tr>
+  </table>
+
+  <p>Project 1 has only latches, and in Go they are plain mutexes. <code>BufferPoolManager.bpmLatch</code>, a <code>*sync.Mutex</code> that the page guards share, protects the page table, the free list and the BPM's other bookkeeping. Each <code>FrameHeader.rwlatch</code> is a <code>sync.RWMutex</code> that protects one frame's bytes, allowing many readers at once or a single writer. The <code>ArcReplacer</code> has its own <code>latch</code>. The writeup notes that latches are called "locks" in operating systems, and some starter comments do the same: <code>FlushPage</code>'s doc comment says to "take a lock on the page", which means the frame's latch. Locks, which protect data on behalf of transactions, come back in Unit 7.</p>
+
+  <p>A <strong>page guard</strong> holds both a pin and a latch. When a caller gets a <code>*ReadPageGuard</code> or <code>*WritePageGuard</code> from the BPM, the guard owns a pin, so the page can't be evicted, and the frame's latch in shared or exclusive mode, so no one writes while you read and no one touches the page while you write. The guard's <code>Drop()</code> gives both back. Go has no destructors, so you call it yourself, usually with <code>defer guard.Drop()</code>.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc">#04 Memory Management, slides 4–16</a>: the lecture's first part, from the disk-oriented architecture through frames, the page table, locks versus latches and the page directory to why not mmap.</p>
+
+  <h2>The disk I/O path</h2>
+
+  <p>A page read or write from the BPM still has to go through the operating system.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L04-os-page-cache-p91.png" alt="Slide text on the left says that most disk operations go through the OS API, that the OS keeps its own filesystem cache, and that most DBMSs use direct I/O (O_DIRECT) to bypass it, because of redundant copies of pages, different eviction policies and loss of control over file I/O. On the right, a read call goes from the DBMS in user space down to the filesystem in kernel space, and a red arrow continues around the OS page cache box to the disk." loading="lazy">
+    <figcaption>A plain <code>read()</code> goes through the filesystem and, unless the DBMS opts out, through the OS page cache. With <code>O_DIRECT</code> the request bypasses that cache, leaving the buffer pool as the only cache in the path (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf#page=91">Lecture #04, slide 36</a>).</figcaption>
+  </figure>
+
+  <p>Unless told otherwise, the OS keeps its own filesystem cache, the <strong>OS page cache</strong>. A DBMS with its own buffer pool would then keep redundant copies of its pages under two different eviction policies, and it would lose control over when file I/O really happens. Most DBMSs therefore open their files with <strong>direct I/O</strong> (<code>O_DIRECT</code>). PostgreSQL is an example of a DBMS that uses the OS page cache instead.</p>
+
+  <div class="callout bad">
+    <span class="callout-label">Pitfall: fsync can lie</span>
+    <p>If <code>fsync</code> fails with <code>EIO</code>, Linux marks the dirty pages clean. If the DBMS then calls <code>fsync</code> again, Linux reports success, although the data never reached the disk. A DBMS that treats the OS as its friend will believe the write happened (slide 37).</p>
+  </div>
+
+  <p>The OS and the hardware also have I/O schedulers. They reorder and batch requests to maximize disk bandwidth, but they can't tell which requests are more important. Many DBMSs (Oracle, Vertica, MySQL) tell you to switch Linux to the deadline or noop (FIFO) scheduler. The DBMS keeps its own internal queues of page reads and writes and sets priorities from what only it knows: sequential versus random I/O, critical-path versus background tasks, table versus index versus log versus ephemeral data, transaction information, and user SLAs (slide 35).</p>
+
+  <p>Project 1's <code>DiskScheduler</code> is the smallest version of that idea: one first-in, first-out queue and one background worker goroutine. The BPM never calls the disk manager directly. It describes each operation as a <code>DiskRequest</code> and schedules it:</p>
+  <ul>
+    <li><code>IsWrite</code> says whether the request is a read or a write.</li>
+    <li><code>Data</code> is the memory to read into or write from, normally the frame's own <code>[]byte</code>. A slice shares its backing array, so a read lands directly in the frame.</li>
+    <li><code>PageID</code> names the page on disk.</li>
+    <li><code>Callback</code> is a <code>chan bool</code> on which the worker reports completion: <code>true</code> once the request is done, <code>false</code> if the disk manager returned an error.</li>
+  </ul>
+  <p><code>Schedule([]DiskRequest)</code> puts the requests on <code>requestQueue</code>, a <code>common.Channel</code> (an unbounded FIFO queue whose <code>Put</code> never blocks), and returns at once. The worker goroutine, started by <code>NewDiskScheduler</code>, takes requests off the queue and runs each one on a <code>disk.Manager</code>: <code>disk.FileManager</code> for a real file, or <code>disk.MemoryManager</code>, an in-memory disk that many tests use. <code>Shutdown()</code> queues a stop signal behind the pending requests and waits for the worker to finish. The issuer waits on the callback, as the doc comment in <code>disk_scheduler.go</code> shows:</p>
+
+<pre><code>cb := scheduler.NewCallback()                        // promise + future
+scheduler.Schedule([]DiskRequest{{IsWrite: false, Data: buf, PageID: pid, Callback: cb}})
+ok := &lt;-cb                                           // future.get()</code></pre>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>BusTub gives each <code>DiskRequest</code> a <code>std::promise&lt;bool&gt;</code>: the worker calls <code>set_value</code>, and the issuer blocks in the matching future's <code>get()</code>. In Go, one channel plays both roles. <code>NewCallback</code> makes it with capacity 1, so the worker's single send never blocks, even if the issuer receives late or not at all. With one worker taking requests in FIFO order, requests for the same page are handled in the order they were scheduled.</p>
+  </div>
+
+  <p class="sidenote">Neither BusTub's disk manager (a C++ <code>fstream</code>) nor the Go <code>FileManager</code> (<code>os.OpenFile</code> without <code>O_DIRECT</code>) uses direct I/O, so their reads and writes pass through the OS page cache. That is fine for a teaching system, because Project 1 is about the buffer pool's own decisions, but most production DBMSs use direct I/O (slide 36).</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc">#04 Memory Management, slides 32–37</a>: dirty pages, background writing, disk I/O scheduling, the OS page cache and the fsync problem.</p>
+
+  <h2>How Project 1 fits together</h2>
+
+  <figure class="slide">
+    <img src="../assets/slides/L05-p1-bpm-task-p98.png" alt="Slide text says: use your ARC replacer to manage the allocation of pages; maintain internal data structures to track allocated and free pages; implement page guards; use whatever data structure you want for the page table; make sure you get the order of operations correct when pinning. On the right, an in-memory buffer pool holding page6 (with a padlock icon), page2 and page4 exchanges pages with an on-disk database holding page0, page1 and page2 through a box labelled Disk Scheduler." loading="lazy">
+    <figcaption>The buffer pool reaches the database on disk only through the disk scheduler, and the slide ends with a warning to get the order of operations right when pinning (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/05-storage2.pdf#page=98">Lecture #05, slide 33</a>).</figcaption>
+  </figure>
+
+  <p>Project 1 has four parts, and each one knows only what it needs:</p>
+
+  <table>
+    <tr><th>Part (file)</th><th>Job</th><th>Knows about</th></tr>
+    <tr><td><code>ArcReplacer</code> (<code>arc_replacer.go</code>)</td><td>Decides which frame to give up when the BPM needs one: <code>RecordAccess</code>, <code>SetEvictable</code>, <code>Evict</code>, <code>Remove</code>, <code>Size</code></td><td>Frame IDs, page IDs, access history and which frames are evictable, but not page bytes or the disk.</td></tr>
+    <tr><td><code>DiskScheduler</code> (<code>disk_scheduler.go</code>)</td><td>Runs page reads and writes on a background goroutine: <code>Schedule</code>, plus the worker</td><td>Page IDs and byte buffers, but not which page to evict.</td></tr>
+    <tr><td><code>ReadPageGuard</code> / <code>WritePageGuard</code> (<code>page_guard.go</code>)</td><td>Give a caller safe access to one page: <code>Data</code>, <code>DataMut</code> (write guards only), <code>IsDirty</code>, <code>Flush</code>, <code>Drop</code></td><td>One frame, one pin and one frame latch, plus the replacer, <code>bpmLatch</code> and the disk scheduler, which it needs when it is dropped or flushed.</td></tr>
+    <tr><td><code>BufferPoolManager</code> (<code>buffer_pool_manager.go</code>)</td><td>Ties it together: <code>NewPage</code>, <code>CheckedReadPage</code> / <code>CheckedWritePage</code> (and the panicking <code>ReadPage</code> / <code>WritePage</code>), <code>DeletePage</code>, the <code>Flush</code> methods, <code>GetPinCount</code></td><td>The page table, the frames, the free list and the BPM latch, but not what a page's bytes mean.</td></tr>
+  </table>
+
+  <p>The doc comment of <code>CheckedWritePage</code> asks you to think through three cases for a page request. Two are easy: the page is already resident, so no I/O is needed, or a free frame is available. In the hard case there is no free frame, so the BPM asks the replacer for a victim, writes the victim back if it is dirty, and reads the requested page into the freed frame through the disk scheduler. In every case the BPM then pins the frame, records the access in the replacer and marks the frame non-evictable, all while holding <code>bpmLatch</code>. Only after releasing <code>bpmLatch</code> does it build the guard, whose constructor takes the frame's latch. The doc comment of <code>newReadPageGuard</code> fixes that division of work, and the guard and BPM lessons explain why the order matters. When the caller drops the guard, the latch and the pin are given back, and once the pin count is 0 again the frame becomes evictable.</p>
+
+  <p>The coding lessons build these parts bottom-up, in the order <code>doc.go</code> lists: ARC bookkeeping (P1.1), ARC eviction and ghost lists (P1.2), the disk scheduler (P1.3), page guards (P1.4), the BPM's fetch and evict paths (P1.5), and deletion, flushing and concurrency (P1.6). Before those, the next lesson covers replacement policies, the theory behind the replacer.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=2_sTdS4h-bY&amp;t=3843s">#05 Database Storage II, "Project 1 instructions" (1:04:03)</a>: Andy Pavlo walks through the three Project 1 tasks, from the ARC replacer to the buffer pool manager.</p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A 3-frame buffer pool is full and its free list is empty. Frame 0 holds page 4 (pin count 1, clean), frame 1 holds page 7 (pin count 0, dirty), and frame 2 holds page 9 (pin count 0, clean). A thread asks for page 12, which is not in memory. Which statement is right?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Page 4 has pin count 1, so it can't be evicted at all, clean or not. Pinned pages are off-limits to the replacement policy.">Frame 0 is the cheapest victim, because page 4 is clean and can simply be dropped without any write.</li>
+      <li data-option="b" data-explain="Only unpinned frames are candidates. A dirty victim takes the slow path, written back before page 12 is read in, while a clean victim is simply dropped (slide 32). Which one goes is the replacement policy's decision, the topic of the next lesson.">Frames 1 and 2 are candidates: choosing page 7 adds a write before the read, and choosing page 9 doesn't.</li>
+      <li data-option="c" data-explain="The free list is only the first place to look for a frame. With unpinned frames available, the BPM evicts one. A request fails only when every frame is pinned.">The request fails, because a full buffer pool whose free list is empty has no frame left to give.</li>
+      <li data-option="d" data-explain="Only the victim needs writing, and only if it is dirty. Writing other dirty pages early is background writing, an optional optimization (slide 33) that Project 1 doesn't have.">The BPM first writes every dirty page in the pool back to disk, and only then picks a victim.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Which statement correctly distinguishes the page table from the page directory?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="This swaps the two structures.">The page table maps page IDs to file locations and must be persisted; the page directory maps page IDs to frames and stays in memory.</li>
+      <li data-option="b" data-explain="Changes to the page directory must be recorded on disk so the DBMS can find its pages after a restart (slide 12). Only the page table is purely in memory.">Both live only in memory, and the DBMS rebuilds them by scanning the data files after a restart.</li>
+      <li data-option="c" data-explain="The dirty flag and the pin count are buffer-pool metadata kept alongside the page table and its frames (slide 10). In Project 1 they are fields of FrameHeader.">The page directory is the per-frame metadata kept in the buffer pool, such as the dirty flag and pin count.</li>
+      <li data-option="d" data-explain="This is slide 12, nearly word for word. In the Go code the page table is BufferPoolManager.pageTable, a map from common.PageID to common.FrameID.">The page directory maps page IDs to file locations and must be persisted; the page table maps page IDs to frames and stays in memory.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">A goroutine holds a <code>*ReadPageGuard</code> on page 7, so page 7's frame has pin count 1. What does the pin itself guarantee?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is all a pin promises (notes, section 2). Keeping writers away while the goroutine reads is the job of the frame's latch, which the guard also holds.">Page 7 stays in its frame: the BPM may not evict it while the pin count is above zero.</li>
+      <li data-option="b" data-explain="The notes say pinning does not prevent concurrent access. Other read guards can pin and read page 7 at the same time. Mutual exclusion comes from the frame's sync.RWMutex.">No other goroutine can read or write page 7 until this goroutine releases its pin.</li>
+      <li data-option="c" data-explain="Unpinning only makes the frame evictable again. A write happens when a dirty page is flushed or chosen as a victim.">Page 7 is written back to disk as soon as its pin count drops to zero.</li>
+      <li data-option="d" data-explain="When the pin count reaches 0, the frame is marked evictable in the replacer and can then be reused for another page (Project 1 writeup).">Page 7's frame stays reserved for page 7 even after the pin count drops to zero.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Lecture #04 lists four problems with letting the OS manage database pages through mmap. Which of these is <em>not</em> one of them?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="This is problem #1, transaction safety.">The OS can flush dirty pages to disk at any time, which threatens transaction safety.</li>
+      <li data-option="b" data-explain="This is problem #2, I/O stalls.">A thread can stall on a page fault, because the DBMS doesn't know which pages are in memory.</li>
+      <li data-option="c" data-explain="This is neither on the list nor true. Slide 13 maps a four-page file while physical memory holds only two pages. Touching a page that isn't resident doesn't fail; the thread stalls while the OS reads it in.">mmap cannot map a file that is larger than physical memory.</li>
+      <li data-option="d" data-explain="This is problem #3, error handling. Problem #4 is performance: OS data-structure contention and TLB shootdowns.">Any page access can raise a SIGBUS signal that the DBMS must handle.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Lecture #04 argues that a DBMS should keep its own queue of page read and write requests rather than rely only on the OS's I/O scheduler. Why?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Slide 34 says the opposite: the OS and the hardware reorder and batch requests to maximize disk bandwidth.">The OS can't reorder or batch I/O requests, so it serves them strictly one at a time.</li>
+      <li data-option="b" data-explain="Slides 34 and 35. Only the DBMS knows about sequential versus random I/O, critical-path versus background tasks, table versus index versus log data, transactions and SLAs. Project 1's DiskScheduler is the simplest such queue: FIFO, with one worker.">The OS reorders and batches requests for bandwidth but can't tell which requests are more important.</li>
+      <li data-option="c" data-explain="The lecture makes no such claim. Sequential versus random I/O is one of the factors the DBMS itself weighs when it sets priorities.">The OS always serves random I/O before sequential I/O, which makes table scans slow.</li>
+      <li data-option="d" data-explain="Slide 34 says many DBMSs (Oracle, Vertica, MySQL) tell you to switch Linux to the deadline or noop (FIFO) scheduler, so both exist.">Linux has no FIFO or deadline I/O scheduler that a DBMS could switch to.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why a pin doesn't stop other readers, how the page table differs from the page directory, or why the disk scheduler hands back a channel instead of returning when the I/O is done. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 Lecture #04 <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf">slides</a> and <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/04-bufferpool.pdf">notes</a>; Lecture #05 slides 30–33 (Project #1 overview); the <a href="https://15445.courses.cs.cmu.edu/fall2025/project1/">Project #1 writeup</a> (Overview, Task #2, and Task #3 with its Concurrency section); BusTub <code>src/include/buffer/buffer_pool_manager.h</code>, <code>src/include/storage/disk/disk_scheduler.h</code> and <code>src/storage/disk/disk_manager.cpp</code> at commit d49b823; this course's <code>intro_to_db/bufferpool</code>, <code>common</code> and <code>storage/disk</code> packages.</p>
+
+  <div class="lesson-nav">
+    <a href="./u1-05-compression.html">← Database Compression</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u2-02-replacement-policies.html">Next: Replacement Policies: LRU, CLOCK, LRU-K, ARC →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

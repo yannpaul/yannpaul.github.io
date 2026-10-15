@@ -1,0 +1,334 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 1 · Lesson 2 · Inside a Page: Slotted Pages, Record IDs, and Tuple Layout</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 1 · Lesson 2</p>
+  <h1>Inside a Page: Slotted Pages, Record IDs, and Tuple Layout</h1>
+  <p class="subtitle">How a DBMS arranges tuples inside a page, how a record ID finds one, how a tuple's own bytes are laid out, and where BusTub's table pages differ from the lecture.</p>
+
+  <p class="lede">Lesson 1 stopped at the page header; this lesson is about what comes after it. The most common layout, the slotted page, copes with two things that a plain append layout can't: deleted tuples and tuples of different lengths. Inside each tuple, the DBMS must also decide the order and alignment of the attributes, how each data type is stored, and what to do with NULLs and with values too big for a page. BusTub's version, <code>TablePage</code>, comes back in Project 3, and the last section lists where it departs from the lecture.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Artist(id PRIMARY KEY, name) holds ids 101, 102 and 103. Album(id PRIMARY KEY, name) holds ids 11, 22 and 33. ArtistAlbum(artist_id REFERENCES Artist(id), album_id REFERENCES Album(id)) is the cross-reference table. Run alone against this state, which INSERT does the DBMS reject?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Artist 102 and album 33 both exist, so both foreign keys are satisfied. A cross-reference table lets any artist link to any album.">INSERT INTO ArtistAlbum VALUES (102, 33);</li>
+      <li data-option="b" data-explain="This is a new album with an unused primary key, and Album has no foreign keys of its own.">INSERT INTO Album VALUES (44, 'New Album');</li>
+      <li data-option="c" data-explain="No Album tuple has id 44, so the referential (foreign-key) constraint on album_id is violated. DuckDB says: &quot;Violates foreign key constraint because key id: 44 does not exist in the referenced table&quot;.">INSERT INTO ArtistAlbum VALUES (101, 44);</li>
+      <li data-option="d" data-explain="This is a new artist with an unused primary key. Nothing references it yet, and nothing needs to.">INSERT INTO Artist VALUES (104, 'New Artist');</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">HW1 builds names with <code>||</code>. In DuckDB, what does <code>SELECT 'Ken' || ' (' || NULL || ') ' || 'Griffey';</code> return?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is what DuckDB's concat() returns, because concat skips NULL arguments. The || operator does not.">'Ken () Griffey'</li>
+      <li data-option="b" data-explain="Concatenating anything with NULL yields NULL, so one missing name part makes the whole constructed name NULL. Checked in DuckDB.">NULL</li>
+      <li data-option="c" data-explain="A NULL is never turned into the text 'NULL'.">'Ken (NULL) Griffey'</li>
+      <li data-option="d" data-explain="The statement runs without error and returns one row.">An error, because NULL has no type.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Lesson 1: why do most DBMSs use fixed-size pages rather than variable-size ones?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The OS knows nothing about the contents of database files and doesn't dictate their page size; database pages range from 512 B to 32 KB.">The OS can only read and write database files in 4 KB blocks.</li>
+      <li data-option="b" data-explain="The device guarantees failsafe writes only up to the hardware page. A fixed 16 KB page can still be partially written by a crash.">A fixed-size page is always written atomically by the storage device.</li>
+      <li data-option="c" data-explain="Most DBMSs do not let a tuple exceed one page, but that rule is about tuples, not about why page sizes are fixed.">Fixed-size pages guarantee that every tuple fits in exactly one page.</li>
+      <li data-option="d" data-explain="The lecture notes give this reason: with variable-size pages, deleting one leaves a hole in the file that the DBMS can't easily fill with new pages. Fixed sizes avoid that engineering overhead.">Deleting a variable-size page would leave a hole that new pages can't easily fill.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Three ways to lay out a page</h2>
+
+  <p>Whatever the file organization, the DBMS must decide how to arrange data <em>inside</em> each page. For now the lecture assumes a row-oriented storage model, where a tuple's attributes are stored together, and that each tuple fits in a single page. Under those assumptions there are three approaches: <strong>tuple-oriented</strong> storage (this lesson), <strong>index-organized</strong> storage and <strong>log-structured</strong> storage (both in Lesson 3). Lesson 4 drops the row-oriented assumption.</p>
+
+  <h3>The strawman: count and append</h3>
+
+  <p>The lecture's strawman keeps a count of the tuples in the page and appends each new tuple at the end. Delete tuple #2 from a page holding three tuples and the count drops to 2, leaving a hole between #1 and #3. The next tuple, #4, can go into that hole only if it fits. With variable-length attributes, tuples have different sizes, so a hole may be too small for the next tuple, and a count alone no longer tells the DBMS where each tuple starts.</p>
+
+  <h2>Slotted pages</h2>
+
+  <p>The most common layout adds one level of indirection: a <strong>slot array</strong> that maps each slot number to the offset where its tuple starts. The page header keeps track of the number of used slots and the offset where the last used slot's tuple starts.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L03-slotted-page-p42.png" alt="A slotted page. The header and a slot array with slots 1 to 7 sit at the top of the page. Slots 1 to 4 have arrows pointing down to tuples #1 to #4, which are packed at the bottom of the page. A label under the tuples reads Fixed- and Var-length Tuple Data. The space between the slot array and the tuples is free." loading="lazy">
+    <figcaption>The slot array grows from the front of the page and the tuple data grows from the back. The free space is in the middle, and the page is full when the two meet (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/03-storage1.pdf#page=42">Lecture #03, slide 26</a>).</figcaption>
+  </figure>
+
+  <p>To insert, the DBMS writes the tuple just below the previous one, at the back of the page, and appends a slot entry pointing to it at the front. Fixed-length and variable-length tuples coexist, because each slot records exactly where its tuple begins.</p>
+
+  <p>The slot array also lets tuples move within the page. When tuple #3 is deleted, its space becomes free, and the DBMS can compact the page: move tuple #4 into that space and update slot 4 to point at the new offset.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L03-slotted-page-after-delete-p46.png" alt="The same slotted page after tuple #3 was deleted. Only slot 4 has an arrow, pointing to tuple #4, which now sits at the back of the page next to tuple #1, in the space tuple #3 used to occupy. Tuples #2 and #1 are unchanged." loading="lazy">
+    <figcaption>After tuple #3 is deleted, tuple #4 has moved into the freed space and slot 4 has been re-pointed. Anything that refers to the tuple as "page, slot 4" still finds it (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/03-storage1.pdf#page=46">Lecture #03, slide 26</a>).</figcaption>
+  </figure>
+
+  <h2>Record IDs</h2>
+
+  <p>The DBMS gives each logical tuple a unique <strong>record ID</strong> that represents its physical location, for example (file ID, page ID, slot number). Because the slot array absorbs moves within a page, the slot number is a stable name for "this tuple on this page". Most DBMSs don't store the record ID inside the tuple. SQLite is an exception: its ROWID is the true primary key, stored as a hidden attribute. Sizes vary:</p>
+
+  <table>
+    <tr><th>System</th><th>Name</th><th>Size</th></tr>
+    <tr><td>Ingres</td><td>TID</td><td>4 bytes</td></tr>
+    <tr><td>PostgreSQL</td><td>CTID</td><td>6 bytes</td></tr>
+    <tr><td>SQLite</td><td>ROWID</td><td>8 bytes</td></tr>
+    <tr><td>SQL Server</td><td>%%physloc%%</td><td>8 bytes</td></tr>
+    <tr><td>Firebird</td><td>RDB$DB_KEY</td><td>8 bytes</td></tr>
+    <tr><td>Oracle</td><td>ROWID</td><td>10 bytes</td></tr>
+  </table>
+
+  <p>Reading a tuple by its record ID takes three steps: look up the page's location in the page directory, fetch the page from disk if it isn't already in memory, and find the tuple's offset in the slot array. Nothing in a heap is sorted, so to find a tuple by its <em>value</em> the DBMS relies on a separate index.</p>
+
+  <p>Applications should never rely on record IDs to mean anything. They are physical, and they change: you'll see below that an update which no longer fits is written to a different page, under a new record ID.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=PRLXdIMJhOg">#03 Database Storage I, slides 24–27</a>: the three layout approaches, the strawman, slotted pages (insert, delete, move) and record IDs.</p>
+
+  <h2>Tuple layout</h2>
+
+  <p>A tuple is a sequence of bytes prefixed with a header. The DBMS turns those bytes into typed attribute values using the schema information in its <em>catalogs</em> (the metadata it keeps about every table), so the tuple itself carries no schema. The <strong>tuple header</strong> holds visibility information for concurrency control (which transaction created or modified the tuple; Unit 7) and a bitmap marking which attributes are NULL.</p>
+
+  <p>Attributes are usually stored in the order of the <code>CREATE TABLE</code> statement. That's for simplicity; another order might be more efficient. To the DBMS a tuple is just an <code>unsigned char[]</code>: to read an attribute, it computes the attribute's offset and reinterprets the bytes there as the attribute's type, in C++ with <code>reinterpret_cast&lt;int32_t*&gt;(address)</code>.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Go has no safe equivalent of <code>reinterpret_cast</code>, and this course doesn't overlay structs on page bytes with <code>unsafe</code>. A page is a <code>[]byte</code>, and fields are decoded and encoded with <code>encoding/binary</code>: reading a 4-byte integer at offset <code>off</code> looks like <code>int32(binary.LittleEndian.Uint32(page[off:off+4]))</code>. The offsets are the same ones the C++ code computes.</p>
+  </div>
+
+  <h3>Word alignment</h3>
+
+  <p>The lecture requires every attribute to be <strong>word-aligned</strong>, so the CPU can access it without unexpected behavior or extra work. Its example table is <code>foo(id INT, cdate TIMESTAMP, color CHAR(2), zipcode INT)</code>, with sizes of 32, 64, 16 and 32 bits. Packed in declaration order, the 64-bit <code>cdate</code> would start halfway through the first 64-bit word and straddle the second. There are two fixes. <strong>Padding</strong> adds empty bits after attributes so that the next one starts on a word boundary:</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L03-alignment-padding-p60.png" alt="The CREATE TABLE foo statement with sizes 32-bit id, 64-bit cdate, 16-bit color and 32-bit zipcode. Beside it, a byte array divided into 64-bit words: id followed by red zero padding fills the first word, cdate fills the second, and color and zipc share the third word followed by more red zero padding." loading="lazy">
+    <figcaption>With padding, zeros after <code>id</code> push <code>cdate</code> onto the next word boundary, and more zeros fill out the third word after <code>c</code> and <code>zipc</code> (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/03-storage1.pdf#page=60">Lecture #03, slide 34</a>).</figcaption>
+  </figure>
+
+  <p><strong>Reordering</strong> changes the physical order of the attributes so that they line up, and may still need padding at the end:</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L03-alignment-reordering-p62.png" alt="The same table laid out as id and zipc sharing the first 64-bit word, cdate in the second word, and color at the start of the third word followed by red zero padding to the end of that word." loading="lazy">
+    <figcaption>After reordering, <code>id</code> and <code>zipc</code> share the first word, <code>cdate</code> takes the second, and <code>c</code> plus padding takes the third. The tuple's physical order no longer matches the <code>CREATE TABLE</code> order (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/03-storage1.pdf#page=62">Lecture #03, slide 35</a>).</figcaption>
+  </figure>
+
+  <h3>How values are stored</h3>
+
+  <ul>
+    <li>INTEGER, BIGINT, SMALLINT and TINYINT use the native C/C++ format.</li>
+    <li>FLOAT, REAL and DOUBLE are <em>variable-precision</em> numbers, stored as IEEE-754. They are fast, because CPUs have instructions and registers for them, but inexact.</li>
+    <li>NUMERIC and DECIMAL are <em>fixed-precision</em> numbers with arbitrary precision and scale, used when rounding errors are unacceptable. One implementation is an exact, variable-length binary representation with metadata. PostgreSQL's <code>numeric</code> stores the number of digits, the weight of the first digit, a scale factor, a sign (positive, negative or NaN) and an array of digits.</li>
+    <li>VARCHAR, VARBINARY, TEXT and BLOB values are stored as a header holding the length, followed by the data bytes, or as a pointer to another page and offset that holds the data. Comparing and sorting them also depends on collations.</li>
+    <li>TIME, DATE, TIMESTAMP and INTERVAL values are 32- or 64-bit integers counting micro- or milliseconds since the Unix epoch (1 January 1970).</li>
+  </ul>
+
+  <p>The lecture's rounding demo runs unchanged in Go, because Go's <code>float32</code> and <code>float64</code> are the same IEEE-754 types:</p>
+
+<pre><code>var x, y float32 = 0.1, 0.2
+fmt.Printf("x+y = %.20f\n", x+y)  // x+y = 0.30000001192092895508
+fmt.Printf("0.3 = %.20f\n", 0.3)  // 0.3 = 0.29999999999999998890</code></pre>
+
+  <h3>NULLs</h3>
+
+  <p>The lecture gives three ways to record that an attribute is NULL:</p>
+  <ol>
+    <li>A <strong>null column bitmap</strong> in the tuple header, with one bit per attribute. This is the most common approach in row stores.</li>
+    <li>A <strong>special value</strong> reserved to mean NULL for a type, such as <code>INT32_MIN</code>. This is more common in column stores.</li>
+    <li>A <strong>per-attribute null flag</strong> stored next to each value. The lecture says not to do this: the flag needs more than a single bit, because it would otherwise break word alignment.</li>
+  </ol>
+
+  <h3>Values too big for a page</h3>
+
+  <p>Most DBMSs don't allow a tuple to exceed the size of a page. A value larger than that goes into separate <strong>overflow pages</strong>, and the tuple stores the value's size and location instead. PostgreSQL's version, TOAST, kicks in above 2 KB; MySQL uses overflow pages for values larger than half a page, and SQL Server for values larger than a page. Some systems can also keep a large value in an <strong>external file</strong> and treat it as a BLOB (Oracle's BFILE, Microsoft's FILESTREAM). The DBMS can't manipulate the contents of such a file, so it offers no durability or transaction protection for it.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=PRLXdIMJhOg">#03 Database Storage I, slides 29–43</a>: tuple headers, word alignment, data representation, the rounding demo, NULLs and large values.</p>
+
+  <h2>What tuple-oriented storage costs</h2>
+
+  <p>Lecture #05 revisits slotted pages and follows the writes. To insert a tuple, the DBMS uses the page directory to find a page with a free slot, fetches it, and checks its slot array for space that fits. If there isn't any, it tries another page or creates a new one, then inserts the tuple and updates the slot array. To update a tuple by record ID, it navigates to the tuple as for a read. If the new data fits, it overwrites the old data in place; otherwise it marks the old tuple as deleted and inserts the new version in a different page.</p>
+
+  <p>That design has three problems:</p>
+  <ol>
+    <li><strong>Fragmentation.</strong> Pages aren't fully used: deletes leave unusable space and empty slots.</li>
+    <li><strong>Useless disk I/O.</strong> The DBMS must fetch an entire page to update one tuple.</li>
+    <li><strong>Random disk I/O.</strong> In the worst case, each tuple an operation updates is on a different page, so updating 20 tuples can mean jumping to 20 places on disk.</li>
+  </ol>
+
+  <p>Some storage systems (HDFS, Google Colossus, S3 Express) don't allow pages to be overwritten at all, only new ones to be created. Lesson 3 covers log-structured storage, which is designed for such systems, and compares its problems with these.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=2_sTdS4h-bY&amp;t=1544s">#05 Database Storage II, "Tuple storage operations" (25:44)</a>: inserts and updates on slotted pages. The next chapter, "Limitations of tuple storage" (30:12), covers the three problems.</p>
+
+  <h2>BusTub's table pages</h2>
+
+  <p>In Project 3 your executors will read and write tuples through BusTub's <code>TableHeap</code> and <code>TablePage</code>. Their design follows the lecture in outline and departs from it in details that matter when you debug:</p>
+
+  <table>
+    <tr><th>Lecture</th><th>BusTub at d49b823</th></tr>
+    <tr><td>Record ID = (file, page, slot)</td><td><code>RID</code> is a page ID and a slot number only; <code>Get()</code> packs them into one <code>int64</code> as <code>page_id &lt;&lt; 32 | slot_num</code>.</td></tr>
+    <tr><td>Header: number of used slots, offset of the last tuple</td><td>An 8-byte header: <code>next_page_id_</code> (4 bytes), <code>num_tuples_</code> (2) and <code>num_deleted_tuples_</code> (2). The tuple data's start is read from the last slot.</td></tr>
+    <tr><td>Slot array maps slot → offset</td><td><code>tuple_info_[]</code>: each entry holds the tuple's offset and size (2 bytes each) and its <code>TupleMeta</code>, 24 bytes per entry in all (<code>TUPLE_INFO_SIZE</code>).</td></tr>
+    <tr><td>Tuple header: visibility and a NULL bitmap</td><td><code>TupleMeta{ts_, is_deleted_}</code> (16 bytes) lives in the slot entry, not in front of the tuple's bytes. There is no NULL bitmap.</td></tr>
+    <tr><td>Data grows from the back; full when it meets the slots</td><td>The same: the first tuple goes at <code>8192 − size</code>, each later one just below the previous. An insert fails when the new tuple's offset would fall below <code>8 + 24 × (num_tuples_ + 1)</code>.</td></tr>
+    <tr><td>Delete, then move tuples to compact</td><td>A delete only sets <code>is_deleted_</code> and counts it. The bytes stay, nothing moves, and slot numbers are never reused.</td></tr>
+    <tr><td>Update: overwrite if it fits, else delete and re-insert</td><td><code>UpdateTupleInPlaceUnsafe</code> accepts only a tuple of exactly the same size and otherwise throws "Tuple size mismatch".</td></tr>
+    <tr><td>Word-aligned attributes</td><td>No padding: <code>Schema</code> gives each column the running total of the previous columns' sizes as its offset.</td></tr>
+    <tr><td>VARCHAR: length + bytes, or a pointer</td><td>The column's fixed part is a 4-byte offset to <code>[uint32 length][bytes]</code>, stored after the fixed part of the same tuple.</td></tr>
+    <tr><td>NULL bitmap (most common in row stores)</td><td>Special values: an INTEGER is NULL when it holds <code>INT_MIN</code> (<code>BUSTUB_INT32_NULL</code>), so the smallest storable INTEGER is <code>INT_MIN + 1</code>.</td></tr>
+    <tr><td>Fixed-precision NUMERIC/DECIMAL</td><td><code>DECIMAL</code> is a C++ <code>double</code>: variable precision, inexact.</td></tr>
+    <tr><td>Heap file with a page directory</td><td><code>TableHeap</code> is a linked list of pages through <code>next_page_id_</code>. Inserts go to the last page, and a new page is linked on when the tuple doesn't fit.</td></tr>
+    <tr><td>Overflow pages for large values</td><td>None. A tuple that doesn't fit in an empty page fails with "tuple is too large, cannot insert".</td></tr>
+  </table>
+
+  <p class="sidenote">The ASCII diagram at the top of <code>table_page.h</code> still shows 4-byte slot entries. The <code>static_assert</code> below it says 24, and the code is what counts. <code>TupleMeta</code>'s timestamp becomes important in Project 4 (MVCC); its comment says to set it to 0 in Project 3.</p>
+
+  <h2>Work it out: how many tuples fit?</h2>
+
+  <p>Use BusTub's real numbers: an 8,192-byte page, an 8-byte header, and 24 bytes per slot entry. The table is <code>t(a INT, b BIGINT, c INT)</code>, with INT 4 bytes and BIGINT 8 bytes.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u1l2-bustub-capacity">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u1l2-bustub-capacity-cb">
+        <label for="u1l2-bustub-capacity-cb">Work out how many tuples of t(a INT, b BIGINT, c INT) fit in one BusTub TablePage.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Each tuple costs its own bytes plus one slot entry; the header is paid once. How many bytes is a BusTub tuple of this table, given that BusTub doesn't pad?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>The tuple is 4 + 8 + 4 = 16 bytes, with columns at offsets 0, 4 and 12. Each tuple then costs 16 + 24 = 40 bytes, so the capacity is ⌊(8,192 − 8) / 40⌋. Check it against BusTub's insert condition: the k-th tuple starts at 8,192 − 16k, which must not fall below 8 + 24k.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>⌊8,184 / 40⌋ = <strong>204</strong> tuples: 204 × 40 = 8,160 ≤ 8,184, but 205 × 40 = 8,200 &gt; 8,184. Note that 24 of every 40 bytes are slot overhead, and that <code>b</code> sits at offset 4, which isn't a multiple of 8.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u1l2-aligned-capacity">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u1l2-aligned-capacity-cb">
+        <label for="u1l2-aligned-capacity-cb">Redo the count with the lecture's 64-bit word alignment, first using padding in declaration order, then using reordering.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Where would <code>b</code> start without padding, and which word boundary would it cross? With reordering, which two attributes can share a word?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Padding: <code>a</code> plus 4 bytes of padding fills the first word, <code>b</code> the second, <code>c</code> plus 4 bytes of padding the third, so the tuple is 24 bytes and costs 48 with its slot. Reordering to <code>a, c, b</code> puts <code>a</code> and <code>c</code> in the first word and <code>b</code> in the second: 16 bytes, no padding.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>Padding: ⌊8,184 / 48⌋ = <strong>170</strong> tuples (170 × 48 = 8,160; 171 × 48 = 8,208 is too many). Reordering: back to <strong>204</strong>, the same as BusTub's unpadded layout, but with every attribute aligned.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u1l2-delete-trace">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u1l2-delete-trace-cb">
+        <label for="u1l2-delete-trace-cb">A slotted page holds tuples #1 to #4 in slots 1 to 4, as on slide 26. Delete tuple #3 and compact the page as the lecture does. Say which slot entries change and what tuple #4's record ID is before and after, then say what BusTub's TablePage does instead.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>A record ID is (page, slot). Compaction moves bytes; does it touch slot numbers?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>In the lecture, slot 3 becomes empty, tuple #4's bytes move into the freed space, and slot 4's offset is updated. In BusTub, <code>UpdateTupleMeta</code> sets <code>is_deleted_</code> in slot 3's <code>TupleMeta</code> and increments <code>num_deleted_tuples_</code>, and that's all.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>Only slot 3 (now empty) and slot 4 (new offset) change, and tuple #4's record ID is (page, 4) before and after. In BusTub nothing moves: slot 3 keeps its offset and size with <code>is_deleted_</code> set, its bytes stay in the page, and the space isn't reclaimed. That is fragmentation, and a later insert takes a new slot rather than slot 3.</p></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">A slotted page is 4,096 bytes with a 24-byte header. Each slot-array entry takes 4 bytes, and every tuple is exactly 60 bytes. What is the maximum number of tuples the page can hold?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Each tuple costs 60 + 4 = 64 bytes, and (4,096 − 24) / 64 = 4,072 / 64 = 63.6, so 63. Check: 63 × 64 = 4,032 ≤ 4,072, but 64 × 64 = 4,096 &gt; 4,072.">63</li>
+      <li data-option="b" data-explain="4,096 / 64 = 64 ignores the 24-byte header.">64</li>
+      <li data-option="c" data-explain="4,072 / 60 = 67.9 forgets that each tuple also needs a slot entry.">67</li>
+      <li data-option="d" data-explain="4,096 / 60 = 68.3 ignores both the header and the slot entries.">68</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Which statement about record IDs matches the lecture?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The DBMS assigns record IDs, and they encode a physical location. An update that no longer fits is inserted in a different page, so the ID can change.">A record ID is a logical identifier chosen by the application, so it stays the same wherever the tuple is stored.</li>
+      <li data-option="b" data-explain="Slide 27: most DBMSs do not store record IDs in the tuple. SQLite's ROWID is the exception.">Most DBMSs store each tuple's record ID inside the tuple header.</li>
+      <li data-option="c" data-explain="Slide 27: a record ID represents the tuple's physical location (for example file ID, page ID and slot number), and &quot;Applications should never rely on these IDs to mean anything.&quot;">A record ID encodes the tuple's physical location, so applications shouldn't rely on it to mean anything.</li>
+      <li data-option="d" data-explain="Sizes range from 4 bytes (Ingres TID) to 10 bytes (Oracle ROWID).">Record IDs are always 4 bytes, the size of Ingres's TID.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">HW2 Q1(b): which set lists exactly the problems that CMU's official solution associates with slotted-page storage?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Write amplification is the log-structured answer (HW2 Q1a, Lesson 3). The official answer doesn't select it for slotted pages.">Write amplification only</li>
+      <li data-option="b" data-explain="Fragmentation is part of it, but the official answer also selects increased random reads and increased random writes.">Fragmentation only</li>
+      <li data-option="c" data-explain="This includes write amplification, which the official answer does not select for slotted pages.">Write amplification, increased random writes, and fragmentation</li>
+      <li data-option="d" data-explain="Official solution: deleting tuples leaves gaps, so pages aren't fully utilized (fragmentation), and since tuples can be stored across separate pages, the DBMS may incur more random I/O both when reading data and when writing out dirty pages.">Increased random reads, increased random writes, and fragmentation</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">In BusTub's <code>TablePage</code>, what happens when a tuple is deleted?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Nothing is zeroed, and InsertTuple always takes slot num_tuples_, so a deleted slot is never reused.">Its bytes are zeroed, and the next insert reuses its slot.</li>
+      <li data-option="b" data-explain="UpdateTupleMeta stores the new TupleMeta with is_deleted_ set and increments num_deleted_tuples_. No bytes move, no space is reclaimed (unlike the compaction on slide 26), and the slot is never reused.">Its slot's <code>TupleMeta</code> is marked deleted, and its bytes stay in the page.</li>
+      <li data-option="c" data-explain="That is the lecture's compaction (slide 26). BusTub doesn't move tuples when one is deleted.">The remaining tuples are moved to close the gap, and their slots are re-pointed.</li>
+      <li data-option="d" data-explain="Slots never shift in BusTub. If they did, every later tuple's record ID would change, and the slot array exists to prevent that.">The slot entry is removed and later slots shift down by one.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">How does BusTub record that an INTEGER attribute of a tuple is NULL?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="BusTub uses the lecture's special-value approach: an INTEGER holding INT_MIN (BUSTUB_INT32_NULL) is read back as NULL, which is why BusTub's smallest valid INTEGER is INT_MIN + 1.">The attribute's 4 bytes hold the reserved value <code>INT_MIN</code>.</li>
+      <li data-option="b" data-explain="That is the lecture's most common row-store approach, but BusTub's tuples have no header and no NULL bitmap.">A bit is set in a NULL bitmap in the tuple header.</li>
+      <li data-option="c" data-explain="That is the per-attribute flag the lecture says not to use. BusTub doesn't use it either.">A one-byte flag stored next to the value marks it as NULL.</li>
+      <li data-option="d" data-explain="Every fixed-size column always occupies its bytes at its schema offset. The tuple doesn't shrink.">The attribute's bytes are left out, so the tuple is 4 bytes shorter.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why moving a tuple inside a page doesn't change its record ID but an update that doesn't fit does, why BusTub can afford to skip padding and compaction, or how the 24-byte slot entry is made up. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 lecture #03, Database Storage I (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/03-storage1.pdf">slides</a> 24–44, <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/03-storage1.pdf">notes</a> §9–12); lecture #05, Database Storage II (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/05-storage2.pdf">slides</a> 13–20, <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/05-storage2.pdf">notes</a> §2); Homework #2 Q1(b) and its official solutions; BusTub at commit d49b823: <code>src/include/common/rid.h</code>, <code>src/include/storage/page/table_page.h</code>, <code>src/storage/page/table_page.cpp</code>, <code>src/include/storage/table/tuple.h</code>, <code>src/storage/table/tuple.cpp</code>, <code>src/catalog/schema.cpp</code>, <code>src/include/type/limits.h</code>, <code>src/include/type/value.h</code>, <code>src/type/varlen_type.cpp</code> and <code>src/storage/table/table_heap.cpp</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u1-01-disk-oriented-storage.html">← Disk-Oriented Storage: Files, Pages, and Heap Files</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u1-03-index-organized-and-log-structured.html">Next: Index-Organized and Log-Structured Storage →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

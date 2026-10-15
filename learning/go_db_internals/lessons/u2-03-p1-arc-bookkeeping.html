@@ -1,0 +1,361 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 2 · Lesson 3 · P1.1 ARC Replacer: Bookkeeping</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 2 · Lesson 3</p>
+  <h1>P1.1 ARC Replacer: Bookkeeping</h1>
+  <p class="subtitle">Choose constant-time data structures for the ARC replacer, then implement its bookkeeping: <code>RecordAccess</code> for new and alive frames, <code>SetEvictable</code>, <code>Size</code> and <code>Remove</code>, all safe for concurrent use.</p>
+
+  <p class="lede">The previous lesson stated Project 1's ARC rules and traced BusTub's SampleTest by hand. Now you write the first half of <code>ArcReplacer</code>: everything the replacer does before it ever evicts a page. It must know which frames hold pages, which of those the buffer pool may evict, and when a page has been used a second time and belongs in the MFU list. Eviction and the ghost lists come in the next lesson. Most of the thinking in this stage goes into the data structures, because one test calls <code>RecordAccess</code> more than 2.6 million times on a replacer with 262,144 frames.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">In Project 1 the buffer pool manager keeps each frame's pin count and the replacer's evictable flag in sync. When must it call <code>SetEvictable(frameID, true)</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Just after RecordAccess the BPM does the opposite: it has pinned the frame for a caller, so it marks the frame non-evictable.">Immediately after <code>RecordAccess</code>, so that the page it just loaded can be evicted later.</li>
+      <li data-option="b" data-explain="The dirty flag only decides whether an eviction needs a write first (the slow path). It doesn't decide whether the frame may be evicted.">When a flush clears the page's dirty flag, since a clean page is cheap to evict.</li>
+      <li data-option="c" data-explain="The writeup: when the pin count of a page hits 0, its frame should be marked evictable. While anyone holds a pin, the page must stay in memory, so the frame stays non-evictable.">When the frame's pin count drops to 0, for example when the last guard on its page is dropped.</li>
+      <li data-option="d" data-explain="An empty free list only means the BPM has to call Evict. Which frames Evict may choose still depends on the pins.">When the free list becomes empty, so that the replacer has candidates to choose from.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 1, Lesson 2: an <code>UPDATE</code> makes a tuple too large to stay on its slotted page. What happens to the tuple's record ID?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The DBMS marks the old tuple deleted and inserts the new version in a different page, under a new record ID. Record IDs are physical locations, so applications must not rely on them. A page's frame ID in the buffer pool is physical in the same way, which matters in this lesson.">It can change, because the new version goes to a different page; applications must not rely on record IDs.</li>
+      <li data-option="b" data-explain="The slot array absorbs moves within one page. A tuple that no longer fits has to leave the page.">It stays the same, because the slot array absorbs every move of the tuple.</li>
+      <li data-option="c" data-explain="Most DBMSs don't store the record ID inside the tuple (SQLite's ROWID is the exception), and a stored copy wouldn't keep the location from changing.">It stays the same, because each tuple stores its own record ID in its header.</li>
+      <li data-option="d" data-explain="The lecture's update path moves the tuple to another page; it doesn't reject the update.">The update fails, because a record ID can never change once it has been assigned.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">t(x) holds 1, 3 and 6, and u(y) holds 2 and 5. Which rows does <code>SELECT x FROM t WHERE x &gt; ALL (SELECT y FROM u);</code> return?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is the answer for &gt; ANY, where 3 &gt; 2 is enough. ALL also needs 3 &gt; 5.">3 and 6</li>
+      <li data-option="b" data-explain="1 is greater than neither 2 nor 5.">1, 3 and 6</li>
+      <li data-option="c" data-explain="ALL compares x with every row the subquery returns, however many there are.">No rows, because ALL needs a subquery that returns a single row</li>
+      <li data-option="d" data-explain="ALL requires x &gt; y for every row of the subquery, so x must exceed both 2 and 5. Only 6 does.">6 only</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>What stage 1 covers</h2>
+
+  <p>All of Project 1's replacer lives in <code>bufferpool/arc_replacer.go</code>. The pre-built parts are the <code>AccessType</code> and <code>ArcStatus</code> constants, the <code>FrameStatus</code> record with its constructor <code>newFrameStatus</code>, the fields of <code>ArcReplacer</code>, and <code>NewArcReplacer</code>, which creates four empty lists, two empty maps and p = 0. In this stage you replace four stubs:</p>
+  <ul>
+    <li><code>RecordAccess</code>, for two situations only: the frame is alive in MRU or MFU (case 1, a real cache hit), or the page is in no list at all (case 4).</li>
+    <li><code>SetEvictable</code>, <code>Size</code> and <code>Remove</code>, in full.</li>
+  </ul>
+  <p><code>Evict</code> stays a stub until the next lesson. Without it nothing ever becomes a ghost, so the ghost-hit cases 2 and 3 can't happen yet, and neither can the two "kill" steps of case 4, which remove ghosts. For now, a miss simply puts the page at the front of the MRU list. The stage-1 tests never call <code>Evict</code>. The <code>accessType</code> argument matters only for the optional leaderboard, so ignore it.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=2_sTdS4h-bY&amp;t=3843s">#05 Database Storage II, "Project 1 instructions" (1:04:03)</a>: Andy Pavlo introduces the three Project 1 tasks; the ARC replacer is the first.</p>
+
+  <h2>Choosing the data structures</h2>
+
+  <p>Slide 31 of Lecture #05 gives two hints for the replacer: the eviction algorithm must check each page's "pinned" status, and you may use the standard library's containers for the internal lists (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/05-storage2.pdf#page=96">Lecture #05, slide 31</a>). In Go that container is <code>container/list</code>, a doubly linked list. The starter already declares the four lists as <code>*list.List</code> fields, <code>mru</code>, <code>mfu</code>, <code>mruGhost</code> and <code>mfuGhost</code>, with the front of each list as its most recent end. The right structures follow from what each method has to do quickly:</p>
+
+  <table>
+    <tr><th>Operation</th><th>How it finds the entry</th><th>What it then changes</th></tr>
+    <tr><td><code>RecordAccess</code> on an alive frame</td><td><code>aliveMap[frameID]</code></td><td>unlinks the entry from MRU or MFU and pushes it to the front of MFU</td></tr>
+    <tr><td><code>RecordAccess</code> on a ghost (next lesson)</td><td><code>ghostMap[pageID]</code></td><td>unlinks the ghost and pushes a new alive entry to the front of MFU</td></tr>
+    <tr><td><code>RecordAccess</code> on a new page</td><td>neither map has it</td><td>pushes a new entry to the front of MRU</td></tr>
+    <tr><td><code>SetEvictable</code></td><td><code>aliveMap[frameID]</code></td><td>flips one flag and the evictable count</td></tr>
+    <tr><td><code>Remove</code></td><td><code>aliveMap[frameID]</code></td><td>unlinks the entry from its list</td></tr>
+    <tr><td><code>Evict</code> (next lesson)</td><td>walks MRU or MFU from its back</td><td>turns the victim into a ghost</td></tr>
+  </table>
+
+  <p>Every row except <code>Evict</code> starts with a map lookup, and every row ends with a list operation in the middle of a list. A linked list removes an element in constant time, but only if you already hold that element: <code>list.Remove</code> takes a <code>*list.Element</code>, not the value stored in it. The starter's maps lead to a <code>*FrameStatus</code>, not to an element. So each entry needs a way back to its own element. You can add an element field to <code>FrameStatus</code>, or change the maps to hold <code>*list.Element</code> and keep the <code>*FrameStatus</code> as the element's <code>Value</code>. The starter's comments allow both. Either way, every operation in the table except <code>Evict</code> does a constant amount of work.</p>
+
+  <p>The alternative, walking a list until you find the entry, costs up to 262,144 steps per access in <code>TestArcBookkeepingRecordAccessPerformance</code>. That test, BusTub's performance test, fills a replacer with 262,144 frames, all alive and evictable, then makes 10 rounds of 262,144 hits starting in the middle of the list. It fails if a round takes 3 seconds or more on average. With constant-time operations, a round under <code>-race</code> takes a fraction of a second. With a list walk per access, a round takes billions of steps, and the run sits silent until <code>go test</code> gives up. The writeup's Gradescope notes give the same warning: a timeout may mean that "your <code>ArcReplacer</code> is not efficient enough".</p>
+
+  <h3>Why alive entries are keyed by frame ID and ghosts by page ID</h3>
+
+  <p>The writeup states the relationship between the two IDs: a page in the buffer pool maps one-to-one to a frame, that mapping doesn't change until the page is evicted, and an evicted page is associated with no frame at all.</p>
+  <ul>
+    <li>An <strong>alive entry</strong> is an entry in MRU or MFU, for a page that is in the buffer pool right now. Its frame ID and page ID identify it equally well. The starter keys <code>aliveMap</code> by <code>common.FrameID</code>, which BusTub's comment calls slightly more intuitive and which guarantees one record per frame. It is also the ID that <code>SetEvictable</code> and <code>Remove</code> receive.</li>
+    <li>A <strong>ghost entry</strong> is an entry in one of the ghost lists. Its page has no frame any more: the buffer pool reuses a frame as soon as <code>Evict</code> returns it. In SampleTest, frame 2 holds page 2, page 2 is evicted, and frame 2 then holds page 7 while page 2 is still a ghost. When page 2 is read again, it arrives in frame 3. Only its page ID can find its ghost, so <code>ghostMap</code> is keyed by <code>common.PageID</code>.</li>
+  </ul>
+  <p>That fixes the order of lookups in <code>RecordAccess(frameID, pageID, …)</code>: first <code>aliveMap[frameID]</code> (a hit), then <code>ghostMap[pageID]</code> (a ghost hit, next lesson), and otherwise a miss. Here is SampleTest after its first three evictions, the state from step 3 of the previous lesson's trace, with the maps added:</p>
+
+<pre><code>aliveMap   frame 6 → p(6,f6)    frame 5 → (5,f5)    frame 1 → (1,f1)
+ghostMap   page 4 → 4           page 3 → 3          page 2 → 2
+
+mruGhost   [4, 3, 2]            mru   [p(6,f6), (5,f5)]
+mfuGhost   []                   mfu   [(1,f1)]</code></pre>
+
+  <p>Each map value is the entry itself, and the entry knows its own list element, so any of them can be unlinked in constant time.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p><code>container/list</code> has two traps for this project. First, <code>MoveToFront</code> only reorders elements inside the list you call it on. Moving an entry from MRU to MFU takes <code>r.mru.Remove(e)</code> followed by <code>r.mfu.PushFront(v)</code>. Second, <code>Remove</code> and <code>MoveToFront</code> silently do nothing when the element belongs to another list: no panic, no error. That is why each entry records which list holds it (<code>arcStatus</code>). <code>PushFront</code> wraps the value in a new <code>*list.Element</code>, so after every move, store the new element. An element's <code>Value</code> has type <code>any</code>; get your entry back with a type assertion, <code>e.Value.(*FrameStatus)</code>.</p>
+  </div>
+
+  <h2>The rules for stage 1</h2>
+
+  <p>These come from the writeup and from the doc comments in <code>arc_replacer.go</code>, which the stage-1 tests check one by one.</p>
+  <ol>
+    <li>One latch guards everything. Every exported method locks <code>r.latch</code> at the top and holds it for the whole body. <code>sync.Mutex</code> isn't reentrant, so a method that holds the latch must not call another exported method (<code>SetEvictable</code> calling <code>Size</code>, for example); put shared code in unexported helpers that expect the caller to hold the latch.</li>
+    <li>A new frame enters non-evictable. The buffer pool calls <code>RecordAccess</code> right after pinning the page, so the page can't be a victim yet. Only <code>SetEvictable</code> changes the flag. <code>RecordAccess</code> never changes <code>Size()</code>.</li>
+    <li>A hit moves the entry to the front of MFU, whether it was in MRU (its second access) or already in MFU (now its most recent entry). The evictable flag stays as it was, and p doesn't change.</li>
+    <li>A frame ID is valid from 0 to the capacity, inclusive. <code>SetEvictable</code> panics on a negative ID or one larger than <code>replacerSize</code>. An ID equal to the capacity is valid, because BusTub's SampleTest uses frame 7 in a replacer of capacity 7. A valid frame that the replacer doesn't track is a no-op, and it must leave no record behind.</li>
+    <li><code>Size()</code> counts alive, evictable entries. SampleTest's comment: "The size of the replacer is the number of frames that can be evicted, <em>not</em> the total number of frames entered." <code>SetEvictable</code> changes the count only when the flag really flips.</li>
+    <li><code>Remove</code> forgets the page. An unknown frame is a no-op. A non-evictable frame panics, and the failed call changes nothing. An evictable frame leaves its list and <code>aliveMap</code>, <code>Size()</code> drops by 1, and no ghost entry is created: the writeup says to "remove a frame and its corresponding page from the replacer", and <code>Remove</code> is called only for deleted pages, whose IDs <code>NewPage</code>'s ever-increasing counter never hands out again. <code>Remove</code> takes a frame ID, so it can never reach a ghost.</li>
+  </ol>
+  <p>Both panics must be deliberate, a <code>panic</code> with a message. The tests' <code>expectPanic</code> helper rejects a runtime error such as a nil-pointer dereference, and rejects the starter's <code>TODO(P1)</code> panic.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Write <code>defer r.latch.Unlock()</code> on the line after <code>r.latch.Lock()</code>. Go runs deferred calls while a panic unwinds the stack, so the latch is released even when <code>SetEvictable</code> or <code>Remove</code> panics. With <code>Unlock</code> as the last statement instead, a panic skips it. <code>TestArcBookkeepingInvalidFrameID</code> recovers the panic and calls the replacer again, and that call waits for the latch forever. Validating the frame ID before locking also works, because <code>replacerSize</code> never changes.</p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">A replacer of capacity 4 starts empty. These calls run in order (every <code>RecordAccess</code> passes <code>AccessUnknown</code>): <code>RecordAccess(0, 10)</code>, <code>RecordAccess(1, 11)</code>, <code>RecordAccess(2, 12)</code>; <code>SetEvictable(0, true)</code> twice; <code>SetEvictable(1, true)</code>, <code>SetEvictable(1, false)</code>, <code>SetEvictable(1, true)</code>; then <code>RecordAccess(0, 10)</code>, <code>RecordAccess(1, 11)</code> and <code>RecordAccess(0, 10)</code>. What are the MFU list, front to back, and <code>Size()</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The third access hits page 10 inside MFU and moves it to the front, ahead of page 11.">MFU = [(11,f1), (10,f0)], and <code>Size()</code> = 2</li>
+      <li data-option="b" data-explain="Size() counts evictable entries only. Frame 2 (page 12) was never made evictable, so the count is 2, not the 3 tracked frames.">MFU = [(10,f0), (11,f1)], and <code>Size()</code> = 3</li>
+      <li data-option="c" data-explain="The second SetEvictable(0, true) changes nothing, and frame 1's three calls end with it evictable, so frames 0 and 1 count: Size() = 2. Each hit moves its page to the front of MFU, from MRU the first two times and from inside MFU the third time, so page 10 ends up ahead of page 11. Page 12 stays alone in MRU, pinned.">MFU = [(10,f0), (11,f1)], and <code>Size()</code> = 2</li>
+      <li data-option="d" data-explain="A hit leaves the evictable flag as it was. Only SetEvictable changes it.">MFU = [(10,f0), (11,f1)], and <code>Size()</code> = 0</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Frame 1 holds page 13, which is evictable and sits in the MRU list. A test calls <code>Remove(1)</code>, then <code>RecordAccess(1, 13, AccessUnknown)</code>. What does the second call do?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Remove forgot page 13 completely, so it is in no list: a plain miss (case 4). A new, non-evictable entry goes to the front of MRU, and neither p nor Size() changes. Frame 1 is a normal, reusable frame again.">It is a plain miss: page 13 goes to the front of MRU as a new, non-evictable entry.</li>
+      <li data-option="b" data-explain="Remove leaves no ghost behind; the writeup says it removes the frame and its corresponding page from the replacer.">It is a ghost hit: page 13 goes from the MRU ghost list to the front of MFU.</li>
+      <li data-option="c" data-explain="Remove drops the entry and decrements Size(); it doesn't just change the flag.">It is a hit: Remove only made frame 1 non-evictable, so page 13 moves to MFU.</li>
+      <li data-option="d" data-explain="Frames are reused all the time. TestArcBookkeepingRemove re-enters a removed frame with a new page and expects a fresh entry.">It panics, because a removed frame can't be passed to the replacer again.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">To handle a hit on an MRU entry, a first draft calls <code>r.mfu.MoveToFront(st.elem)</code>, where <code>st.elem</code> is the entry's element in <code>r.mru</code>, then sets <code>st.arcStatus = ArcMFU</code>. What happens?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="container/list checks which list the element belongs to and returns without doing anything; it doesn't panic.">It panics, because the element belongs to a different list.</li>
+      <li data-option="b" data-explain="MoveToFront only reorders elements inside the list it is called on.">The entry moves from the MRU list to the front of the MFU list.</li>
+      <li data-option="c" data-explain="Every element has the type *list.Element, so the call compiles.">It doesn't compile, because <code>MoveToFront</code> rejects another list's element.</li>
+      <li data-option="d" data-explain="MoveToFront leaves the list unchanged when the element belongs to another list, and reports nothing. The stage-1 tests check counts rather than list order, so this draft passes them. The stage-2 tests then fail with wrong victims, for example Evict() = 1, want frame 2 in TestArcEvictionSampleTest. A move between lists takes Remove on the old list and PushFront on the new one.">Nothing moves, and no error is reported: the entry stays in the MRU list.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Your <code>SetEvictable</code> calls <code>r.latch.Lock()</code> first and <code>r.latch.Unlock()</code> as its last statement, with no <code>defer</code>. <code>TestArcBookkeepingInvalidFrameID</code> calls <code>SetEvictable(-1, true)</code>, which panics as required, and the test recovers the panic. What happens on its next call to the replacer?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Go releases nothing automatically when a panic unwinds; only deferred calls run.">It runs normally, because unwinding a panic releases the goroutine's mutexes.</li>
+      <li data-option="b" data-explain="The panic skipped the Unlock at the end of the method. The test's next call, SetEvictable(4, true), waits for the latch forever, and the run ends only at go test's timeout with panic: test timed out, naming this test. With defer r.latch.Unlock() right after Lock, the deferred call runs during the unwinding and releases the latch.">It blocks forever on the latch, and the run hangs until <code>go test</code>'s timeout.</li>
+      <li data-option="c" data-explain="A latch that is never released isn't a data race. The second goroutine simply waits.">The race detector reports a data race and fails the test at once.</li>
+      <li data-option="d" data-explain="A sync.Mutex has no owner and no recovery mechanism of that kind.">The mutex notices that its holder panicked and unlocks itself on the next <code>Lock</code>.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">In SampleTest, frame 2 first holds page 2. Page 2 is evicted, frame 2 is reused for page 7, and later page 2 is read again into frame 3. Why does the replacer index ghost entries by page ID rather than by frame ID?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="PageID and FrameID are both int32 types; memory isn't the reason.">Page IDs take less memory than frame IDs, so the ghost map stays smaller.</li>
+      <li data-option="b" data-explain="The writeup: an evicted page is associated with no frame. Frame 2 holds page 7 while page 2 is still a ghost, and page 2 comes back in frame 3, so only the page ID can find its ghost entry.">An evicted page has no frame: its old frame may hold another page, and it returns in whatever frame is free.</li>
+      <li data-option="c" data-explain="RecordAccess always receives both IDs; the frame is the one the page has just been read into.">The buffer pool passes no frame ID to <code>RecordAccess</code> when a page comes back from disk.</li>
+      <li data-option="d" data-explain="A ghost reserves nothing. Evict hands its frame to the buffer pool, which reuses it right away.">A ghost entry keeps its old frame reserved, so two ghosts could share one frame ID.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Build it: ARC bookkeeping (stage P1.1)</h2>
+
+  <p>Every edit in this stage is in <code>bufferpool/arc_replacer.go</code>; leave the <code>Evict</code> stub alone. Run commands from <code>go_db_internals/intro_to_db</code>. You can run the stage's test command after any task: the tests of methods you haven't written yet fail with <code>panic: TODO(P1): ArcReplacer.Remove not implemented</code> or similar, and the rest show your progress. Add <code>-v</code> after the regex to see each test's name and result.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="p11-entry-element">
+      <div class="todo-item-head">
+        <input type="checkbox" id="p11-entry-element-cb">
+        <label for="p11-entry-element-cb">Give every replacer entry a constant-time path to its own list element.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Decide what the list elements hold and how a map lookup reaches the element. The <code>FrameStatus</code> struct and the two maps are yours to change.</p>
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p><code>list.Remove</code> and <code>PushFront</code> run in constant time only when you already hold the <code>*list.Element</code>. After <code>aliveMap[frameID]</code> hands you an entry, how do you get to its element without walking the list?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Store a <code>*FrameStatus</code> as each element's <code>Value</code>, and add a field to <code>FrameStatus</code> that holds the entry's own element. Every time you push the entry onto a list, save the element that <code>PushFront</code> returns. (Changing the maps to hold <code>*list.Element</code> works as well.) A small helper such as <code>listOf(status ArcStatus) *list.List</code> saves you a <code>switch</code> in every method.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>type FrameStatus struct {
+	pageID    common.PageID
+	frameID   common.FrameID
+	evictable bool
+	arcStatus ArcStatus     // which of the four lists holds the entry
+	elem      *list.Element // the entry's element in that list; elem.Value is the entry
+}</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="p11-record-new">
+      <div class="todo-item-head">
+        <input type="checkbox" id="p11-record-new-cb">
+        <label for="p11-record-new-cb">In <code>RecordAccess</code>, add a frame the replacer doesn't track to the front of the MRU list, non-evictable.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Lock the latch for the whole method. Check <code>aliveMap[frameID]</code> first (the next task handles a hit there). Otherwise the page is new: it goes to the front of <code>mru</code>, not evictable, indexed by its frame ID. <code>Size()</code> and p don't change. In the next lesson you'll insert the ghost lookup and the case-4 kills before this step.</p>
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which fields of the replacer must change when a page enters, and which must stay exactly as they are? Think about <code>currSize</code> and <code>mruTargetSize</code>.</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Lock, and defer the unlock. Look the frame up in <code>aliveMap</code>; if it's there, handle the hit and return. Otherwise build an entry with the page ID, the frame ID, <code>evictable</code> false and status <code>ArcMRU</code>, push it to the front of <code>mru</code>, save the element in the entry and add the entry to <code>aliveMap</code>.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>st := newFrameStatus(pageID, frameID, false, ArcMRU)
+st.elem = r.mru.PushFront(st)
+r.aliveMap[frameID] = st</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="p11-record-hit">
+      <div class="todo-item-head">
+        <input type="checkbox" id="p11-record-hit-cb">
+        <label for="p11-record-hit-cb">In <code>RecordAccess</code>, move a frame that is already alive to the front of the MFU list, keeping its evictable flag.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>This is case 1, a real cache hit. The entry may be in MRU or already in MFU; it ends at the front of MFU either way. Its evictable flag, <code>Size()</code> and p stay unchanged.</p>
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>A page found in MRU has now been accessed twice, so it belongs in MFU. A page already in MFU just becomes MFU's most recent entry. Which <code>container/list</code> calls work across two lists, and which work only inside one?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Unlink the entry from the list its status names, set its status to <code>ArcMFU</code>, push it to the front of <code>mfu</code> and save the new element. Don't touch <code>evictable</code>: SampleTest's first hit is on an evictable frame, and its <code>Size()</code> must stay 5 afterwards. Return without looking at the ghost map.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>r.listOf(st.arcStatus).Remove(st.elem) // whichever list holds it now
+st.elem = r.mfu.PushFront(st)          // PushFront returns a new element</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="p11-set-evictable">
+      <div class="todo-item-head">
+        <input type="checkbox" id="p11-set-evictable-cb">
+        <label for="p11-set-evictable-cb">Implement <code>SetEvictable</code>: panic on an invalid frame ID, ignore untracked frames, and change the count only on a real flip.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Valid IDs run from 0 to <code>replacerSize</code> inclusive. A false-to-true flip adds 1 to <code>currSize</code>, a true-to-false flip subtracts 1, and anything else changes nothing.</p>
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Two valid inputs must change nothing at all: a frame the replacer doesn't track, and a flag that already has the requested value. What would happen to <code>Size()</code> if either of them slipped through?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Validate first: <code>frameID &lt; 0 || int(frameID) &gt; r.replacerSize</code> panics with a message. Then, under the latch, look the frame up in <code>aliveMap</code>. If it's missing, or its flag already equals <code>evictable</code>, return. Otherwise set the flag and adjust <code>currSize</code>. Don't create an entry for an untracked frame: <code>TestArcBookkeepingSetEvictableUntrackedFrame</code> checks that the frame later enters non-evictable.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>st, ok := r.aliveMap[frameID]
+if !ok || st.evictable == evictable {
+	return // untracked frame, or nothing to change
+}</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="p11-size">
+      <div class="todo-item-head">
+        <input type="checkbox" id="p11-size-cb">
+        <label for="p11-size-cb">Implement <code>Size</code> so that it reports the number of evictable frames, read under the latch.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>The tests call <code>Size()</code> after almost every step. Should it count anything, or report a number that the other methods keep up to date?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Return <code>currSize</code> while holding the latch. Reading it without the latch is a data race with <code>SetEvictable</code>; <code>-race</code> reports it as <code>WARNING: DATA RACE</code> in <code>TestArcBookkeepingConcurrentAccess</code>. Returning the length of <code>aliveMap</code> instead counts pinned frames too.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>// currSize changes in exactly these places:
+//   SetEvictable   false to true: +1    true to false: -1
+//   Remove         an evictable entry leaves: -1
+//   Evict (P1.2)   the victim leaves: -1</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="p11-remove">
+      <div class="todo-item-head">
+        <input type="checkbox" id="p11-remove-cb">
+        <label for="p11-remove-cb">Implement <code>Remove</code>: ignore unknown frames, panic on a pinned frame, and drop an evictable frame without leaving a ghost.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>A pinned frame panics before anything changes, so <code>Size()</code> and the lists look exactly as they did before the call. An evictable frame leaves its list and <code>aliveMap</code>, and <code>currSize</code> drops by 1. The ghost lists and p stay untouched.</p>
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p><code>Remove</code> is for deleted pages. Should the replacer keep remembering a page whose ID will never be used again? And what may a failed <code>Remove</code> leave behind?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Under the latch, look the frame up in <code>aliveMap</code>. Missing: return. Not evictable: panic with a message. Otherwise unlink the element from its list, delete the map entry and decrement <code>currSize</code>. For a readable message, use <code>fmt.Sprintf</code> and add <code>"fmt"</code> to the imports.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>if !st.evictable {
+	panic(fmt.Sprintf("bufferpool: Remove on non-evictable frame %d", frameID))
+}</code></pre></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage P1.1</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestArcBookkeeping' ./bufferpool/</code></pre>
+    <p>It runs the ten stage-1 tests: <code>TestArcBookkeepingSampleTestPrefix</code> and <code>TestArcBookkeepingSampleTest2Prefix</code> (BusTub's two sample tests up to their first <code>Evict</code>), <code>TestArcBookkeepingRecordAccessPerformance</code>, and seven extra tests standing in for CMU's hidden ones: <code>NewFramesStartNonEvictable</code>, <code>AccessKeepsEvictableFlag</code>, <code>SetEvictableUntrackedFrame</code>, <code>InvalidFrameID</code>, <code>Remove</code>, <code>RemoveNonEvictablePanics</code> and <code>ConcurrentAccess</code>, each with the <code>TestArcBookkeeping</code> prefix. Success is a single line, <code>ok  	intro_to_db/bufferpool</code> followed by the time, about 5 seconds, most of it the performance test under <code>-race</code>.</p>
+    <p>A typical failure names the test and the assertion, then ends with <code>FAIL</code>:</p>
+<pre><code>--- FAIL: TestArcBookkeepingNewFramesStartNonEvictable (0.00s)
+    arc_replacer_extra_test.go:42: Size() = 4, want 0
+FAIL
+FAIL	intro_to_db/bufferpool	4.178s</code></pre>
+    <p>That one means new frames entered evictable, or <code>Size()</code> counts tracked frames. A <code>WARNING: DATA RACE</code> points to a method that touches the replacer's state without the latch. If the command runs for more than a minute without output, either a panic left the latch locked (the hang is in <code>TestArcBookkeepingInvalidFrameID</code>) or <code>RecordAccess</code> walks a list (the hang is in the performance test). Stop it and rerun with <code>-timeout 120s</code> after the regex; when the timeout fires, <code>go test</code> names the running test and prints every goroutine's stack. While you iterate, <code>-short</code> after the regex skips the performance test; run the checkpoint itself without it.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why the maps lead to entries rather than straight to list elements, why a hit keeps the evictable flag, or what the stack dump of a hanging run is telling you. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: the CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/project1/">Project #1 writeup</a>, Task #1 (method list, "ARC Replacement Algorithm", "Implementation") and the Gradescope notes; Lecture #05 <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/05-storage2.pdf#page=96">slide 31</a>; BusTub <code>src/include/buffer/arc_replacer.h</code>, <code>src/buffer/arc_replacer.cpp</code>, <code>test/buffer/arc_replacer_test.cpp</code> and <code>test/buffer/arc_replacer_performance_test.cpp</code> at commit d49b823; this course's <code>bufferpool/arc_replacer.go</code> and its three ARC test files; the Go documentation of <a href="https://pkg.go.dev/container/list">container/list</a>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u2-02-replacement-policies.html">← Replacement Policies: LRU, CLOCK, LRU-K, ARC</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u2-04-p1-arc-eviction.html">Next: P1.2 ARC Replacer: Eviction and Ghost Lists →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

@@ -1,0 +1,186 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 0 · Lesson 0 · Setup: Sparse Checkout, Go, and a Tour of the Code</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 0 · Lesson 0</p>
+  <h1>Setup: Sparse Checkout, Go, and a Tour of the Code</h1>
+  <p class="subtitle">Get only this course's Go code onto your Mac, confirm the toolchain works, and learn where each of CMU's four projects lives in the codebase.</p>
+
+  <p class="lede">CMU's 15-445/645 projects are built on <strong>BusTub</strong>, a small disk-oriented relational database written in C++ for teaching. This course ports BusTub to Go as one module, <code>intro_to_db</code>, which lives inside the same repository as these lessons. The repository also holds every other course, so you'll download only the code directory. After that, a quick tour shows which packages are already built and which ones you'll write yourself.</p>
+
+  <h2>What you'll build</h2>
+
+  <p>A disk-oriented database keeps its data in fixed-size <em>pages</em> on disk and brings them into memory only as needed. BusTub layers its components so that each layer talks only to the one below it. The four CMU projects are four of those layers, built from the bottom up:</p>
+
+  <table>
+    <tr><th>CMU project</th><th>What it is</th><th>BusTub C++ (<code>src/</code>)</th><th>This course (Go)</th><th>Units</th></tr>
+    <tr><td><strong>P1</strong> Buffer Pool Manager</td><td>Caches disk pages in memory frames, decides which page to evict, and schedules disk I/O</td><td><code>buffer/</code>, <code>storage/disk/</code>, <code>storage/page/page_guard</code></td><td><code>bufferpool/</code></td><td>1–2</td></tr>
+    <tr><td><strong>P2</strong> B+Tree Index</td><td>An ordered index stored in buffer-pool pages, safe for concurrent readers and writers</td><td><code>storage/index/</code>, <code>storage/page/b_plus_tree_*</code></td><td><code>btree/</code></td><td>3–4</td></tr>
+    <tr><td><strong>P3</strong> Query Execution</td><td>Executors (scans, joins, aggregation, sort, …) plus optimizer rules that turn SQL plans into results</td><td><code>execution/</code>, <code>optimizer/</code></td><td><code>execution/</code></td><td>5–6</td></tr>
+    <tr><td><strong>P4</strong> Concurrency Control</td><td>Multi-version concurrency control (MVCC): timestamps, undo logs, garbage collection, and serializable verification</td><td><code>concurrency/</code></td><td><code>concurrency/</code></td><td>7–8</td></tr>
+  </table>
+
+  <p>Everything else comes pre-built, so your time goes into the four projects. That includes the shared types in <code>common/</code>, the disk manager in <code>storage/disk/</code>, and, from Unit 6, the SQL front end. The front end runs the real Postgres parser through <code>pg_query_go</code>, then a binder, planner and optimizer, so later units can run actual SQL against your executors. Today the module holds only what Project 1 needs. Each later unit's packages arrive with a <code>git pull</code> (see <a href="#later-units">Getting later units' code</a>).</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>The Go code keeps BusTub's names and structure and uses Go idioms where C++ ones don't carry over. Four mappings come up throughout the course:</p>
+    <ul>
+      <li>An RAII guard, whose destructor releases a pin or latch when the object goes out of scope, becomes an explicit <code>Drop()</code> method that you call with <code>defer guard.Drop()</code>.</li>
+      <li><code>std::promise&lt;bool&gt;</code> and <code>std::future</code>, a one-shot "this I/O finished" signal, become a capacity-1 <code>chan bool</code>.</li>
+      <li><code>std::optional&lt;T&gt;</code> becomes Go's <code>(T, bool)</code> return pair.</li>
+      <li>Latches (<code>std::mutex</code>, <code>std::shared_mutex</code>) become <code>sync.Mutex</code> and <code>sync.RWMutex</code>.</li>
+    </ul>
+  </div>
+
+  <h2>Tools on your Mac</h2>
+
+  <p>You need three things, installed once:</p>
+  <ul>
+    <li>The Xcode Command Line Tools, which provide <code>git</code> and the C compiler. Go's cgo needs that compiler for the Postgres parser in Unit 6. Check with <code>xcode-select -p</code>; if it prints an error, run <code>xcode-select --install</code>.</li>
+    <li>Go 1.24 or newer. Check with <code>go version</code>, and install or upgrade with <code>brew install go</code> or the macOS package from <a href="https://go.dev/dl/">go.dev/dl</a>. If your Go is at least 1.21 but older than 1.24, the <code>go</code> command downloads the right toolchain the first time you build, because <code>go.mod</code> asks for 1.24.</li>
+    <li>Git access to the private repository. If you already clone GitHub repositories over SSH, you're set. Otherwise run <code>brew install gh</code>, then <code>gh auth login</code>, and answer "yes" to <em>Authenticate Git with your GitHub credentials</em>. HTTPS clones then work without a password prompt.</li>
+  </ul>
+
+  <h2>Get the code: a shallow, sparse checkout</h2>
+
+  <p>Pick a parent folder; this lesson uses <code>~/code</code>. Run these four commands exactly:</p>
+
+<pre><code>mkdir -p ~/code &amp;&amp; cd ~/code
+git clone --depth 1 --filter=blob:none --sparse git@github.com:yannpaul/learning_with_teach.git
+cd learning_with_teach
+git sparse-checkout set go_db_internals/intro_to_db</code></pre>
+
+  <p>If you use HTTPS instead of SSH, swap the URL in the second command for <code>https://github.com/yannpaul/learning_with_teach.git</code>. Everything else is identical.</p>
+
+  <p>Each flag does one job:</p>
+  <ul>
+    <li><code>--depth 1</code> downloads only the latest commit, not the repository's history.</li>
+    <li><code>--filter=blob:none</code> skips file contents ("blobs") until Git needs them. Files outside your checkout are never downloaded.</li>
+    <li><code>--sparse</code> starts the working tree with only the files at the repository root.</li>
+    <li><code>git sparse-checkout set go_db_internals/intro_to_db</code> adds the code directory to the working tree. Git now fetches just those blobs.</li>
+  </ul>
+
+  <p>Now look at what you have:</p>
+
+<pre><code>ls -a                      # .git  .gitignore  README.md  go_db_internals
+ls go_db_internals         # GLOSSARY.md  MISSION.md  NOTES.md  RESOURCES.md  index.html  intro_to_db
+cd go_db_internals/intro_to_db
+ls                         # README.md  bufferpool  common  go.mod  storage</code></pre>
+
+  <p>The extra top-level files (<code>README.md</code>, the course's own <code>.md</code> files and <code>index.html</code>) come from Git's default <em>cone mode</em>, which always includes the files sitting directly in each parent folder of the directory you asked for. They add up to a few kilobytes and you can ignore them. No other course's files are on your disk.</p>
+
+  <div class="callout">
+    <p class="callout-label">Already have a full clone?</p>
+    <p>If <code>learning_with_teach</code> is already on your Mac, you don't need a second copy. Run <code>git pull</code> in it, then <code>cd go_db_internals/intro_to_db</code>.</p>
+  </div>
+
+  <h2>First run</h2>
+
+  <p>From <code>go_db_internals/intro_to_db</code>:</p>
+
+<pre><code>go version          # go1.24 or newer
+go build ./...      # compiles every package, including the stubs you'll fill in
+go vet ./...
+go test ./...</code></pre>
+
+  <p>The last command should print <code>ok</code> for the pre-built packages and <code>FAIL</code> for <code>intro_to_db/bufferpool</code>, which is expected. Every method you'll implement starts as a stub that panics with <code>TODO(P1): … not implemented</code>, and the tests report that panic as a failure, so they fail at once instead of hanging. Each project lesson gives you a <code>go test -run '…'</code> command that targets the tests for its stage. You're done with a stage when that command prints <code>ok</code>.</p>
+
+  <p>From Project 1 on, several goroutines share the buffer pool, so run the tests with Go's race detector as well: <code>go test -race ./bufferpool/</code>. You used <code>-race</code> in the concurrency course, and on macOS it needs no extra setup.</p>
+
+  <h2>Your workflow</h2>
+
+  <p>Keep your work on a local branch of its own, and commit whenever a stage passes:</p>
+
+<pre><code>git switch -c my-work
+# …implement a stage, run its checkpoint…
+git add -A &amp;&amp; git commit -m "P1: ARC bookkeeping passes"</code></pre>
+
+  <p>Don't push this branch, and don't share your solutions publicly. CMU asks everyone who works through its projects to keep their implementations private; BusTub's README makes that the condition for using CMU's public autograder. The repository is private, so local commits are fine.</p>
+
+  <h3 id="later-units">Getting later units' code</h3>
+
+  <p>New packages (the B+tree, the SQL front end, and so on) are added to <code>main</code> as the course grows. To pull them into your branch:</p>
+
+<pre><code>git pull --no-rebase origin main</code></pre>
+
+  <p>The merge is clean because the course never changes a starter file after it ships. New units only add files, so nothing collides with your edits.</p>
+
+  <h3>When you're truly stuck</h3>
+
+  <p>Each task in a project lesson has three hints, from gentlest to strongest:</p>
+  <ol>
+    <li><em>what to think about</em></li>
+    <li><em>the approach</em>, in words or short pseudocode</li>
+    <li><em>one key fragment</em> of a few lines</li>
+  </ol>
+  <p>None of them shows a whole method. A complete reference implementation lives on a separate branch, <code>go-db-internals-solutions</code>, for comparing after you pass or as a last resort. To read one file from it without leaving your branch:</p>
+
+<pre><code>git fetch --depth 1 origin go-db-internals-solutions
+git show FETCH_HEAD:./bufferpool/arc_replacer.go     # run from go_db_internals/intro_to_db</code></pre>
+
+  <h2>How each lesson works</h2>
+  <ul>
+    <li><strong>Warm-up.</strong> Two or three quick questions on <em>earlier</em> lessons. Retrieving something you learned a few days ago is what makes it stick, so expect older material to keep coming back.</li>
+    <li><strong>Subject matter.</strong> The database concept, with figures from the CMU slides and links to the part of the lecture video where Andy Pavlo covers it.</li>
+    <li><strong>Check your understanding.</strong> Questions adapted from CMU's homeworks wherever possible, with answers checked against CMU's official solutions.</li>
+    <li><strong>Build it.</strong> In project lessons, a staged task list with hidden hints and a <code>go test</code> checkpoint for each stage. Optional stretch lessons cover CMU's performance leaderboards.</li>
+  </ul>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">After the four checkout commands, which statement describes your disk?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="--depth 1 fetches only the latest commit, and --filter=blob:none with --sparse means other courses' file contents are never downloaded.">Every course in the repository is present, at its latest commit.</li>
+      <li data-option="b" data-explain="Cone mode includes the code directory plus the files sitting directly in each of its parent folders (the repo root and go_db_internals/). Nothing from other courses is downloaded.">The intro_to_db code plus a few small files from its parent folders.</li>
+      <li data-option="c" data-explain="Cone mode always includes the files directly inside each parent folder, so README.md and the course's own .md files come along too.">Only the files under go_db_internals/intro_to_db and nothing else.</li>
+      <li data-option="d" data-explain="--depth 1 means a shallow clone: only the latest commit, not the history.">The repository's full commit history, with only intro_to_db checked out.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Your B+tree (Project 2) needs to read a node that's stored on page 42. Following BusTub's layering, how does it get that page?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Layers only talk to the layer directly below them. Reading the file directly would bypass the cache, and the buffer pool would no longer know which pages are in use.">It reads the page straight from the database file with the disk manager.</li>
+      <li data-option="b" data-explain="The executors (Project 3) sit above the index, not below it. They call the B+tree, not the other way around.">It asks the query executor, which fetches the page on its behalf.</li>
+      <li data-option="c" data-explain="Every component above the storage layer goes through the buffer pool. The pool returns a guard on the frame that holds the page, reading it from disk first if it isn't already cached.">It asks the buffer pool manager, which returns a guard on the page's frame.</li>
+      <li data-option="d" data-explain="Concurrency control (Project 4) manages transaction visibility and doesn't hand out pages.">It asks the transaction manager, which loads the page for it.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Why does the course promise never to change a starter file after it ships?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="You edit the starter files to implement each stage. If the course later changed one of them too, git pull would have to merge two edits to the same lines, which is a merge conflict. Adding only new files keeps every pull clean.">Your edits and the course's edits to the same file would conflict on <code>git pull</code>.</li>
+      <li data-option="b" data-explain="Sparse checkout limits which files are on disk, not which files can be updated. Pulls still update files inside your cone.">A sparse checkout can't receive changes to files it already has.</li>
+      <li data-option="c" data-explain="Go accepts changed files without trouble. The concern is merging your edits with the course's, not compiling.">Go refuses to build packages whose files changed after the first build.</li>
+      <li data-option="d" data-explain="The shallow clone has the latest commit and can fetch newer ones. Pulls bring in new commits normally.">A <code>--depth 1</code> clone can never pull new commits.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, the clone fails with "Repository not found" (an authentication problem), <code>go test ./...</code> shows something other than the expected <code>FAIL</code> in <code>bufferpool</code>, or you're not sure where your work should live. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/">course site</a> and <a href="https://15445.courses.cs.cmu.edu/fall2025/assignments.html">assignments page</a>; BusTub <a href="https://github.com/cmu-db/bustub">README</a> and <code>src/</code> layout at commit d49b823; Git documentation for <a href="https://git-scm.com/docs/git-clone">git clone</a> and <a href="https://git-scm.com/docs/git-sparse-checkout">git sparse-checkout</a>.</p>
+
+  <div class="lesson-nav">
+    <a href="../index.html">← Course contents</a>
+    <a href="./u0-01-relational-model.html">Next: The Relational Model &amp; Relational Algebra →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
