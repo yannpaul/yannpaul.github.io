@@ -95,7 +95,7 @@
 
   <p>Because CLOCK approximates LRU, it shares LRU's weakness: slide 20 lists both as susceptible to sequential flooding. Project 1 doesn't ask for CLOCK, LRU or LRU-K. BusTub has stub files for them, but the writeup requires only the ARC replacer, and the Go module ports only <code>ArcReplacer</code>.</p>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc">#04 Memory Management, slides 17–25</a>: replacement goals, LRU, CLOCK, sequential flooding, LFU, LRU-K and MySQL's approximation.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc&amp;t=2180s">#04 Memory Management, "Replacement policies" (36:20)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf#page=35">slides 17–25</a>: replacement goals, LRU, CLOCK, sequential flooding, LFU, LRU-K and MySQL's approximation.</p>
 
   <h2>ARC as the lecture presents it</h2>
 
@@ -124,7 +124,7 @@
 
   <p>In Project 1, MRU and MFU are names of lists, not eviction rules. The MRU list holds pages recently accessed exactly once, the MFU list holds pages recently accessed more than once, and nothing counts exact frequencies.</p>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc">#04 Memory Management, slides 26–31</a>: ARC's lists and lookup protocol, then localization and priority hints.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc&amp;t=3487s">#04 Memory Management, "MySQL and ARC algorithms" (58:07)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf#page=76">slides 26–31</a>: ARC's lists and lookup protocol, then localization and priority hints.</p>
 
   <h2>ARC as Project 1 specifies it</h2>
 

@@ -66,7 +66,7 @@
 
   <p>A write guard has to be exclusive because <code>Data</code> and <code>DataMut</code> return the frame's own <code>[]byte</code>, not a copy. A writer changes the very bytes that readers look at. If writers shared the latch, a reader could copy a record halfway through an update, a <code>Flush</code> could send a half-updated page to disk, and two writers could interleave their changes.</p>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc">#04 Memory Management, slides 10–11</a>: the per-page metadata a guard maintains (pin counter, dirty flag) and the difference between locks and latches.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc&amp;t=939s">#04 Memory Management, "Buffer pool internal data" (15:39)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf#page=16">slides 10–11</a>: the per-page metadata a guard maintains (pin counter, dirty flag) and the difference between locks and latches.</p>
 
   <h2>RAII in C++, Drop and defer in Go</h2>
 

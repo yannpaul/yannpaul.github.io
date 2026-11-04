@@ -94,7 +94,7 @@
 
   <p>Applications should never rely on record IDs to mean anything. They are physical, and they change: you'll see below that an update which no longer fits is written to a different page, under a new record ID.</p>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=PRLXdIMJhOg">#03 Database Storage I, slides 24–27</a>: the three layout approaches, the strawman, slotted pages (insert, delete, move) and record IDs.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=PRLXdIMJhOg&amp;t=2405s">#03 Database Storage I, "Page and Tuple Layout" (40:05)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/03-storage1.pdf#page=33">slides 24–27</a>: the three layout approaches, the strawman, slotted pages (insert, delete, move) and record IDs.</p>
 
   <h2>Tuple layout</h2>
 
@@ -152,7 +152,7 @@ fmt.Printf("0.3 = %.20f\n", 0.3)  // 0.3 = 0.29999999999999998890</code></pre>
 
   <p>Most DBMSs don't allow a tuple to exceed the size of a page. A value larger than that goes into separate <strong>overflow pages</strong>, and the tuple stores the value's size and location instead. PostgreSQL's version, TOAST, kicks in above 2 KB; MySQL uses overflow pages for values larger than half a page, and SQL Server for values larger than a page. Some systems can also keep a large value in an <strong>external file</strong> and treat it as a BLOB (Oracle's BFILE, Microsoft's FILESTREAM). The DBMS can't manipulate the contents of such a file, so it offers no durability or transaction protection for it.</p>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=PRLXdIMJhOg">#03 Database Storage I, slides 29–43</a>: tuple headers, word alignment, data representation, the rounding demo, NULLs and large values.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=PRLXdIMJhOg&amp;t=3151s">#03 Database Storage I, "Tuple and Attribute Storage" (52:31)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/03-storage1.pdf#page=49">slides 29–43</a>: tuple headers, word alignment, data representation, the rounding demo, NULLs and large values.</p>
 
   <h2>What tuple-oriented storage costs</h2>
 
@@ -258,6 +258,11 @@ fmt.Printf("0.3 = %.20f\n", 0.3)  // 0.3 = 0.29999999999999998890</code></pre>
       </div>
     </li>
   </ul>
+
+  <div class="callout"><!-- homework-box -->
+    <p class="callout-label">The homework behind these questions</p>
+    <p>The questions marked HW2 come from CMU's Homework #2: <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw2-clean.pdf#page=2">Question 1</a>, with the original figures. Work each one out on paper first, then click the option you got. The quiz tells you at once whether it matches CMU's official answer, and explains why. To compare your working step by step, open the official solutions for <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw2-sols.pdf#page=2">Question 1</a>.</p>
+  </div>
 
   <h2>Check your understanding</h2>
 

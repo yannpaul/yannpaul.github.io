@@ -94,7 +94,7 @@ INSERT INTO revisions VALUES (?,?…,?)</code></pre>
     <tr><td>Fast inserts, updates and deletes.<br>Good for queries that need the entire tuple (OLTP).<br>Can use index-organized physical storage for clustering.</td><td>Bad for scanning large portions of a table, or a subset of its attributes.<br>Terrible memory locality in access patterns.<br>Hard to compress, because one page mixes several value domains.</td></tr>
   </table>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=yWnToWrskXE">#06 Storage Models &amp; Compression, slides 6–17</a>: OLTP, OLAP and HTAP, the Wikipedia example, and NSM with its OLTP and OLAP examples.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=yWnToWrskXE&amp;t=448s">#06 Storage Models &amp; Compression, "Database workload types" (7:28)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/06-storage3.pdf#page=7">slides 6–17</a>: OLTP, OLAP and HTAP, the Wikipedia example, and NSM with its OLTP and OLAP examples.</p>
 
   <h2>DSM: the column store</h2>
 
@@ -141,7 +141,7 @@ INSERT INTO revisions VALUES (?,?…,?)</code></pre>
 
   <p>The rows are first partitioned horizontally into <strong>row groups</strong>. Within each row group, the attributes are partitioned vertically into <strong>column chunks</strong>, so each row group works like a small column store for its rows. Each row group has its own metadata header about its contents, and a global metadata directory records the offsets of the file's row groups. In immutable files, such as Parquet and ORC, that directory is stored in the footer.</p>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=yWnToWrskXE">#06 Storage Models &amp; Compression, slides 18–26</a>: DSM's layout and OLAP example, tuple identification, variable-length data, and PAX.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=yWnToWrskXE&amp;t=1585s">#06 Storage Models &amp; Compression, "Columnar storage models" (26:25)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/06-storage3.pdf#page=32">slides 18–26</a>: DSM's layout and OLAP example, tuple identification, variable-length data, and PAX.</p>
 
   <h2>Running OLTP and OLAP together</h2>
 
@@ -155,7 +155,7 @@ INSERT INTO revisions VALUES (?,?…,?)</code></pre>
 
   <p>The lecture's conclusion: choose the storage model for the target workload. OLTP means a row store; OLAP means a column store.</p>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=yWnToWrskXE">#06 Storage Models &amp; Compression, slides 48–54</a>: moving data from OLTP to OLAP, fractured mirrors and the delta store.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=yWnToWrskXE&amp;t=2342s">#06 Storage Models &amp; Compression, "Hybrid storage models" (39:02)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/06-storage3.pdf#page=83">slides 48–54</a>: moving data from OLTP to OLAP, fractured mirrors and the delta store.</p>
 
   <h2>Counting pages</h2>
 
@@ -229,6 +229,11 @@ INSERT INTO revisions VALUES (?,?…,?)</code></pre>
       </div>
     </li>
   </ul>
+
+  <div class="callout"><!-- homework-box -->
+    <p class="callout-label">The homework behind these questions</p>
+    <p>The questions marked HW2 come from CMU's Homework #2: <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw2-clean.pdf#page=3">Question 2</a>, with the original figures. Work each one out on paper first, then click the option you got. The quiz tells you at once whether it matches CMU's official answer, and explains why. To compare your working step by step, open the official solutions for <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw2-sols.pdf#page=3">Question 2</a>.</p>
+  </div>
 
   <h2>Check your understanding</h2>
 

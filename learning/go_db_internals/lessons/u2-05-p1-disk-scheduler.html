@@ -63,7 +63,7 @@
 
   <p>Project 1's scheduler is the smallest one that works: one first-in, first-out queue and one worker goroutine. Its only policy is order: requests run one at a time in the order they were queued, so a read scheduled after a write to the same page sees the write. The writeup holds even a parallel scheduler to that guarantee: several requests to one page must end up as if they were processed in order, and a single thread must get <strong>read-after-write consistency</strong>, meaning a read always sees that thread's earlier writes. The stage-3 tests check it.</p>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc">#04 Memory Management, slides 34–35</a>: why the DBMS keeps its own queues of page requests instead of leaving the order to the OS.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc&amp;t=4016s">#04 Memory Management, "Flushing and IO scheduling" (1:06:56)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf#page=88">slides 34–35</a>: why the DBMS keeps its own queues of page requests instead of leaving the order to the OS.</p>
 
   <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=2_sTdS4h-bY&amp;t=3843s">#05 Database Storage II, "Project 1 instructions" (1:04:03)</a>: Andy Pavlo walks through the three Project 1 tasks, the disk scheduler among them.</p>
 

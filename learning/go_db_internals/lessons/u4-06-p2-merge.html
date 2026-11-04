@@ -1,0 +1,345 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 4 · Lesson 6 · P2.6 Deletion: Merging and Root Collapse</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 4 · Lesson 6</p>
+  <h1>P2.6 Deletion: Merging and Root Collapse</h1>
+  <p class="subtitle">Finish Remove: merge an underflowing page into its neighbor when the sibling can't lend, repair internal pages by rotating or pulling down separators, collapse the root, and give every page that leaves the tree back to the buffer pool.</p>
+
+  <p class="lede">After the last lesson, a leaf that underflows can borrow only from a sibling with an entry to spare. When the sibling sits at its minimum, the two pages have to become one. A merge takes an entry out of the parent, so the parent can underflow in turn, and the repair climbs the tree until it reaches a page that is still full enough, or the root. This stage completes deletion for trees without tombstones, up to the tree losing a level or becoming empty.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Unit 4, Lesson 1: a tree has <code>LeafMaxSize</code> = 5 and <code>InternalMaxSize</code> = 4. What do its leaf and internal pages return from <code>MinSize</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Leaves round down, 5 / 2 = 2, and internal pages round up, (4 + 1) / 2 = 2. Neither is 3.">3 for leaves, 2 for internal pages.</li>
+      <li data-option="b" data-explain="Leaf MinSize is MaxSize / 2 rounded down: 2. Internal MinSize is (MaxSize + 1) / 2 in integer division: 5 / 2 = 2.">2 for both.</li>
+      <li data-option="c" data-explain="An internal page of max size 4 can't reach 3: 4 / 2 = 2, and (4 + 1) / 2 = 2 in integer division. A leaf would give 3 only if it rounded 5 / 2 up.">3 for both.</li>
+      <li data-option="d" data-explain="Rounding the internal page up from 4 / 2 = 2 still gives 2, because 4 is even.">2 for leaves, 3 for internal pages.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 2, Lesson 8: page 9 is in memory, unpinned and dirty, and <code>DeletePage(9)</code> is called. What happens to its modified bytes?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Writing a page that is being deleted is wasted work, and with the file manager a late write could claim a slot for a page that no longer exists.">They are written to disk first, so the delete never loses data.</li>
+      <li data-option="b" data-explain="Dirtiness doesn't block a delete; only a pin does.">Nothing: DeletePage returns false until the page has been flushed.</li>
+      <li data-option="c" data-explain="FlushAllPages never writes a deleted page: the delete removed it from the page table, so the flush can't find it.">They stay in the frame and are written by the next FlushAllPages.</li>
+      <li data-option="d" data-explain="An unpinned page can be deleted. Its frame is reset and returned to the free list without a write, and DeallocatePage frees its space on disk.">They are discarded: the frame is reset without a write, and the page is deallocated on disk.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 3, Lesson 8: on the lecture's tree, T1 runs Insert 25 with basic (pessimistic) latch crabbing. C is [23] and the leaf F is [23, 31], which is full. Which latches does T1 hold when it reaches F?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="F will split, and the split adds an entry to C, so C stays latched. C had room, so its ancestors A and B were released on the way down.">C and F, because F will split and C must take the new entry.</li>
+      <li data-option="b" data-explain="A was released at B and B at C, because each of those children had room.">A, B, C and F, because an insert keeps its whole path latched.</li>
+      <li data-option="c" data-explain="Splitting F inserts 31 into C, so C must be protected too.">Only F, because the leaf is the only node the insert changes.</li>
+      <li data-option="d" data-explain="B was released as soon as C turned out to be safe.">B, C and F, because only the root is released early.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Merging two leaves</h2>
+
+  <p>Stage 5 handled an underflowing page whose sibling holds more than <code>MinSize</code> entries. When the sibling holds exactly <code>MinSize</code>, nothing can be borrowed, and the doc comment of <code>Remove</code> says what happens: "merge the two pages: the right page of the pair moves into the left page and is deleted (<code>TracedBufferPoolManager.DeletePage</code>, after dropping its guard), and the separator between them leaves the parent".</p>
+
+  <p>"The right page of the pair" depends on which sibling was chosen. If the underflowing page used its right sibling, the sibling moves into the page. If it is a last child and used its left sibling, the page itself moves into the sibling and is the one deleted. Either way, entries only ever move leftwards, so the left page keeps its place in the leaf chain, and three things change besides the entries:</p>
+  <ul>
+    <li>the left leaf's next page ID becomes the right leaf's, which unlinks the right leaf from the chain;</li>
+    <li>the parent loses the separator and the child pointer of the right page, both at the right page's index, so its size drops by one;</li>
+    <li>the right page is deleted through the buffer pool, after its guard is dropped.</li>
+  </ul>
+
+  <p>With a leaf max size of 4 (min size 2), <code>TestBPlusTreeMergeLeafWithRight</code> removes 1 from <code>(3,5) / (|1,2) (|3,4) (|5,6)</code>. The leaf <code>[2]</code> underflows, its right sibling <code>[3,4]</code> is at its minimum, so <code>[3,4]</code> moves into it and the separator 3 leaves the root: <code>(5) / (|2,3,4) (|5,6)</code>. <code>...MergeLeafWithLeft</code> removes 6 instead, and the last leaf moves into <code>[3,4]</code>: <code>(3) / (|1,2) (|3,4,5)</code>.</p>
+
+  <p>The merged page always fits, which is why the min sizes were chosen as they were (Lesson 1). An underflowing leaf holds <code>MinSize − 1</code> entries and its sibling <code>MinSize</code>, so the merged leaf holds <code>2·MinSize − 1</code>, at most <code>MaxSize − 1</code> when <code>MinSize</code> is <code>MaxSize / 2</code> rounded down. That is below the size at which a leaf splits, so a merge can never trigger a split. For internal pages, rounding <code>MinSize</code> up gives at most <code>MaxSize</code> children after a merge, which an internal page may hold at rest.</p>
+
+  <h2>When the parent underflows</h2>
+
+  <p>A leaf merge removes one child from the parent. If the parent is the root, or still holds at least its <code>MinSize</code> children, the deletion is over. Otherwise the parent is repaired with the same rules, one level up: the right sibling under the grandparent if there is one, otherwise the left; borrow if the sibling holds more than <code>MinSize</code> children; merge if not. The repair stops at the first page that doesn't underflow, after a borrow, or at the root. The guards of the whole path are already in the write set, so a loop that walks up it, one level per iteration, can do the whole repair.</p>
+
+  <p>Internal pages need the parent's separator in both moves, because an internal page's key 0 is unused and the separator is the only key that bounds the leftmost child of the right page.</p>
+  <ul>
+    <li>An internal merge pulls the separator down. The right page's children are appended to the left page, and the separator from the parent becomes the key in front of the right page's first child, the slot that was invalid in the right page. Then the separator and the right page's pointer leave the parent.</li>
+    <li>An internal borrow rotates through the parent. Borrowing from the right sibling, the page gains the sibling's first child, with the parent's separator as its key; the sibling's key 1 moves up to replace the separator, and the sibling drops its first child. Borrowing from the left, the page gains the sibling's last child at the front, the old separator becomes the key in front of the page's previous first child, and the sibling's last key moves up.</li>
+  </ul>
+
+  <p>Two traces from the tests, with a leaf max size of 4 and an internal max size of 3 (internal min size 2):</p>
+  <ul>
+    <li>Merge: <code>(5,9) / (3) (7) (11) / (|1,2) (|3,4) (|5,6) (|7,8) (|9,10) (|11,12)</code>, remove 1. The first two leaves merge into <code>[2,3,4]</code>, leaving their parent <code>(3)</code> with one child. Its right sibling <code>(7)</code> holds 2 children, its minimum, so they merge: the separator 5 comes down between them, giving <code>(5,7)</code>, and the root loses 5: <code>(9) / (5,7) (11) / (|2,3,4) (|5,6) (|7,8) (|9,10) (|11,12)</code>.</li>
+    <li>Borrow: <code>(5) / (3) (7,9) / (|1,2) (|3,4) (|5,6) (|7,8) (|9,10)</code>, remove 1. The leaves merge as before, and the parent is left with one child. Its right sibling <code>(7,9)</code> holds 3 children, more than 2, so it lends its first child <code>[5,6]</code>: the root's 5 comes down as that child's key, the sibling's 7 goes up, and the result is <code>(7) / (5) (9) / (|2,3,4) (|5,6) (|7,8) (|9,10)</code>.</li>
+  </ul>
+
+  <p>The same "redistribute first" rule holds for internal pages. With an internal max size of 4, <code>TestBPlusTreeMergeInternalBorrow</code> expects the borrow above although the two internal pages would fit together, as <code>BorrowBeforeMerge</code> did for leaves.</p>
+
+  <h2>The root collapses</h2>
+
+  <p>The root has its own rules, because it has no parent and no sibling:</p>
+  <ul>
+    <li>A root leaf may hold a single entry. When its last entry goes, the tree is empty: delete the root page and record <code>common.InvalidPageID</code> in the header page. <code>IsEmpty</code> then returns true, and the next <code>Insert</code> starts a new root, as it did for the first key.</li>
+    <li>An internal root needs at least two children. When a merge below leaves it with one, that child becomes the root: write the child's page ID into the header page and delete the old root. This is the only way a B+tree loses a level, and like growth, it happens at the top, so every leaf stays at the same depth.</li>
+  </ul>
+
+  <p><code>TestBPlusTreeMergeRootCollapse</code> removes 1 from <code>(3) / (|1,2) (|3,4)</code>: the leaves merge into <code>[2,3,4]</code>, the root keeps one child, and that leaf becomes the root, with a page ID different from the old root's. Both cases change the header page, which is why <code>Remove</code> holds the header's write guard: the context's comment asks you to check that <code>ctx.HeaderPage</code> is not nil before changing the root.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L08-delete-merge-shrink-p115.png" alt="Delete 19, with Delete 15 greyed out above it. A red note reads The tree has shrunk in height. A single node holds 5, 9, 13 and 19, with five leaves below it: 1 and 3 under less than 5; 5 and 7 under 5 to 9; 9 and 11 under 9 to 13; 13 and 17 under 13 to 19; 20, 21 and 23 under at least 19." loading="lazy">
+    <figcaption>The lecture's Delete 19 ends with both repairs of this lesson: two inner nodes merged around the root's key 13, and the old root, left with one child, disappeared. In the Go tree, that last step is a header page update and a <code>DeletePage</code> of the old root (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/08-indexes1.pdf#page=115">Lecture #08, slide 40</a>).</figcaption>
+  </figure>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=u7ii_Lvm9rM&amp;t=2735s">#08 B+Trees, "B+ tree deletion operations" (45:35)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/08-indexes1.pdf#page=102">slides 36–40</a>: from the merge in Delete 19 to the tree shrinking by one level. Skip ahead past the borrow from the last lesson.</p>
+
+  <h2>Deleted pages go back to the buffer pool</h2>
+
+  <p>A merged-away page and an old root are no longer part of the tree, and nothing points to them any more. If the tree just forgets them, their page IDs stay allocated and their space on disk is never reused. The writeup's requirements forbid allocating memory for the tree outside the buffer pool, and the same discipline applies in reverse: pages leave through the buffer pool. Call <code>t.bpm.DeletePage(pageID)</code>, which forwards to your Project 1 <code>DeletePage</code>.</p>
+
+  <p>Order matters. Project 1's <code>DeletePage</code> "does nothing and returns false" while the page is pinned, and the tree's own guard is a pin. So drop the page's guard first, then delete it. If the guard is also in <code>ctx.WriteSet</code>, take it out of the slice too; <code>Drop</code> on a dropped guard does nothing, but a set that lists guards you no longer hold is easy to misuse later. The header page is never deleted, not even when the tree becomes empty: it belongs to the tree for its whole life.</p>
+
+  <p><code>TestBPlusTreeMergeDeletedPagesFreed</code> checks this with a disk manager that records every <code>DeletePage</code> it receives. It inserts 200 keys, removes 190, and then requires that every page that left the tree was deleted and that no page still in the tree was. CMU's tests don't check this, and the test depends on Project 1: your <code>DeletePage</code> must call the disk scheduler's <code>DeallocatePage</code>, which the P1.6 tests already required.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>A C++ <code>std::deque&lt;WritePageGuard&gt;</code> drops a guard when it is popped. A Go slice of <code>*WritePageGuard</code> does nothing of the kind: re-slicing with <code>ctx.WriteSet = ctx.WriteSet[:level]</code> forgets the pointers but leaves the latches and pins held. Drop the guards you remove, then re-slice. The reverse mistake is harmless but confusing: <code>ctx.Release()</code> calls <code>Drop</code> on whatever is still in the slice, and a second <code>Drop</code> of the same guard is a no-op.</p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Leaf max size 4, internal max size 4. The tree is <code>(3,5) / (|1,2) (|3,4) (|5,6)</code>, and 3 is removed. What is the tree afterwards, and which page is deleted?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The middle leaf has a right sibling, so the left one isn't used. And [1,2] is at its min size, so it couldn't lend anyway.">(2,5) / (|1) (|2,4) (|5,6), after borrowing 2 from the left; nothing is deleted.</li>
+      <li data-option="b" data-explain="The right sibling's page is the one that moves and is deleted, so the separator that leaves the parent is the one in front of it, 5, not 3.">(5) / (|1,2,4) (|5,6), with the middle leaf deleted.</li>
+      <li data-option="c" data-explain="[4] underflows. Its right sibling [5,6] is at its min size 2, so [5,6] moves into [4], giving [4,5,6], and the separator 5 leaves the root. The page that held [5,6] is deleted.">(3) / (|1,2) (|4,5,6), with the page that held [5,6] deleted.</li>
+      <li data-option="d" data-explain="One entry is below the min size of 2 for a non-root leaf, so the leaf must be repaired.">(3,5) / (|1,2) (|4) (|5,6), with nothing deleted.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Leaf max size 4, internal max size 3. The tree is <code>(5,9) / (3) (7) (11) / (|1,2) (|3,4) (|5,6) (|7,8) (|9,10) (|11,12)</code>, and 6 is removed. What is the result?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="[5] merges with its right sibling [7,8], leaving (7) with one child. Its right sibling (11) has 2 children, its min size, so they merge with 9 pulled down: (9,11). The root loses 9.">(5) / (3) (9,11) / (|1,2) (|3,4) (|5,7,8) (|9,10) (|11,12)</li>
+      <li data-option="b" data-explain="This merges the internal page with its left sibling. The doc comment uses the right sibling whenever there is one.">(9) / (3,5) (11) / (|1,2) (|3,4) (|5,7,8) (|9,10) (|11,12)</li>
+      <li data-option="c" data-explain="An internal page with one child is below the internal min size of 2, so the repair must continue upwards.">(5,9) / (3) () (11) / (|1,2) (|3,4) (|5,7,8) (|9,10) (|11,12)</li>
+      <li data-option="d" data-explain="The right sibling (11) holds exactly 2 children, its minimum, so it can't lend; only a sibling above MinSize lends.">(5,11) / (3) (9) (12) / (|1,2) (|3,4) (|5,7,8) (|9,10) (|11,12)</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Leaf max size 4, internal max size 4. The tree is <code>(3) / (|1,2) (|3,4)</code>, and 4 is removed. For which pages does <code>Remove</code> call <code>DeletePage</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The left leaf survives the merge: it receives [3] and becomes the new root.">The left leaf, which held [1,2], and the old root.</li>
+      <li data-option="b" data-explain="The header page belongs to the tree for its whole life; it only records the new root ID.">The old root and the header page.</li>
+      <li data-option="c" data-explain="The old root is left with a single child, so it is replaced and must be deleted too.">Only the leaf that held [3,4].</li>
+      <li data-option="d" data-explain="[3] is the last child, so it uses its left sibling [1,2], which is at its minimum. [3] moves into [1,2] and its page is deleted; the root keeps one child, so [1,2,3] becomes the root and the old root is deleted.">The leaf that held [3,4] and the old root.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A merge calls <code>t.bpm.DeletePage(rightID)</code> while it still holds the write guard on <code>rightID</code>, and drops the guard later in <code>ctx.Release()</code>. What happens?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="DeletePage never waits for a guard; it checks the pin count and returns at once.">DeletePage blocks until the guard is dropped, then deletes the page.</li>
+      <li data-option="b" data-explain="The guard holds a pin, so Project 1's DeletePage returns false and changes nothing. The page stays allocated though nothing points to it, and TestBPlusTreeMergeDeletedPagesFreed reports it among the pages that were never deleted.">DeletePage returns false because the page is pinned, so the page leaks.</li>
+      <li data-option="c" data-explain="Deleting a pinned page would panic in the replacer's Remove, which is why DeletePage checks the pin count first and refuses.">The page is deleted, and the later Drop panics on a frame that is gone.</li>
+      <li data-option="d" data-explain="A pinned page can't be deleted at all, dirty or not; nothing is written or deallocated.">The page is written to disk and then deallocated when the guard is dropped.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Build it: merging and root collapse (stage P2.6)</h2>
+
+  <p>You extend <code>Remove</code> in <code>btree/b_plus_tree.go</code> and add helpers to the two node page files. Run commands from <code>go_db_internals/intro_to_db</code>. The rules, in plain words:</p>
+  <ul>
+    <li>Sibling: the right one under the same parent if there is one, otherwise the left. Borrow if it holds more than <code>MinSize</code>; merge if it holds exactly <code>MinSize</code>. The same for leaves and internal pages.</li>
+    <li>A merge moves the right page of the pair into the left one. Leaves: relink the chain and remove the separator from the parent. Internal pages: the separator comes down in front of the right page's first child.</li>
+    <li>After a merge, check the parent; stop at a page that doesn't underflow, after a borrow, or at the root.</li>
+    <li>Root: an empty root leaf empties the tree (header root <code>common.InvalidPageID</code>); an internal root with one child is replaced by that child.</li>
+    <li>Every page that leaves the tree is deleted with <code>t.bpm.DeletePage</code>, after its guard is dropped. Never the header page.</li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u4-06-merge-leaves">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-06-merge-leaves-cb">
+        <label for="u4-06-merge-leaves-cb">When the sibling leaf is at its minimum, merge the right leaf of the pair into the left one, relink the leaf chain, remove the separator from the parent, and delete the right page.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which of the two leaves is "right" when the sibling is the left one? Which index of the parent holds the separator and the pointer that must go? Whose guard has to be dropped before <code>DeletePage</code>, and is that guard in the context?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Name the pair by position: if <code>sibIndex &gt; index</code>, the left page is the underflowing leaf and the right page is the sibling, at <code>sibIndex</code>; otherwise the left page is the sibling and the right page is the underflowing leaf, at <code>index</code>. Move all of the right page's entries to the end of the left page with your range-moving helper, set the left page's next page ID to the right page's, and remove the entry at the right page's index from the parent with an internal-page remove-at helper (the mirror of the insert-at helper from stage 3). Then drop the guards of both leaves, take them out of the write set if they are in it, and call <code>t.bpm.DeletePage</code> on the right page's ID.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>left.SetNextPageID(right.NextPageID()) // unlink right from the chain
+parent.removeAt(rightIndex)             // its separator and its pointer</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: leaf merges</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreeMerge(LeafWithRight|LeafWithLeft)$' ./btree/</code>. They remove 1 and 6 from <code>(3,5) / (|1,2) (|3,4) (|5,6)</code> and expect <code>(5) / (|2,3,4) (|5,6)</code> and <code>(3) / (|1,2) (|3,4,5)</code>. Success prints <code>ok  	intro_to_db/btree</code>. Merging the left page into the right one keeps the keys in order but fails the shape check, because the separator that leaves the parent is the wrong one.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-06-root">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-06-root-cb">
+        <label for="u4-06-root-cb">Collapse the root: empty the tree when the root leaf loses its last entry, and promote the only child of an internal root, updating the header page and deleting the old root.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which two root sizes call for a collapse, one for each page type? Which guard lets you change the root ID, and what should <code>ctx.RootPageID</code> say afterwards? Which page is deleted in each case?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>When the page being checked is the root (<code>ctx.IsRootPage</code>), never look for a sibling. A leaf root of size 0 makes the new root ID <code>common.InvalidPageID</code>; an internal root of size 1 makes it <code>ValueAt(0)</code>. Write the new ID through <code>AsBPlusTreeHeaderPage(ctx.HeaderPage.DataMut())</code>, update <code>ctx.RootPageID</code>, drop the old root's guard, remove it from the write set, and delete the old root's page. Any other root size needs nothing.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>newRoot := common.InvalidPageID // an empty root leaf: the tree is empty
+if !page.IsLeafPage() {
+	newRoot = t.internalPage(guard.Data()).ValueAt(0) // the only child
+}</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: root collapse</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreeMergeRootCollapse$' ./btree/</code>. It removes 1 from <code>(3) / (|1,2) (|3,4)</code> and expects the leaf <code>(|2,3,4)</code> as the new root, recorded in the header page. Success prints <code>ok  	intro_to_db/btree</code>. Without the collapse, the old root stays with one child:</p>
+<pre><code>--- FAIL: TestBPlusTreeMergeRootCollapse (0.00s)
+    b_plus_tree_delete_extra_test.go:236: tree shape:
+         got: () / (|2,3,4)
+        want: (|2,3,4)
+    ...
+    b_plus_tree_delete_extra_test.go:246: invalid tree: root internal page 3 has 1 children, want at least 2</code></pre>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-06-cascade">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-06-cascade-cb">
+        <label for="u4-06-cascade-cb">Turn the repair into a loop that climbs the write set, and merge underflowing internal pages by pulling the parent's separator down between the two halves.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>After a merge, which page might underflow next, and where is its guard? What are the three ways the loop ends? In an internal merge, what key should stand in front of the right page's first child once it sits inside the left page?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Make the stage-5 repair a loop over a level of the write set, starting at the leaf. Each pass: if the page is the root, collapse it if needed and stop; if it holds at least <code>MinSize</code>, stop; otherwise pick the sibling, write-guard it, and borrow or merge according to the page type. After a borrow, stop. After a merge, delete the right page and go up one level. For the internal merge, set the right page's key 0 to the parent's separator, move all of the right page's entries to the end of the left page with your stage-4 range-moving helper, and remove the separator and pointer from the parent.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>// key 0 of the right page is unused; give it the separator before moving
+right.SetKeyAt(0, parent.KeyAt(rightIndex))</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: cascading merges</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreeMergeInternalPages$' ./btree/</code>. It removes 1, then 2 and 3, then 12 from the 12-key tree with internal max size 3, so internal pages merge in both directions and the root collapses at the end. Success prints <code>ok  	intro_to_db/btree</code>. If a run never ends, an internal page has probably been left with a single child and the loop spins on it; rerun with <code>-timeout 120s</code> after the regex to see where.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-06-internal-borrow">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-06-internal-borrow-cb">
+        <label for="u4-06-internal-borrow-cb">Let an underflowing internal page borrow one child from a sibling above its minimum, rotating the separator through the parent in both directions.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Once the moved child sits in its new page, which key bounds it there? From the right sibling it was child 0, whose key slot is unused, so the key has to come from somewhere else. And which key must replace the separator in the parent so that both pages' ranges stay correct?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>From the right sibling: append (the parent's separator at <code>sibIndex</code>, the sibling's child 0) to the page, set the parent's separator to the sibling's key 1, and remove the sibling's entry 0. From the left sibling: insert the sibling's last child at index 0 of the page, set the page's key 1 (now in front of its old first child) to the parent's separator at <code>index</code>, set that separator to the sibling's last key, and remove the sibling's last entry. Draw the four pages before and after on paper first; the tests check the exact keys.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>// borrowing from the right: the separator comes down, the sibling's key 1 goes up
+node.insertAt(node.Size(), parent.KeyAt(sibIndex), sib.ValueAt(0))
+parent.SetKeyAt(sibIndex, sib.KeyAt(1))</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: internal borrows and BusTub's examples</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreeMerge(InternalBorrow|BatchExample|DeleteTestNoIterator)$' ./btree/</code>. <code>InternalBorrow</code> borrows from the right with internal max sizes 3 and 4 and from the left; <code>BatchExample</code> replays the operations in BusTub's <code>BatchOpsFromFile</code> comment (<code>i1</code> to <code>i10</code>, <code>i30</code>, <code>d8</code>, <code>d9</code>); <code>DeleteTestNoIterator</code> is BusTub's own deletion test, which removes all five keys of a leaf-max-2 tree and expects <code>RootPageID()</code> to be <code>common.InvalidPageID</code>. Success prints <code>ok  	intro_to_db/btree</code>. Preferring the left sibling fails the batch example:</p>
+<pre><code>--- FAIL: TestBPlusTreeMergeBatchExample (0.00s)
+    b_plus_tree_delete_extra_test.go:314: tree shape:
+         got: (5) / (3) (9) / (|1,2) (|3,4) (|5,6,7) (|10,30)
+        want: (5) / (3) (7) / (|1,2) (|3,4) (|5,6) (|7,10,30)</code></pre>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-06-freed">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-06-freed-cb">
+        <label for="u4-06-freed-cb">Check that every page leaving the tree is deleted through the buffer pool after its guard is dropped, and that the tree survives deleting every key and growing again.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>List every place a page leaves the tree: the right page of each merge, an old internal root, an empty root leaf. For each, which guards are still held when you call <code>DeletePage</code>, and could any of them be on that page? What does <code>DeletePage</code> return if one is?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>While debugging, check the result of <code>t.bpm.DeletePage</code> and panic if it is false: a refused delete means a guard on that page is still alive, often the right page's guard still in the write set, or the sibling's. Then run the random tests: they compare the tree with a map after hundreds of operations, so they find the cases a hand-made example misses.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>rightGuard.Drop() // the pin must be gone first
+if !t.bpm.DeletePage(rightID) {
+	panic("btree: merged page still pinned") // debugging aid
+}</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: pages freed, random mixes</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreeMerge(DeletedPagesFreed|DeleteAll|RandomMix|ReleasesLatches)$' ./btree/</code>. <code>DeleteAll</code> removes every key in four configurations, checks for an empty tree, and inserts again; <code>RandomMix</code> runs 800 random inserts and removals against a map in five configurations. Success prints <code>ok  	intro_to_db/btree</code>. Forgetting <code>DeletePage</code> after merges fails with a list of page IDs: <code>136 pages left the tree but were never deleted from the buffer pool (DeletePage, after dropping their guards): [2 4 5 6 ...]</code>.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage P2.6</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestBPlusTreeMerge' ./btree/</code></pre>
+    <p>It runs the eleven stage-6 tests: BusTub's <code>TestBPlusTreeMergeDeleteTestNoIterator</code> and the extra tests <code>TestBPlusTreeMergeLeafWithRight</code>, <code>...LeafWithLeft</code>, <code>...RootCollapse</code>, <code>...InternalPages</code>, <code>...InternalBorrow</code>, <code>...BatchExample</code>, <code>...DeleteAll</code>, <code>...DeletedPagesFreed</code>, <code>...RandomMix</code> and <code>...ReleasesLatches</code>. Success prints <code>ok  	intro_to_db/btree</code> and the time, about 4 seconds.</p>
+    <p>Typical failures are shape mismatches (<code>got:</code> and <code>want:</code> lines, then a drawing of your tree), invalid trees (<code>invalid tree: internal page 7 has 1 children, fewer than its min size 2</code>, or <code>the leaf chain (next page ids from the leftmost leaf) visits ..., but the leaves in key order are ...</code> after a merge that forgot <code>SetNextPageID</code>), and the list of leaked pages above. The worst failure prints nothing: a loop that never ends on an internal page with a single child is a CPU loop, not a latch wait, so no test's own time limit can stop it. Keep the time limit after the regex:</p>
+<pre><code>go test -race -run '^TestBPlusTreeMerge' -timeout 120s ./btree/</code></pre>
+    <p>When it fires, <code>go test</code> names the test and prints every goroutine's stack; the one inside your repair loop shows the line it spins on. Then run stages 1 to 5 again (<code>'^TestBPlusTree(Page|Search|Insert|Grow|Borrow)'</code>), since the repair loop replaced code they use.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why a merge can never make a leaf split, why an internal merge needs the parent's separator but a leaf merge just throws it away, or why <code>DeletePage</code> fails while the tree still holds the page's guard. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: the CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/project2/">Project #2 writeup</a> (Task #2, Requirements and Hints, Development Roadmap); BusTub <code>src/include/storage/index/b_plus_tree.h</code> (Context), <code>src/include/storage/index/b_plus_tree_debug.h</code> (the <code>BatchOpsFromFile</code> example) and <code>test/storage/b_plus_tree_delete_test.cpp</code> at commit d49b823; Lecture #08 slides 36–40 and notes (section 2, Deletion); this course's <code>btree/b_plus_tree.go</code>, <code>btree/b_plus_tree_delete_extra_test.go</code>, <code>btree/b_plus_tree_delete_test.go</code> and <code>bufferpool/buffer_pool_manager.go</code> (<code>DeletePage</code>).</p>
+
+  <div class="lesson-nav">
+    <a href="./u4-05-p2-borrow.html">← P2.5 Deletion: Borrowing from Siblings</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u4-07-p2-tombstones.html">Next: P2.7 Tombstones →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

@@ -164,7 +164,7 @@ HAVING AVG(s.gpa) &gt; 3.9;</code></pre>
     <p>The lecture notes declare <code>gpa FLOAT</code>. In DuckDB, <code>FLOAT</code> is a 4-byte floating-point type, so 3.9 is stored as 3.9000000953674316, and the HAVING query above also returns 15-826. With <code>DOUBLE</code>, as in <code>school.sql</code>, it returns 15-721 alone. When an answer hinges on an exact comparison, check the column types.</p>
   </div>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=O5gU9NQjCAs">#02 Modern SQL, slides 10–15</a>: aggregates, the undefined-column problem, GROUP BY, grouping sets and HAVING, worked on the example database.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=O5gU9NQjCAs&amp;t=851s">#02 Modern SQL, "Aggregation basics" (14:11)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/02-modernsql.pdf#page=13">slides 10–15</a>: aggregates, the undefined-column problem, GROUP BY, grouping sets and HAVING, worked on the example database.</p>
 
   <h2>Strings, ordering and limits</h2>
 
@@ -273,7 +273,7 @@ SELECT student.sid, name
 
   <p>15-799 is missing from this output. Its subquery returns zero rows, and pairing a tuple with zero rows produces nothing, just as R × S is empty when S is empty.</p>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=O5gU9NQjCAs">#02 Modern SQL, slides 23–29</a>: nested queries with IN, ANY, ALL and EXISTS, the highest-id example, correlated NOT EXISTS, and lateral joins.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=O5gU9NQjCAs&amp;t=2842s">#02 Modern SQL, "Nested subqueries" (47:22)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/02-modernsql.pdf#page=37">slides 23–29</a>: nested queries with IN, ANY, ALL and EXISTS, the highest-id example, correlated NOT EXISTS, and lateral joins.</p>
 
   <h2>Common table expressions</h2>
 
@@ -330,7 +330,7 @@ SELECT * FROM cteSource;</code></pre>
     <p><code>GROUP BY cid</code> is like folding the rows into a <code>map[string]stats</code> keyed by course and emitting one row per key. <code>AVG(gpa) OVER (PARTITION BY cid)</code> computes the same per-course value but writes it back onto every original row, so five rows go in and five rows come out.</p>
   </div>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=O5gU9NQjCAs">#02 Modern SQL, slides 30–38</a>: common table expressions, recursive CTEs, and window functions with PARTITION BY, ORDER BY and RANK.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=O5gU9NQjCAs&amp;t=3530s">#02 Modern SQL, "Table expressions" (58:50)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/02-modernsql.pdf#page=60">slides 30–38</a>: common table expressions, recursive CTEs, and window functions with PARTITION BY, ORDER BY and RANK.</p>
 
   <h2>One statement per answer</h2>
 

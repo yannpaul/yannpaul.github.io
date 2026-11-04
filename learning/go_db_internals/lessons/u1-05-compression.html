@@ -76,7 +76,7 @@
 
   <p>Naive schemes have two problems. The DBMS must decompress data before it can read or modify it, which limits how much data can be compressed together: compressing a whole table as one block would mean decompressing the whole table on every access. And the algorithms know nothing about what the data means or how the query will use it, so the DBMS can't delay decompression, which rules out late materialization. Ideally the DBMS would run queries on the compressed data itself. If the value <code>'Andy'</code> is stored as the code <code>XX</code>, then <code>WHERE name = 'Andy'</code> can become <code>WHERE name = XX</code>, and the column never needs decompressing.</p>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=yWnToWrskXE">#06 Storage Models &amp; Compression, slides 27–33</a>: why compress, the three goals, granularity, naive compression and InnoDB's mod log.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=yWnToWrskXE&amp;t=2816s">#06 Storage Models &amp; Compression, "Data compression techniques" (46:56)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/06-storage3.pdf#page=48">slides 27–33</a>: why compress, the three goals, granularity, naive compression and InnoDB's mod log.</p>
 
   <h2>Columnar encodings</h2>
 
@@ -114,7 +114,7 @@
     <figcaption>The time column shrinks from 320 bits to 128 with delta encoding, and to 96 when RLE then compresses the four identical +1 deltas into one pair (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/06-storage3.pdf#page=78">Lecture #06, slide 43</a>).</figcaption>
   </figure>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=yWnToWrskXE">#06 Storage Models &amp; Compression, slides 35–43</a>: run-length, bit-packing, mostly, bitmap and delta encoding.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=yWnToWrskXE&amp;t=3534s">#06 Storage Models &amp; Compression, "Columnar compression algorithms" (58:54)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/06-storage3.pdf#page=59">slides 35–43</a>: run-length, bit-packing, mostly, bitmap and delta encoding.</p>
 
   <h3>Dictionary encoding</h3>
 
@@ -134,7 +134,7 @@
 
   <p>The lecture's conclusion adds that DBMSs can combine encodings for even better compression, and that dictionary encoding is probably the most useful scheme because it does not require pre-sorting.</p>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=yWnToWrskXE">#06 Storage Models &amp; Compression, slides 44–46</a>: dictionary compression, encode and decode, and order-preserving codes.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=yWnToWrskXE&amp;t=3534s">#06 Storage Models &amp; Compression, "Columnar compression algorithms" (58:54)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/06-storage3.pdf#page=79">slides 44–46</a>: dictionary compression, encode and decode, and order-preserving codes.</p>
 
   <h2>Work it out: compress by hand</h2>
 
@@ -200,6 +200,11 @@
       </div>
     </li>
   </ul>
+
+  <div class="callout"><!-- homework-box -->
+    <p class="callout-label">The homework behind these questions</p>
+    <p>The questions marked HW2 come from CMU's Homework #2: <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw2-clean.pdf#page=5">Question 3</a>, with the original figures. Work each one out on paper first, then click the option you got. The quiz tells you at once whether it matches CMU's official answer, and explains why. To compare your working step by step, open the official solutions for <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw2-sols.pdf#page=6">Question 3</a>.</p>
+  </div>
 
   <h2>Check your understanding</h2>
 

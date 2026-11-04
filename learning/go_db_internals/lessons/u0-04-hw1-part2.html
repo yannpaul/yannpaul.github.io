@@ -71,7 +71,7 @@
     <li>The <code>league</code> column holds the league's full name from <code>leagues</code>, such as "National League".</li>
   </ul>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=O5gU9NQjCAs">#02 Modern SQL, slides 30–31</a>: common table expressions, a temporary result that the rest of a query can reference, with the highest-id example.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=O5gU9NQjCAs&amp;t=3530s">#02 Modern SQL, "Table expressions" (58:50)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/02-modernsql.pdf#page=60">slides 30–31</a>: common table expressions, a temporary result that the rest of a query can reference, with the highest-id example.</p>
 
   <h2>Q5: one row per player with a lateral join</h2>
 
@@ -86,7 +86,7 @@
     <li>An inducted player is a <code>halloffame</code> row with <code>inducted = 'Y'</code>. There are 363 such rows for 362 people, because Minnie Minoso was inducted twice, and 70 of the 362 have no rows in <code>appearances</code>. A lateral subquery that returns nothing produces no output row, as 15-799 vanished from Lesson 2's best-GPA query, so those 70 drop out. Without its final <code>LIMIT 10</code>, the official answer returns 293 rows, Minoso's twice.</li>
   </ul>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=O5gU9NQjCAs">#02 Modern SQL, slides 28–29</a>: lateral joins, explained as a for loop that runs a query for each tuple.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=O5gU9NQjCAs&amp;t=3326s">#02 Modern SQL, "Lateral joins" (55:26)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/02-modernsql.pdf#page=53">slides 28–29</a>: lateral joins, explained as a for loop that runs a query for each tuple.</p>
 
   <h2>Inserting or updating in one statement</h2>
 

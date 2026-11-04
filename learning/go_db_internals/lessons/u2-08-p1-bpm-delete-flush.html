@@ -106,7 +106,7 @@
     <p><code>FrameHeader.isDirty</code> is an <code>atomic.Bool</code>. Its <code>Swap(false)</code> clears the flag and returns the old value in one atomic step, which is "test and clear before writing" without a gap in between. Eviction, the guards' <code>Flush</code> and all four flush methods do the same thing (write the frame if it is dirty, then wait for the callback), so one small helper serves them all. Likewise, factor the unpin step of <code>Drop</code> into a helper and call it from <code>FlushPage</code>, so both release a pin the same way.</p>
   </div>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc">#04 Memory Management, slides 32–33</a>: the fast and slow paths for evicting clean and dirty pages, and background writing, which writes dirty pages early and resets their flags.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc&amp;t=4016s">#04 Memory Management, "Flushing and IO scheduling" (1:06:56)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf#page=86">slides 32–33</a>: the fast and slow paths for evicting clean and dirty pages, and background writing, which writes dirty pages early and resets their flags.</p>
 
   <h2>The concurrency tests</h2>
 

@@ -120,7 +120,7 @@ child holds bpmLatch         waits for page 0's latch (to build its guard)</code
     <p><code>defer bpm.bpmLatch.Unlock()</code> runs when the <em>function</em> returns, not when the block ends. If <code>CheckedWritePage</code> locked the pool latch with a deferred unlock and then built the guard, the guard's wait for the frame latch would happen with the pool latch still held. Put the latched part in its own helper, which locks, defers the unlock, and returns the pinned frame. The caller builds the guard after the helper has returned, so the deferred unlock has already run. The helper also removes the duplication between <code>CheckedReadPage</code> and <code>CheckedWritePage</code>, which differ only in the guard they build. Remember too that <code>sync.Mutex</code> is not reentrant: a method that holds <code>bpmLatch</code> must not call another method, such as <code>GetPinCount</code>, that locks it again.</p>
   </div>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc">#04 Memory Management, slides 9–12</a>: frames, the page table with its pin counters and dirty flags, and locks versus latches.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc&amp;t=269s">#04 Memory Management, "Buffer pool overview" (4:29)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/05-storage2.pdf#page=11">slides 9–12</a>: frames, the page table with its pin counters and dirty flags, and locks versus latches.</p>
 
   <h2>Predict the pin counts: PagePinMediumTest</h2>
 

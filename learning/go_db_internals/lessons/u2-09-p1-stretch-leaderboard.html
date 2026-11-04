@@ -128,7 +128,7 @@ go test -bench ScanGet -run '^$' -mutexprofile mutex.out ./bufferpool/</code></p
 
   <p>The first is a better replacer. The get workload is skewed, so the writeup suggests taking the access type into account "so as to reduce page miss". This is the lecture's sequential flooding problem: every scan access looks like a fresh use, and in ARC a second scan access promotes a page into the MFU list, where it competes with the hot pages that the getters need. Lecture #04's localization and priority hints are the same idea, the DBMS telling the buffer pool how a page is being used.</p>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc">#04 Memory Management, slides 20–21 and 30–31</a>: sequential flooding, then localization and priority hints.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc&amp;t=2605s">#04 Memory Management, "Advanced eviction algorithms" (43:25)</a> and <a href="https://www.youtube.com/watch?v=8-2yv4z0VZc&amp;t=3724s">"Buffer pool optimizations" (1:02:04)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf#page=48">slides 20–21</a> and <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf#page=81">30–31</a>: sequential flooding, then localization and priority hints.</p>
 
   <p>The second is parallel I/O. One worker that runs requests one at a time leaves a modern SSD idle much of the time. The writeup lets the scheduler issue several requests at once, provided that requests for the same page end up "as if they are processed in order", with read-after-write consistency within a thread. Prefetching belongs here too: <code>Schedule</code> takes a slice so that one call can ask for several pages ahead of a scan.</p>
 
@@ -349,7 +349,7 @@ go test -bench . -run '^$' -benchtime=2s -count=10 ./bufferpool/</code></pre>
   <div class="lesson-nav">
     <a href="./u2-08-p1-bpm-delete-flush.html">← P1.6 Buffer Pool Manager: Delete, Flush, and Concurrency</a>
     <a href="../index.html">Course contents</a>
-    <span>Next: Hash Tables: Hash Functions and Static Hashing (coming soon)</span>
+    <a href="./u3-01-hash-tables.html">Next: Hash Tables: Hash Functions, Probing, and Cuckoo Hashing →</a>
   </div>
 </main>
 <script src="../assets/checklist.js"></script>

@@ -160,7 +160,7 @@
 
   <p>A <strong>page guard</strong> holds both a pin and a latch. When a caller gets a <code>*ReadPageGuard</code> or <code>*WritePageGuard</code> from the BPM, the guard owns a pin, so the page can't be evicted, and the frame's latch in shared or exclusive mode, so no one writes while you read and no one touches the page while you write. The guard's <code>Drop()</code> gives both back. Go has no destructors, so you call it yourself, usually with <code>defer guard.Drop()</code>.</p>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc">#04 Memory Management, slides 4–16</a>: the lecture's first part, from the disk-oriented architecture through frames, the page table, locks versus latches and the page directory to why not mmap.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc&amp;t=65s">#04 Memory Management, "Database storage basics" (1:05)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf#page=4">slides 4–16</a>: the lecture's first part, from the disk-oriented architecture through frames, the page table, locks versus latches and the page directory to why not mmap.</p>
 
   <h2>The disk I/O path</h2>
 
@@ -200,7 +200,7 @@ ok := &lt;-cb                                           // future.get()</code></
 
   <p class="sidenote">Neither BusTub's disk manager (a C++ <code>fstream</code>) nor the Go <code>FileManager</code> (<code>os.OpenFile</code> without <code>O_DIRECT</code>) uses direct I/O, so their reads and writes pass through the OS page cache. That is fine for a teaching system, because Project 1 is about the buffer pool's own decisions, but most production DBMSs use direct I/O (slide 36).</p>
 
-  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc">#04 Memory Management, slides 32–37</a>: dirty pages, background writing, disk I/O scheduling, the OS page cache and the fsync problem.</p>
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc&amp;t=4016s">#04 Memory Management, "Flushing and IO scheduling" (1:06:56)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf#page=86">slides 32–37</a>: dirty pages, background writing, disk I/O scheduling, the OS page cache and the fsync problem.</p>
 
   <h2>How Project 1 fits together</h2>
 
