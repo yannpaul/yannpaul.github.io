@@ -467,6 +467,9 @@ ol li, ul:not(.todo):not(.quiz-options):not(.pb-testlist):not(.pb-why) li { marg
 
 /* Runnable code cells (pyrun.js) */
 .pc-cell { border: 1px solid var(--rule); border-radius: 8px; background: var(--paper-raised); margin: 1.4rem 0; overflow: hidden; }
+/* a walkthrough inside a cell must be able to break out wider than the cell */
+.pc-cell:has(.st) { overflow: visible; }
+.pc-cell:has(.st) .pc-head { border-radius: 8px 8px 0 0; }
 .pc-head { padding: 0.45rem 0.9rem; font-family: var(--ui); font-size: 0.74rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--rule); }
 .pc-editor {
   display: block; width: 100%; border: 0; resize: none; background: var(--code-bg); color: var(--ink);

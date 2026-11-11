@@ -25,13 +25,16 @@
   function esc(s) {
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
-  // Tiny markup for authored text: `code`, **bold**, _italic_ ; everything else is escaped.
+  // Authored text: `code`, **bold**, _italic_; everything else is escaped. Code spans are cut
+  // out FIRST, so Python inside backticks (like `2 ** 3` or `__name__`) is never read as markup.
   function md(s) {
-    return esc(s)
-      .replace(/`([^`]+)`/g, "<code>$1</code>")
-      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>")
-      .replace(/\n/g, "<br>");
+    return String(s).split(/(`[^`\n]+`)/).map(function (part, i) {
+      if (i % 2 === 1) return "<code>" + esc(part.slice(1, -1)) + "</code>";
+      return esc(part)
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>")
+        .replace(/\n/g, "<br>");
+    }).join("");
   }
   function html(tag, cls, markup) {
     var e = el(tag, cls);
@@ -703,7 +706,7 @@
     draw();
   }
 
-  window.Problems = { render: renderList, mountBank: mountBank, forTopic: forTopic, isSolved: isSolved };
+  window.Problems = { md: md, render: renderList, mountBank: mountBank, forTopic: forTopic, isSolved: isSolved };
 
   document.addEventListener("DOMContentLoaded", function () {
     document.querySelectorAll(".problems[data-topic], .problems[data-ids]").forEach(function (host) {

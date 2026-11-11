@@ -27,10 +27,19 @@
     return e;
   }
 
-  // Notes are authored text: escape everything, then allow `code` and **bold**.
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  // Authored text: `code`, **bold**, _italic_; everything else is escaped. Code spans are cut
+  // out FIRST, so Python inside backticks (like `2 ** 3` or `__name__`) is never read as markup.
   function md(s) {
-    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    return String(s).split(/(`[^`\n]+`)/).map(function (part, i) {
+      if (i % 2 === 1) return "<code>" + esc(part.slice(1, -1)) + "</code>";
+      return esc(part)
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>")
+        .replace(/\n/g, "<br>");
+    }).join("");
   }
 
   function parseVal(raw) {
@@ -365,5 +374,5 @@
     return { go: go };
   }
 
-  window.Stepper = { mount: mount, fromTrace: fromTrace };
+  window.Stepper = { md: md, mount: mount, fromTrace: fromTrace };
 })();
