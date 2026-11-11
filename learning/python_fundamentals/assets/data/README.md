@@ -19,6 +19,7 @@ It runs every problem against real Python and fails if any stated answer, walkth
 | `tips` | At least 2. Revealed one at a time, smallest nudge first. |
 | `explain` | Why the answer is right. Shown after she answers or gives up. |
 | `walk` | Optional hand-written step-by-step (see below). Without it, "Full walkthrough" traces the code live. |
+| `show` | The variables the walkthrough displays, e.g. `["a", "b"]`. Anything else (and imported modules) stays hidden until the learner ticks "show all variables". The checker fails if a name never exists in a real run. Leave it out to show every variable. |
 
 ## By type
 
@@ -45,6 +46,10 @@ It runs every problem against real Python and fails if any stated answer, walkth
 - `locals`: `[{ name: "double()", vars: { x: "4" } }]` for a function frame (optional)
 
 The checker requires every step to match a real moment of the program (same line, same variables), so a typo cannot slip through. If a step needs a state that never really happens, the walkthrough is telling a story Python does not, so rewrite the step.
+
+## File names
+
+Never start a file or folder name with `_` or `.` anywhere under `lessons/`, `reference/` or `assets/`. GitHub Pages runs Jekyll, which silently drops those files. (That once broke every problem, because the shared file was called `_register.js`.) The checker refuses such names.
 
 ## Adding a topic
 

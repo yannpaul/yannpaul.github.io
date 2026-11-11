@@ -14,6 +14,7 @@
 //   data-argv   optional: what sys.argv should be (space separated; first item is the script name)
 //   data-stdin  optional: shows an input box, prefilled; each line answers one input() call
 //   data-memory optional: "on" starts the step viewer with the "Objects in memory" panel open
+//   data-show   optional: "a,b" — the variables the step viewer shows (others behind "show all")
 //
 // To change the interpreter version, change PYODIDE_VERSION. Everything else in the course
 // goes through window.PyRun, so nothing else needs to know how Python is loaded.
@@ -31,7 +32,7 @@
   var HELPER = [
     "import sys, io, json, types, contextlib, builtins",
     "",
-    "_FN = '<exec>'",
+    "_FN = '<learner>'   # NOT '<exec>': Pyodide already uses that name for its own code, including this helper",
     "_MAX_LINES = 300000     # runaway-loop guard for plain runs",
     "_MAX_STEPS = 400        # step-through viewer cap",
     "",
@@ -118,9 +119,11 @@
     "    src = frame.f_globals if frame.f_code.co_name == '<module>' else frame.f_locals",
     "    d = []",
     "    for k, v in list(src.items()):",
-    "        if k.startswith('__') or isinstance(v, types.ModuleType):",
+    "        if k.startswith('__'):",
     "            continue",
-    "        if isinstance(v, types.FunctionType):",
+    "        if isinstance(v, types.ModuleType):",
+    "            d.append([k, 'module ' + v.__name__, 'module', id(v)])",
+    "        elif isinstance(v, types.FunctionType):",
     "            d.append([k, 'function ' + v.__name__ + '()', 'function', id(v)])",
     "        else:",
     "            d.append([k, _short(v), type(v).__name__, id(v)])",
@@ -314,6 +317,7 @@
     var argv = pre.dataset.argv ? pre.dataset.argv.split(/\s+/).filter(Boolean) : null;
     var hasStdin = pre.dataset.stdin != null;
     var memory = pre.dataset.memory === "on" ? true : undefined;
+    var show = pre.dataset.show ? pre.dataset.show.split(/[\s,]+/).filter(Boolean) : null;
 
     var cell = el("div", "pc-cell");
     var head = el("div", "pc-head");
@@ -408,7 +412,7 @@
           out.textContent = formatOutput(res) || "Nothing to step through.";
         } else if (window.Stepper) {
           window.Stepper.mount(stepHost, {
-            code: ta.value, steps: window.Stepper.fromTrace(res), live: true, memory: memory,
+            code: ta.value, steps: window.Stepper.fromTrace(res), live: true, memory: memory, show: show,
             error: res.err ? (res.line ? "Error on line " + res.line + ": " : "Error: ") + res.err : null,
             truncated: res.truncated
           });

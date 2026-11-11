@@ -33,6 +33,7 @@ addProblems([
   },
   {
     id: "num-05", topic: "numbers", level: 2, type: "predict",
+    show: ["minutes"],
     prompt: "What does this print? Think about hours and minutes.",
     code: "minutes = 135\nprint(minutes // 60, minutes % 60)",
     answer: "2 15",
@@ -97,6 +98,7 @@ addProblems([
   },
   {
     id: "num-11", topic: "numbers", level: 2, type: "yesno",
+    show: ["x"],
     prompt: "With this value, is each statement True?",
     code: "x = 17",
     statements: [
@@ -124,6 +126,7 @@ addProblems([
   },
   {
     id: "num-13", topic: "numbers", level: 2, type: "code",
+    show: ["is_even", "n"],
     prompt: "Write `is_even(n)`. It returns `True` when `n` is even and `False` when it is odd.",
     starter: "def is_even(n):\n    pass\n",
     solution: "def is_even(n):\n    return n % 2 == 0\n",
@@ -137,6 +140,7 @@ addProblems([
   },
   {
     id: "num-14", topic: "numbers", level: 2, type: "code",
+    show: ["last_digit", "n"],
     prompt: "Write `last_digit(n)`: it returns the last digit of a positive whole number. For example, `last_digit(1234)` is 4.",
     starter: "def last_digit(n):\n    pass\n",
     solution: "def last_digit(n):\n    return n % 10\n",
@@ -147,6 +151,7 @@ addProblems([
   },
   {
     id: "num-15", topic: "numbers", level: 3, type: "code",
+    show: ["tens_digit", "n"],
     prompt: "Write `tens_digit(n)`: the second-to-last digit of a whole number. `tens_digit(1234)` is 3. (Hint: you need both `//` and `%`.)",
     starter: "def tens_digit(n):\n    pass\n",
     solution: "def tens_digit(n):\n    return n // 10 % 10\n",

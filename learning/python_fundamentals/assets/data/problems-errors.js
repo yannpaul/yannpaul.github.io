@@ -1,6 +1,7 @@
 addProblems([
   {
     id: "err-01", topic: "errors", level: 2, type: "fill",
+    show: ["x", "y"],
     title: "From class: raise and finally",
     prompt: "Select the missing code to throw an exception that the calling code can catch, and the keyword for a block that runs no matter how the `try` part ends. (The program is given the inputs 10 and 2.)",
     template: "x = float(input(\"Enter a number. \"))\ny = float(input(\"Enter a number to divide by. \"))\ntry:\n    print(f\"The answer is {x/y}.\")\nexcept:\n    if y == 0:\n        [[a]] Exception(\"You cannot divide by zero\")\n[[b]]:\n    print(\"Thank you for playing.\")",
@@ -36,6 +37,7 @@ addProblems([
   },
   {
     id: "err-04", topic: "errors", level: 2, type: "predict",
+    show: ["x"],
     title: "else runs when there is no error",
     prompt: "What does this print? (Two lines.)",
     code: "try:\n    x = 4 / 2\nexcept ZeroDivisionError:\n    print(\"except\")\nelse:\n    print(\"else\")\nfinally:\n    print(\"finally\")",
@@ -67,6 +69,7 @@ addProblems([
   },
   {
     id: "err-06", topic: "errors", level: 2, type: "predict",
+    show: ["e"],
     title: "Raising your own error",
     prompt: "What does this print?",
     code: "try:\n    raise ValueError(\"bad\")\nexcept ValueError as e:\n    print(\"caught\", e)",
@@ -112,6 +115,7 @@ addProblems([
   },
   {
     id: "err-11", topic: "errors", level: 3, type: "predict",
+    show: ["y", "e"],
     title: "Exam trap: finally runs before the error escapes",
     prompt: "In your class program, `y` was 0. Here is the same shape, wrapped so the error can be printed. What does this print? (Two lines.)",
     code: "y = 0\ntry:\n    try:\n        print(10 / y)\n    except:\n        if y == 0:\n            raise Exception(\"You cannot divide by zero\")\n    finally:\n        print(\"Thank you for playing.\")\nexcept Exception as e:\n    print(\"Error:\", e)",
@@ -121,6 +125,7 @@ addProblems([
   },
   {
     id: "err-12", topic: "errors", level: 2, type: "yesno",
+    show: ["risky"],
     prompt: "Use this function. Choose Yes if each statement is True.",
     code: "def risky(n):\n    try:\n        return 10 / n\n    except ZeroDivisionError:\n        return -1",
     statements: [
@@ -134,6 +139,7 @@ addProblems([
   },
   {
     id: "err-13", topic: "errors", level: 2, type: "code",
+    show: ["safe_divide", "a", "b"],
     prompt: "Write `safe_divide(a, b)`. It returns `a / b`, but if `b` is 0 it returns `None` instead of crashing. Use `try` and `except`.",
     starter: "def safe_divide(a, b):\n    return a / b\n",
     solution: "def safe_divide(a, b):\n    try:\n        return a / b\n    except ZeroDivisionError:\n        return None\n",
@@ -144,6 +150,7 @@ addProblems([
   },
   {
     id: "err-14", topic: "errors", level: 3, type: "predict",
+    show: ["f"],
     title: "Where does the error stop?",
     prompt: "What does this print? (Two lines.)",
     code: "def f():\n    try:\n        return 1\n    finally:\n        print(\"cleanup\")\nprint(f())",

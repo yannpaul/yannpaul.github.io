@@ -35,6 +35,7 @@ addProblems([
   },
   {
     id: "ut-04", topic: "unittest", level: 2, type: "choice",
+    show: ["test_memory"],
     title: "From class: which test checks memory?",
     prompt: "The code is part of a unit test. Which statement will test whether `a` and `b` share the same memory space?",
     code: "def test_memory(self):\n    a = 3\n    b = a\n    # insert assert test here",
@@ -110,6 +111,7 @@ addProblems([
   },
   {
     id: "ut-10", topic: "unittest", level: 3, type: "predict",
+    show: ["T", "test_a", "test_b", "result"],
     title: "Running tests from code",
     prompt: "This runs a test class and collects the results. `testsRun` is how many tests ran and `failures` is the list that failed. What does this print?",
     code: "import unittest\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(1 + 1, 2)\n    def test_b(self):\n        self.assertTrue(3 > 5)\nresult = unittest.TestResult()\nunittest.defaultTestLoader.loadTestsFromTestCase(T).run(result)\nprint(result.testsRun, len(result.failures))",
@@ -119,6 +121,7 @@ addProblems([
   },
   {
     id: "ut-11", topic: "unittest", level: 3, type: "predict",
+    show: ["T", "test_a", "check_b", "test_c", "result"],
     title: "Exam trap: method names",
     prompt: "unittest only runs methods whose names START with `test`. How many tests run?",
     code: "import unittest\nclass T(unittest.TestCase):\n    def test_a(self):\n        pass\n    def check_b(self):\n        pass\n    def test_c(self):\n        pass\nresult = unittest.TestResult()\nunittest.defaultTestLoader.loadTestsFromTestCase(T).run(result)\nprint(result.testsRun)",

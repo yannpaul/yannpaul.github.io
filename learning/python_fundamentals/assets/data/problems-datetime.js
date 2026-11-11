@@ -20,6 +20,7 @@ addProblems([
   },
   {
     id: "dt-03", topic: "datetime", level: 1, type: "predict",
+    show: ["d"],
     prompt: "What does this print?",
     code: "from datetime import datetime\nd = datetime(2024, 3, 5)\nprint(d.year, d.month, d.day)",
     answer: "2024 3 5",
@@ -28,6 +29,7 @@ addProblems([
   },
   {
     id: "dt-04", topic: "datetime", level: 2, type: "predict",
+    show: ["d"],
     title: "strftime",
     prompt: "`strftime` (\"string format time\") turns a date into text. `%Y` is the 4-digit year, `%m` the month number and `%d` the day. What does this print?",
     code: "from datetime import datetime\nd = datetime(2024, 3, 5)\nprint(d.strftime(\"%Y-%m-%d\"))",
@@ -37,6 +39,7 @@ addProblems([
   },
   {
     id: "dt-05", topic: "datetime", level: 2, type: "predict",
+    show: ["d"],
     prompt: "`%B` is the full month name. What does this print?",
     code: "from datetime import datetime\nd = datetime(2024, 3, 5)\nprint(d.strftime(\"%B %d, %Y\"))",
     answer: "March 05, 2024",
@@ -45,6 +48,7 @@ addProblems([
   },
   {
     id: "dt-06", topic: "datetime", level: 2, type: "predict",
+    show: ["d"],
     prompt: "`%A` is the full weekday name. 5 March 2024 fell on a Tuesday. What does this print?",
     code: "from datetime import datetime\nd = datetime(2024, 3, 5)\nprint(d.strftime(\"%A\"))",
     answer: "Tuesday",
@@ -79,6 +83,7 @@ addProblems([
   },
   {
     id: "dt-10", topic: "datetime", level: 2, type: "fill",
+    show: ["d"],
     prompt: "Choose the format code that makes the program print `March`.",
     template: "from datetime import datetime\nd = datetime(2024, 3, 5)\nprint(d.strftime(\"[[c]]\"))",
     blanks: { c: { options: ["%Y", "%y", "%B", "%d"], answer: "%B" } },
@@ -97,6 +102,7 @@ addProblems([
   },
   {
     id: "dt-12", topic: "datetime", level: 3, type: "predict",
+    show: ["d"],
     title: "Stretch: adding days",
     prompt: "A `timedelta` is a length of time you can add to a date. This goes a little beyond your notes. What does this print?",
     code: "from datetime import datetime, timedelta\nd = datetime(2024, 3, 5)\nprint((d + timedelta(days=30)).strftime(\"%d %b\"))",

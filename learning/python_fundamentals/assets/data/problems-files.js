@@ -50,6 +50,7 @@ addProblems([
   },
   {
     id: "file-05", topic: "files", level: 2, type: "multi",
+    show: ["file"],
     title: "From class: choose two",
     prompt: "Which statements about this code, which writes a message to an existing log file at the start of each day, are true? (Choose two.)",
     code: "with open('log.txt', 'w') as file:\n    file.write('Daily Log')\n    file.close()",
@@ -71,6 +72,7 @@ addProblems([
   },
   {
     id: "file-06", topic: "files", level: 2, type: "predict",
+    show: ["f"],
     title: "Write, then read",
     prompt: "What does this print? (This code really writes a small file in the Python sandbox.)",
     code: "with open(\"note.txt\", \"w\") as f:\n    f.write(\"hello\")\nwith open(\"note.txt\") as f:\n    print(f.read())",
@@ -80,6 +82,7 @@ addProblems([
   },
   {
     id: "file-07", topic: "files", level: 3, type: "predict",
+    show: ["f"],
     title: "Exam trap: w twice",
     prompt: "What does this print?",
     code: "with open(\"log.txt\", \"w\") as f:\n    f.write(\"one\\n\")\nwith open(\"log.txt\", \"w\") as f:\n    f.write(\"two\\n\")\nwith open(\"log.txt\") as f:\n    print(f.read())",
@@ -89,6 +92,7 @@ addProblems([
   },
   {
     id: "file-08", topic: "files", level: 2, type: "predict",
+    show: ["f"],
     title: "Append keeps what was there",
     prompt: "Same idea, but with `'a'`. What does this print? (Two lines of output.)",
     code: "with open(\"log2.txt\", \"w\") as f:\n    f.write(\"one\\n\")\nwith open(\"log2.txt\", \"a\") as f:\n    f.write(\"two\\n\")\nwith open(\"log2.txt\") as f:\n    print(f.read())",
@@ -98,6 +102,7 @@ addProblems([
   },
   {
     id: "file-09", topic: "files", level: 3, type: "predict",
+    show: ["f"],
     title: "read vs. readline",
     prompt: "`readline()` reads one line, including its newline character. `read()` reads whatever is left. What does this print?",
     code: "with open(\"abc.txt\", \"w\") as f:\n    f.write(\"a\\nb\\n\")\nwith open(\"abc.txt\") as f:\n    print(len(f.readline()), len(f.read()))",
@@ -164,6 +169,7 @@ addProblems([
   },
   {
     id: "file-15", topic: "files", level: 2, type: "predict",
+    show: ["f"],
     title: "What does with do?",
     prompt: "What does this print? A `with` block closes the file automatically when it ends.",
     code: "with open(\"t.txt\", \"w\") as f:\n    f.write(\"x\")\nprint(f.closed)",

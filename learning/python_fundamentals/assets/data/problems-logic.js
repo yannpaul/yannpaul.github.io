@@ -68,6 +68,7 @@ addProblems([
   },
   {
     id: "logic-07", topic: "logic", level: 2, type: "predict",
+    show: ["x"],
     prompt: "What does this print? Arithmetic and comparison go before `and`.",
     code: "x = 5\nprint(x > 3 and x < 10)",
     answer: "True",
@@ -76,6 +77,7 @@ addProblems([
   },
   {
     id: "logic-08", topic: "logic", level: 2, type: "predict",
+    show: ["x"],
     prompt: "What does this print? Use the ladder: comparison, then `not`, then `and`.",
     code: "x = 5\nprint(x > 3 and not x == 5)",
     answer: "False",
@@ -113,6 +115,7 @@ addProblems([
   },
   {
     id: "logic-11", topic: "logic", level: 2, type: "predict",
+    show: ["fruits"],
     prompt: "What does this print?",
     code: "fruits = [\"apple\", \"pear\"]\nprint(\"pear\" in fruits and \"kiwi\" not in fruits)",
     answer: "True",
@@ -143,6 +146,7 @@ addProblems([
   },
   {
     id: "logic-14", topic: "logic", level: 2, type: "yesno",
+    show: ["x", "y"],
     prompt: "Using these values, choose Yes if each statement is True and No if it is False.",
     code: "x = 7\ny = 3",
     statements: [
@@ -180,6 +184,7 @@ addProblems([
   },
   {
     id: "logic-17", topic: "logic", level: 1, type: "fill",
+    show: ["x"],
     prompt: "Choose the word that makes the program print `in range`.",
     template: "x = 15\nif x > 10 [[op]] x < 20:\n    print(\"in range\")",
     blanks: { op: { options: ["and", "or", "not", "in"], answer: "and" } },

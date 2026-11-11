@@ -591,3 +591,22 @@ ol li, ul:not(.todo):not(.quiz-options):not(.pb-testlist):not(.pb-why) li { marg
   table { display: block; overflow-x: auto; }
   td code, li code, p code { overflow-wrap: anywhere; }
 }
+
+/* Multi-select filter dropdowns on the problem bank */
+.pb-multi { position: relative; }
+.pb-multi summary {
+  list-style: none; cursor: pointer; font-size: 0.88rem; color: var(--ink); background: var(--paper);
+  border: 1px solid var(--rule); border-radius: 5px; padding: 0.35rem 1.8rem 0.35rem 0.6rem; min-width: 9rem; position: relative;
+}
+.pb-multi summary::-webkit-details-marker { display: none; }
+.pb-multi summary::after { content: "▾"; position: absolute; right: 0.6rem; color: var(--muted); }
+.pb-multi[open] summary { border-color: var(--accent); }
+.pb-multi-panel {
+  position: absolute; z-index: 10; top: calc(100% + 4px); left: 0; min-width: 100%; white-space: nowrap;
+  background: var(--paper-raised); border: 1px solid var(--rule); border-radius: 6px; padding: 0.4rem 0;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); display: grid;
+}
+.pb-multi-panel label { font-size: 0.88rem; color: var(--ink); padding: 0.3rem 0.8rem; cursor: pointer; }
+.pb-multi-panel label:hover { background: var(--code-bg); }
+.pb-multi-panel .pb-multi-all { border-bottom: 1px solid var(--rule); font-weight: 600; }
+.pb-multi-panel input { accent-color: var(--accent); }

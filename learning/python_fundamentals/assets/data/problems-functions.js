@@ -27,6 +27,7 @@ addProblems([
   },
   {
     id: "fn-03", topic: "functions", level: 1, type: "predict",
+    show: ["double", "x"],
     prompt: "What does this print?",
     code: "def double(x):\n    return x * 2\nprint(double(4))",
     answer: "8",
@@ -42,6 +43,7 @@ addProblems([
   },
   {
     id: "fn-04", topic: "functions", level: 2, type: "predict",
+    show: ["greet", "name", "greeting"],
     title: "Default values",
     prompt: "A parameter can have a default value. What does this print? (Two lines of output.)",
     code: "def greet(name, greeting=\"Hello\"):\n    return greeting + \", \" + name\nprint(greet(\"Ann\"))\nprint(greet(\"Bo\", \"Hi\"))",
@@ -51,6 +53,7 @@ addProblems([
   },
   {
     id: "fn-05", topic: "functions", level: 3, type: "predict",
+    show: ["f", "x"],
     title: "Exam trap: no return",
     prompt: "What does this print?",
     code: "def f(x):\n    x + 1\nprint(f(2))",
@@ -60,6 +63,7 @@ addProblems([
   },
   {
     id: "fn-06", topic: "functions", level: 2, type: "predict",
+    show: ["f"],
     prompt: "What does this print? `return` ends the function straight away.",
     code: "def f():\n    return 1\n    print(\"never\")\nprint(f())",
     answer: "1",
@@ -68,6 +72,7 @@ addProblems([
   },
   {
     id: "fn-07", topic: "functions", level: 2, type: "predict",
+    show: ["x", "f"],
     title: "Scope: two different x",
     prompt: "What does this print?",
     code: "x = 10\ndef f():\n    x = 5\n    return x\nf()\nprint(x)",
@@ -86,6 +91,7 @@ addProblems([
   },
   {
     id: "fn-08", topic: "functions", level: 2, type: "predict",
+    show: ["calcSubtotal", "amount", "salesTaxRate", "subtotal"],
     title: "Using calcSubtotal",
     prompt: "What does this print?",
     code: "def calcSubtotal(amount, salesTaxRate):\n    subtotal = amount * (1 + salesTaxRate)\n    return subtotal\nprint(calcSubtotal(100, 0.25))",
@@ -95,6 +101,7 @@ addProblems([
   },
   {
     id: "fn-09", topic: "functions", level: 2, type: "code",
+    show: ["calcSubtotal", "amount", "salesTaxRate", "subtotal"],
     title: "Write calcSubtotal yourself",
     prompt: "Write the function `calcSubtotal(amount, salesTaxRate)`. It returns the amount plus tax, so `calcSubtotal(100, 0.25)` is 125.",
     starter: "# write your function here\n",
@@ -106,6 +113,7 @@ addProblems([
   },
   {
     id: "fn-10", topic: "functions", level: 2, type: "code",
+    show: ["full_name", "first", "last"],
     prompt: "Write `full_name(first, last)`. It returns the first and last name joined with a space, so `full_name(\"Ann\", \"Lee\")` is `\"Ann Lee\"`.",
     starter: "def full_name(first, last):\n    pass\n",
     solution: "def full_name(first, last):\n    return first + \" \" + last\n",
@@ -116,6 +124,7 @@ addProblems([
   },
   {
     id: "fn-11", topic: "functions", level: 1, type: "code",
+    show: ["is_adult", "age"],
     prompt: "Write `is_adult(age)`. It returns `True` if the age is 18 or more, otherwise `False`.",
     starter: "def is_adult(age):\n    pass\n",
     solution: "def is_adult(age):\n    return age >= 18\n",
@@ -144,6 +153,7 @@ addProblems([
   },
   {
     id: "fn-14", topic: "functions", level: 2, type: "predict",
+    show: ["power", "base", "exp"],
     title: "Keyword arguments",
     prompt: "What does this print? You can pass arguments by name, in any order.",
     code: "def power(base, exp):\n    return base ** exp\nprint(power(exp=3, base=2))",
@@ -153,6 +163,7 @@ addProblems([
   },
   {
     id: "fn-15", topic: "functions", level: 2, type: "predict",
+    show: ["add", "a", "b", "double_sum"],
     title: "One function calling another",
     prompt: "What does this print?",
     code: "def add(a, b):\n    return a + b\ndef double_sum(a, b):\n    return add(a, b) * 2\nprint(double_sum(2, 3))",
@@ -162,6 +173,7 @@ addProblems([
   },
   {
     id: "fn-16", topic: "functions", level: 2, type: "code",
+    show: ["total_with_tip", "bill", "tip_percent"],
     prompt: "Write `total_with_tip(bill, tip_percent)`. It returns the bill plus the tip, so `total_with_tip(50, 20)` is 60.",
     starter: "def total_with_tip(bill, tip_percent):\n    return bill + tip_percent\n",
     solution: "def total_with_tip(bill, tip_percent):\n    return bill + bill * tip_percent / 100\n",

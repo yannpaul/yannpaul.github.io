@@ -171,6 +171,7 @@ addProblems([
   },
   {
     id: "imp-19", topic: "imports", level: 2, type: "code",
+    show: ["circle_area", "r"],
     prompt: "Write `circle_area(r)`, which returns the area of a circle with radius `r` (area = pi times r squared). Use `math.pi`.",
     starter: "import math\n\ndef circle_area(r):\n    return 0\n",
     solution: "import math\n\ndef circle_area(r):\n    return math.pi * r ** 2\n",
@@ -181,6 +182,7 @@ addProblems([
   },
   {
     id: "imp-20", topic: "imports", level: 3, type: "code",
+    show: ["hypotenuse", "a", "b"],
     prompt: "Write `hypotenuse(a, b)`: the length of the longest side of a right-angled triangle, `sqrt(a squared + b squared)`.",
     starter: "import math\n\ndef hypotenuse(a, b):\n    return 0\n",
     solution: "import math\n\ndef hypotenuse(a, b):\n    return math.sqrt(a ** 2 + b ** 2)\n",

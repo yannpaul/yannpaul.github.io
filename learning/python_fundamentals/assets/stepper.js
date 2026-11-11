@@ -11,7 +11,9 @@
 //     Stepper.fromTrace for the shape), ret ("return value" text), line: null for "done".
 //   * Live traces from pyrun.js (PyRun.trace), converted by Stepper.fromTrace.
 //
-// Stepper.mount(host, { code, steps, live, memory, error, truncated, title })
+// Stepper.mount(host, { code, steps, live, memory, show, error, truncated, title })
+//   show: optional list of variable names to display. Everything else (and imported modules)
+//   stays hidden until the learner ticks "show all variables".
 
 (function () {
   "use strict";
@@ -146,7 +148,15 @@
     var memBox = el("input"); memBox.type = "checkbox"; memBox.checked = showMemory;
     memLabel.appendChild(memBox);
     memLabel.appendChild(document.createTextNode(" show objects in memory"));
-    [first, back, fwd, last, counter, memLabel].forEach(function (n) { ctrl.appendChild(n); });
+    var show = opts.show && opts.show.length ? opts.show : null;
+    function hiddenVar(v) { return v.type === "module" || (show && show.indexOf(v.name) < 0); }
+    var anyHidden = steps.some(function (s) { return s.frames.some(function (f) { return f.vars.some(hiddenVar); }); });
+    var allLabel = el("label", "st-mem");
+    var allBox = el("input"); allBox.type = "checkbox"; allBox.checked = false;
+    allLabel.appendChild(allBox);
+    allLabel.appendChild(document.createTextNode(" show all variables"));
+    allLabel.hidden = !anyHidden;
+    [first, back, fwd, last, counter, memLabel, allLabel].forEach(function (n) { ctrl.appendChild(n); });
     root.appendChild(ctrl);
 
     var legend = el("p", "st-legend",
@@ -195,11 +205,12 @@
       step.frames.forEach(function (f, fi) {
         var box = el("div", "st-frame");
         box.appendChild(el("div", "st-frame-name", f.name === "Global" ? "Global frame" : "Frame: " + f.name));
-        if (!f.vars.length) {
+        var visible = f.vars.filter(function (v) { return allBox.checked || !hiddenVar(v); });
+        if (!visible.length) {
           box.appendChild(el("div", "st-empty", "(nothing yet)"));
         } else {
           var tbl = el("table", "st-vars");
-          f.vars.forEach(function (v) {
+          visible.forEach(function (v) {
             var tr = el("tr");
             tr.appendChild(el("td", "st-name", v.name));
             var td = el("td", "st-val");
@@ -291,6 +302,7 @@
     fwd.addEventListener("click", function () { go(i + 1); });
     last.addEventListener("click", function () { go(steps.length - 1); });
     memBox.addEventListener("change", render);
+    allBox.addEventListener("change", render);
     root.tabIndex = 0;
     root.addEventListener("keydown", function (ev) {
       if (ev.target && ev.target.tagName === "INPUT") return;

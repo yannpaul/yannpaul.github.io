@@ -1,6 +1,7 @@
 addProblems([
   {
     id: "ident-01", topic: "identity", level: 2, type: "yesno",
+    show: ["a", "b", "c"],
     title: "From class: the Yes / No table",
     prompt: "Using the following code values, select Yes if the Boolean statement is true, and No if it is false.",
     code: "a = 5\nb = 3\n\nc = b\nb = a",
@@ -26,6 +27,7 @@ addProblems([
   },
   {
     id: "ident-02", topic: "identity", level: 2, type: "predict",
+    show: ["a", "b", "c"],
     title: "The end state from your notes",
     prompt: "What does this print?",
     code: "a = 5\nb = 3\nc = b\nb = a\nprint(a, b, c)",
@@ -55,6 +57,7 @@ addProblems([
   },
   {
     id: "ident-04", topic: "identity", level: 2, type: "predict",
+    show: ["a", "b"],
     title: "Equal, but not the same",
     prompt: "What does this print?",
     code: "a = [1, 2]\nb = [1, 2]\nprint(a == b, a is b)",
@@ -70,6 +73,7 @@ addProblems([
   },
   {
     id: "ident-05", topic: "identity", level: 2, type: "predict",
+    show: ["a", "b"],
     title: "One list, two names",
     prompt: "What does this print?",
     code: "a = [1, 2]\nb = a\nb.append(3)\nprint(a)",
@@ -86,6 +90,7 @@ addProblems([
   },
   {
     id: "ident-06", topic: "identity", level: 2, type: "predict",
+    show: ["a", "b"],
     title: "A real copy",
     prompt: "This time `b` gets a copy. What does this print?",
     code: "a = [1, 2]\nb = a.copy()\nb.append(3)\nprint(a)",
@@ -95,6 +100,7 @@ addProblems([
   },
   {
     id: "ident-07", topic: "identity", level: 2, type: "predict",
+    show: ["a", "b"],
     title: "Numbers behave differently",
     prompt: "What does this print? Numbers cannot be changed in place, only replaced.",
     code: "a = 5\nb = a\na = 7\nprint(b)",
@@ -111,6 +117,7 @@ addProblems([
   },
   {
     id: "ident-08", topic: "identity", level: 2, type: "predict",
+    show: ["x", "y"],
     prompt: "What does this print? (`+=` on a number builds a new number.)",
     code: "x = 3\ny = x\ny += 1\nprint(x, y)",
     answer: "3 4",
@@ -143,6 +150,7 @@ addProblems([
   },
   {
     id: "ident-11", topic: "identity", level: 2, type: "yesno",
+    show: ["x", "y", "z"],
     prompt: "Choose Yes if each statement is True.",
     code: "x = [1]\ny = x\nz = [1]",
     statements: [
@@ -156,6 +164,7 @@ addProblems([
   },
   {
     id: "ident-12", topic: "identity", level: 3, type: "predict",
+    show: ["a"],
     title: "None",
     prompt: "What does this print? (`None` is a single special object.)",
     code: "a = None\nprint(a is None, a == None)",

@@ -3,7 +3,7 @@
 // the folder disagree). Files load in order, before the scripts that come after this tag.
 (function () {
   var files = [
-    "_register.js",
+    "register.js",
     "topics.js",
     "problems-precedence.js",
     "problems-logic.js",

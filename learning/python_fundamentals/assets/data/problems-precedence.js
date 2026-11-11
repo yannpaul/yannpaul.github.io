@@ -1,6 +1,7 @@
 addProblems([
   {
     id: "prec-01", topic: "precedence", level: 1, type: "predict",
+    show: ["a"],
     title: "From class: the first one",
     prompt: "What does this program print?",
     code: "a = 10\na += 4 + 5\nprint(a)",
@@ -49,6 +50,7 @@ addProblems([
   },
   {
     id: "prec-04", topic: "precedence", level: 1, type: "predict",
+    show: ["x"],
     prompt: "What does this print?",
     code: "x = 5\nx -= 2 * 3\nprint(x)",
     answer: "-1",
@@ -84,6 +86,7 @@ addProblems([
   },
   {
     id: "prec-07", topic: "precedence", level: 2, type: "predict",
+    show: ["a", "b"],
     prompt: "What does this print?",
     code: "a = 4\nb = 2\na *= b + 3\nprint(a)",
     answer: "20",
@@ -104,6 +107,7 @@ addProblems([
   },
   {
     id: "prec-08", topic: "precedence", level: 2, type: "predict",
+    show: ["x"],
     prompt: "What does this print? Follow `x` one line at a time.",
     code: "x = 7\nx += 2\nx *= 3\nprint(x)",
     answer: "27",
@@ -127,6 +131,7 @@ addProblems([
   },
   {
     id: "prec-10", topic: "precedence", level: 2, type: "predict",
+    show: ["n"],
     title: "Three levels in one line",
     prompt: "This line uses arithmetic, comparison and assignment. What does it print?",
     code: "n = 5\nn = n + 1 == 6\nprint(n)",
@@ -148,6 +153,7 @@ addProblems([
   },
   {
     id: "prec-11", topic: "precedence", level: 2, type: "predict",
+    show: ["a", "b"],
     prompt: "What does this print?",
     code: "a = 6\nb = 4\na -= b\nb += a\nprint(a, b)",
     answer: "2 6",
@@ -181,6 +187,7 @@ addProblems([
   },
   {
     id: "prec-14", topic: "precedence", level: 2, type: "yesno",
+    show: ["a"],
     title: "Yes / No table",
     prompt: "After this code runs, is each statement true? Choose Yes or No.",
     code: "a = 10\na += 4 + 5",
@@ -214,6 +221,7 @@ addProblems([
   },
   {
     id: "prec-16", topic: "precedence", level: 1, type: "fill",
+    show: ["x"],
     prompt: "Choose the operator that makes this print 9.",
     template: "x = 2\nx [[op]] 3 + 4\nprint(x)",
     blanks: { op: { options: ["+=", "-=", "*=", "/="], answer: "+=" } },
@@ -224,6 +232,7 @@ addProblems([
   },
   {
     id: "prec-17", topic: "precedence", level: 2, type: "code",
+    show: ["average", "a", "b"],
     prompt: "Write a function `average(a, b)` that returns the average of two numbers. The starter code has a precedence bug. Fix it.",
     starter: "def average(a, b):\n    return a + b / 2\n",
     solution: "def average(a, b):\n    return (a + b) / 2\n",

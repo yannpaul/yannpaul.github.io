@@ -476,7 +476,7 @@
           wbtn.disabled = true;
           host.textContent = "";
           if (p.walk && window.Stepper) {
-            window.Stepper.mount(host, { code: p.walkCode || p.code, steps: p.walk });
+            window.Stepper.mount(host, { code: p.walkCode || p.code, steps: p.walk, show: p.show });
           } else {
             host.appendChild(el("p", "pb-note", "Tracing the code with the real interpreter…"));
             try {
@@ -484,7 +484,7 @@
               host.textContent = "";
               window.Stepper.mount(host, {
                 code: wcode, steps: window.Stepper.fromTrace(res), live: true,
-                memory: p.memory ? true : undefined,
+                memory: p.memory ? true : undefined, show: p.show,
                 error: res.err ? (res.line ? "Error on line " + res.line + ": " : "Error: ") + res.err : null
               });
             } catch (e) {
@@ -588,7 +588,24 @@
   // ---------- the all-problems page ----------
   function mountBank(host) {
     var topics = window.TOPICS || [];
-    var state = { topic: (location.hash || "").replace("#", ""), level: "all", status: "all", type: "all", shown: 10 };
+    // Each filter is a set of ticked values; everything starts ticked. A #topic in the URL
+    // (from a lesson's "more problems" link) starts with just that topic ticked.
+    var hashTopic = (location.hash || "").replace("#", "");
+    var OPTIONS = {
+      topic: topics.map(function (t) { return [t.id, t.title]; }),
+      level: [["1", "Warm-up"], ["2", "Core"], ["3", "Exam trap"]],
+      type: Object.keys(TYPE_NAMES).map(function (k) { return [k, TYPE_NAMES[k]]; }),
+      status: [["todo", "Not solved yet"], ["done", "Solved"]]
+    };
+    var NOUN = { topic: "topics", level: "levels", type: "types", status: "problems" };
+    var state = { shown: 10 };
+    Object.keys(OPTIONS).forEach(function (k) {
+      state[k] = {};
+      OPTIONS[k].forEach(function (o) { state[k][o[0]] = true; });
+    });
+    if (hashTopic && state.topic[hashTopic]) {
+      Object.keys(state.topic).forEach(function (k) { state.topic[k] = k === hashTopic; });
+    }
     var controls = el("div", "pb-controls");
     var listHost = el("div", "pb-list");
     var summary = el("p", "pb-tally");
@@ -596,27 +613,55 @@
     host.appendChild(controls);
     host.appendChild(listHost);
 
-    function select(labelText, options, key) {
-      var wrap = el("label", "pb-filter");
+    // A dropdown of checkboxes, with an "All" box on top.
+    function multi(labelText, key) {
+      var wrap = el("div", "pb-filter");
       wrap.appendChild(el("span", null, labelText));
-      var s = el("select");
-      options.forEach(function (o) { var op = el("option", null, o[1]); op.value = o[0]; s.appendChild(op); });
-      s.addEventListener("change", function () { state[key] = s.value; state.shown = 10; draw(); });
-      wrap.appendChild(s);
+      var dd = el("details", "pb-multi");
+      var sum = el("summary");
+      dd.appendChild(sum);
+      var panel = el("div", "pb-multi-panel");
+      var allLabel = el("label", "pb-multi-all");
+      var allBox = el("input"); allBox.type = "checkbox";
+      allLabel.appendChild(allBox);
+      allLabel.appendChild(document.createTextNode(" All"));
+      panel.appendChild(allLabel);
+      var boxes = OPTIONS[key].map(function (o) {
+        var l = el("label");
+        var c = el("input"); c.type = "checkbox"; c.value = o[0];
+        l.appendChild(c);
+        l.appendChild(document.createTextNode(" " + o[1]));
+        panel.appendChild(l);
+        c.addEventListener("change", function () { state[key][o[0]] = c.checked; sync(); state.shown = 10; draw(); });
+        return c;
+      });
+      allBox.addEventListener("change", function () {
+        OPTIONS[key].forEach(function (o) { state[key][o[0]] = allBox.checked; });
+        sync(); state.shown = 10; draw();
+      });
+      function sync() {
+        var on = OPTIONS[key].filter(function (o) { return state[key][o[0]]; });
+        boxes.forEach(function (c) { c.checked = !!state[key][c.value]; });
+        allBox.checked = on.length === OPTIONS[key].length;
+        allBox.indeterminate = on.length > 0 && on.length < OPTIONS[key].length;
+        sum.textContent = on.length === OPTIONS[key].length ? "All " + NOUN[key]
+          : on.length === 0 ? "None"
+          : on.length === 1 ? on[0][1]
+          : on.length + " " + NOUN[key];
+      }
+      dd.appendChild(panel);
+      wrap.appendChild(dd);
+      sync();
       return wrap;
     }
-    var topicSel = el("label", "pb-filter");
-    topicSel.appendChild(el("span", null, "Topic"));
-    var ts = el("select");
-    var allOpt = el("option", null, "All topics"); allOpt.value = ""; ts.appendChild(allOpt);
-    topics.forEach(function (t) { var o = el("option", null, t.title); o.value = t.id; ts.appendChild(o); });
-    ts.value = state.topic;
-    ts.addEventListener("change", function () { state.topic = ts.value; state.shown = 10; draw(); });
-    topicSel.appendChild(ts);
-    controls.appendChild(topicSel);
-    controls.appendChild(select("Level", [["all", "All levels"], ["1", "Warm-up"], ["2", "Core"], ["3", "Exam trap"]], "level"));
-    controls.appendChild(select("Type", [["all", "All types"]].concat(Object.keys(TYPE_NAMES).map(function (k) { return [k, TYPE_NAMES[k]]; })), "type"));
-    controls.appendChild(select("Show", [["all", "Everything"], ["todo", "Not solved yet"], ["done", "Solved"]], "status"));
+    controls.appendChild(multi("Topic", "topic"));
+    controls.appendChild(multi("Level", "level"));
+    controls.appendChild(multi("Type", "type"));
+    controls.appendChild(multi("Show", "status"));
+    // close an open dropdown when clicking elsewhere
+    document.addEventListener("click", function (ev) {
+      controls.querySelectorAll("details.pb-multi[open]").forEach(function (d) { if (!d.contains(ev.target)) d.open = false; });
+    });
     var random = el("button", "pc-btn primary", "🎲 Give me a random one");
     random.type = "button";
     controls.appendChild(random);
@@ -626,12 +671,8 @@
 
     function filtered() {
       return ALL.filter(function (p) {
-        if (state.topic && p.topic !== state.topic) return false;
-        if (state.level !== "all" && String(p.level) !== state.level) return false;
-        if (state.type !== "all" && p.type !== state.type) return false;
-        if (state.status === "todo" && isSolved(p.id)) return false;
-        if (state.status === "done" && !isSolved(p.id)) return false;
-        return true;
+        return state.topic[p.topic] && state.level[String(p.level)] && state.type[p.type] &&
+          state.status[isSolved(p.id) ? "done" : "todo"];
       });
     }
 
@@ -673,7 +714,7 @@
     // <div class="walk-demo" data-problem="prec-01"></div> shows that problem's authored walkthrough
     document.querySelectorAll(".walk-demo[data-problem]").forEach(function (host) {
       var p = ALL.filter(function (q) { return q.id === host.dataset.problem; })[0];
-      if (p && p.walk && window.Stepper) window.Stepper.mount(host, { code: p.walkCode || p.code, steps: p.walk, noScroll: true });
+      if (p && p.walk && window.Stepper) window.Stepper.mount(host, { code: p.walkCode || p.code, steps: p.walk, show: p.show, noScroll: true });
     });
     document.querySelectorAll(".bank").forEach(mountBank);
   });
