@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 7 · Functions</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+<p class="eyebrow">Python Fundamentals · Lesson 7 · Day 2 · practice questions</p>
+<h1>Functions</h1>
+<p class="subtitle">Build your own tool with <code>def</code>: parameters going in, a value coming out. Then watch the frames appear and disappear.</p>
+<p class="meta"><span class="pill">⏱ about 25 min</span> <span class="pill">▶ code you can run on this page</span></p>
+
+<h2>Warm-up: from last time</h2>
+<p>Two questions from earlier lessons, from memory. Spacing out your practice like this is what makes it stick.</p>
+<div class="problems" data-ids="prec-07,num-13"></div>
+
+<div class="lede"><p>A function is a named recipe. Write it once, use it as often as you like. This is the first practice question from your notes: <code>calcSubtotal</code>.</p></div>
+
+<h2>The anatomy</h2>
+<pre><code>def calcSubtotal(amount, salesTaxRate):         # header: def, name, parameters, colon
+    subtotal = amount * (1 + salesTaxRate)      # body: indented four spaces
+    return subtotal                             # hand the answer back</code></pre>
+<ul>
+  <li><code>def</code> is the keyword that says a function is being built.</li>
+  <li><strong>Parameters</strong> are the placeholder names in the header: <code>amount</code> and <code>salesTaxRate</code>. They go in parentheses, and the header ends with a <strong>colon</strong>.</li>
+  <li>The indented lines are the body. They run only when the function is <strong>called</strong>.</li>
+  <li><code>return</code> sends a value back to whoever called the function, and ends the function there.</li>
+  <li><strong>Arguments</strong> are the real values you pass in at the call: <code>calcSubtotal(100, 0.25)</code>.</li>
+</ul>
+<p>The subtotal is the amount calculated, so <code>subtotal</code> is what is returned, not <code>amount</code> and not the name of the function.</p>
+
+<h2>See what happens at a call</h2>
+<p>Step through a tiny function. Defining it does <em>nothing</em>. The call is what makes a new frame appear.</p>
+<div class="walk-demo" data-problem="fn-03"></div>
+
+<h2>Try it</h2>
+<p>Press <strong>Step through</strong> and watch the frames. Notice the &ldquo;Return value&rdquo; box.</p>
+<pre class="try" data-title="Try it: your class function, with a call"><code>def calcSubtotal(amount, salesTaxRate):
+    subtotal = amount * (1 + salesTaxRate)
+    return subtotal
+
+print(calcSubtotal(100, 0.25))
+print(calcSubtotal(80, 0.1))</code></pre>
+
+<h2>Three things that catch people</h2>
+<ol>
+  <li><strong>No <code>return</code> means <code>None</code>.</strong> A function that only calculates, without <code>return</code>, gives back nothing useful.</li>
+  <li><strong><code>return</code> ends the function.</strong> Lines after it never run.</li>
+  <li><strong>A name made inside a function stays inside.</strong> Setting <code>x = 5</code> in a function does not change a global <code>x</code>.</li>
+</ol>
+<div class="walk-demo" data-problem="fn-07"></div>
+
+<div class="callout good">
+  <span class="callout-label">Return or print?</span>
+  <p><code>print</code> shows something on the screen. <code>return</code> hands a value to the code that called the function, so it can use it for more calculating. Functions that calculate should <code>return</code>.</p>
+</div>
+
+<h2>Practice</h2>
+<p>The first problem that needs a function is the <code>calcSubtotal</code> fill-in from your notes.</p>
+<div class="problems" data-topic="functions" data-limit="6"></div>
+<p>More are in the <a href="../reference/problem-bank.html#functions">problem bank</a>. The <strong>Write the code</strong> problems run your function against real tests.</p>
+
+<div class="source"><span class="callout-label">Primary source</span><p><a href="https://docs.python.org/3/tutorial/controlflow.html#defining-functions">The Python Tutorial: Defining Functions</a>. A short, readable tour of <code>def</code>, <code>return</code>, default values and keyword arguments.</p></div>
+
+<div class="ask-your-teacher">Stuck, or something here does not match what you see? Ask your teacher. Paste the code, say what you expected, and say what you got.</div>
+
+<div class="lesson-nav">
+<a href="./0006-dates-and-times.html">← Lesson 6</a>
+<a href="../index.html">Course contents</a>
+<a href="../reference/files-errors-tests.html">Cheat sheet: functions, tests, files, errors</a>
+<a href="./0008-unit-tests.html">Lesson 8 →</a>
+</div>
+</main>
+<script src="../assets/data/load.js"></script>
+<script src="../assets/pyrun.js"></script>
+<script src="../assets/stepper.js"></script>
+<script src="../assets/problems.js"></script>
+</body>
+</html>

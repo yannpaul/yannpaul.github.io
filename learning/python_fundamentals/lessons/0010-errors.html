@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 10 · Errors: try, except, raise, finally</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+<p class="eyebrow">Python Fundamentals · Lesson 10 · Day 2 · practice questions</p>
+<h1>Errors: try, except, raise, finally</h1>
+<p class="subtitle">Catch errors instead of crashing. Learn which block runs when, and how to throw an error on purpose.</p>
+<p class="meta"><span class="pill">⏱ about 25 min</span> <span class="pill">▶ code you can run on this page</span></p>
+
+<h2>Warm-up: from last time</h2>
+<p>Two questions from earlier lessons, from memory. Spacing out your practice like this is what makes it stick.</p>
+<div class="problems" data-ids="file-05,fn-05"></div>
+
+<div class="lede"><p>Things go wrong: a file is missing, someone divides by zero. Error handling lets your program decide what to do. This is the last practice question in your notes.</p></div>
+
+<h2>Four blocks, one rule each</h2>
+<table>
+<tr><th>Block</th><th>Runs when&hellip;</th></tr>
+<tr><td><code>try:</code></td><td>always starts here. If a line raises an error, the rest of the block is skipped.</td></tr>
+<tr><td><code>except:</code></td><td>the <code>try</code> block raised an error (a matching one)</td></tr>
+<tr><td><code>else:</code></td><td>the <code>try</code> block finished with <strong>no</strong> error</td></tr>
+<tr><td><code>finally:</code></td><td><strong>always</strong>, whatever happened. It goes last.</td></tr>
+</table>
+<p><code>raise</code> is the keyword that <em>throws</em> an exception on purpose, so the calling code can catch it. It is a keyword, not a method, and <code>throw</code> is the Java word for the same idea.</p>
+
+<h2>Watch the two paths</h2>
+<p>The same program, once without an error and once with one. Step through both and compare which blocks run.</p>
+<div class="walk-demo" data-problem="err-04"></div>
+<div class="walk-demo" data-problem="err-05"></div>
+
+<h2>Your class program</h2>
+<p>This is the code from your notes. The box below gives it two inputs, <code>10</code> and <code>2</code>. Run it, then change the second input to <code>0</code> and run again.</p>
+<pre class="try" data-stdin="10&#10;2" data-title="Try it: then change the second input to 0"><code>x = float(input("Enter a number. "))
+y = float(input("Enter a number to divide by. "))
+
+try:
+    print(f"The answer is {x/y}.")
+except:
+    if y == 0:
+        raise Exception("You cannot divide by zero")
+finally:
+    print("Thank you for playing.")</code></pre>
+<p>With <code>0</code> you will see two things: &ldquo;Thank you for playing.&rdquo; is printed <em>even though</em> the program is about to fail, and then the error is reported. That is <code>finally</code>.</p>
+
+<div class="callout good">
+  <span class="callout-label">Catch the error you expect</span>
+  <p>A bare <code>except:</code> catches <em>everything</em>, including mistakes you did not mean to hide. It is better to name the error: <code>except ZeroDivisionError:</code>. Then a surprise, like a typo, still shows up.</p>
+</div>
+
+<h2>Practice</h2>
+<div class="problems" data-topic="errors" data-limit="6"></div>
+<p>More are in the <a href="../reference/problem-bank.html#errors">problem bank</a>.</p>
+
+<h2>You have covered everything in your notes</h2>
+<p>When your teacher gives you more material, bring it back here and it will become Lesson 11. In the meantime, the <a href="../reference/problem-bank.html">problem bank</a> mixes every topic, which is the best way to get ready for the test.</p>
+
+<div class="source"><span class="callout-label">Primary source</span><p><a href="https://docs.python.org/3/tutorial/errors.html">The Python Tutorial: Errors and Exceptions</a>. Covers <code>try</code>, <code>except</code>, <code>else</code>, <code>finally</code> and <code>raise</code> in order, with short examples.</p></div>
+
+<div class="ask-your-teacher">Stuck, or something here does not match what you see? Ask your teacher. Paste the code, say what you expected, and say what you got.</div>
+
+<div class="lesson-nav">
+<a href="./0009-files-and-argv.html">← Lesson 9</a>
+<a href="../index.html">Course contents</a>
+<a href="../reference/files-errors-tests.html">Cheat sheet: functions, tests, files, errors</a>
+</div>
+</main>
+<script src="../assets/data/load.js"></script>
+<script src="../assets/pyrun.js"></script>
+<script src="../assets/stepper.js"></script>
+<script src="../assets/problems.js"></script>
+</body>
+</html>

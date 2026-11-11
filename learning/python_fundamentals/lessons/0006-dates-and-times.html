@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 6 · Dates and Times</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+<p class="eyebrow">Python Fundamentals · Lesson 6 · Day 2</p>
+<h1>Dates and Times</h1>
+<p class="subtitle">Import the right thing, build a date, turn it into text with <code>strftime</code>, and find the day of the week.</p>
+<p class="meta"><span class="pill">⏱ about 20 min</span> <span class="pill">▶ code you can run on this page</span></p>
+
+<h2>Warm-up: from last time</h2>
+<p>Two questions from earlier lessons, from memory. Spacing out your practice like this is what makes it stick.</p>
+<div class="problems" data-ids="imp-04,imp-07"></div>
+
+<div class="lede"><p>Programs are always asking &ldquo;what day is it?&rdquo; and &ldquo;what should I print on this invoice?&rdquo;. The <code>datetime</code> module answers both.</p></div>
+
+<h2>Which import?</h2>
+<p>This module has a confusing habit: the <strong>module</strong> is called <code>datetime</code> and the main <strong>class</strong> inside it is also called <code>datetime</code>. Which one the name means depends on how you import.</p>
+<table>
+<tr><th>You write</th><th>The name <code>datetime</code> means</th><th>Current time</th></tr>
+<tr><td><code>from datetime import datetime</code></td><td>the class</td><td><code>datetime.now()</code></td></tr>
+<tr><td><code>import datetime</code></td><td>the module</td><td><code>datetime.datetime.now()</code></td></tr>
+</table>
+<div class="fixit">
+  <span class="callout-label">A note that does not work as written</span>
+  <p>Your notes list <code>import datetime</code> and then <code>datetime.now()</code>. Those two do not go together: <code>import datetime</code> followed by <code>datetime.now()</code> is an <code>AttributeError</code>, because the module has no <code>now</code>. The class does. Use <code>from datetime import datetime</code> for the short form. There is an exam-trap problem about this below.</p>
+</div>
+
+<h2>The tools from your notes</h2>
+<table>
+<tr><th>Tool</th><th>What it does</th></tr>
+<tr><td><code>datetime.now()</code></td><td>the exact current local date and time, from your computer</td></tr>
+<tr><td><code>d.strftime(format)</code></td><td>&ldquo;string format time&rdquo;: turns a date into text, using <code>%</code> codes</td></tr>
+<tr><td><code>d.weekday()</code></td><td>the day of the week as a number: <strong>Monday is 0</strong>, Sunday is 6</td></tr>
+</table>
+<p><code>weekday</code> is a method, so it needs parentheses: <code>d.weekday()</code>.</p>
+
+<h2>The format codes you need</h2>
+<table>
+<tr><th>Code</th><th>Gives</th><th>For 5 March 2024, 2:07 pm</th></tr>
+<tr><td><code>%Y</code></td><td>4-digit year</td><td><code>2024</code></td></tr>
+<tr><td><code>%y</code></td><td>2-digit year</td><td><code>24</code></td></tr>
+<tr><td><code>%m</code></td><td>month number</td><td><code>03</code></td></tr>
+<tr><td><code>%B</code> / <code>%b</code></td><td>month name, full / short</td><td><code>March</code> / <code>Mar</code></td></tr>
+<tr><td><code>%d</code></td><td>day of the month</td><td><code>05</code></td></tr>
+<tr><td><code>%A</code> / <code>%a</code></td><td>weekday name, full / short</td><td><code>Tuesday</code> / <code>Tue</code></td></tr>
+<tr><td><code>%H</code> <code>%M</code> <code>%S</code></td><td>hour (24h), minute, second</td><td><code>14</code> <code>07</code> <code>00</code></td></tr>
+<tr><td><code>%I</code> <code>%p</code></td><td>hour (12h), AM or PM</td><td><code>02</code> <code>PM</code></td></tr>
+</table>
+<p>Capital and lowercase mean different things. A good way to remember: the capital letter is usually the longer, fuller version.</p>
+
+<h2>Try it</h2>
+<pre class="try" data-title="Try it: change the date, change the format"><code>from datetime import datetime
+
+d = datetime(2024, 3, 5, 14, 7)
+print(d.strftime("%Y-%m-%d"))
+print(d.strftime("%A, %B %d, %Y"))
+print(d.strftime("%I:%M %p"))
+print(d.weekday())
+
+print(datetime.now())</code></pre>
+<p>The last line shows the real current time, so it changes every time you press Run.</p>
+
+<h2>Practice</h2>
+<div class="problems" data-topic="datetime" data-limit="6"></div>
+<p>More are in the <a href="../reference/problem-bank.html#datetime">problem bank</a>.</p>
+
+<div class="source"><span class="callout-label">Primary source</span><p><a href="https://docs.python.org/3/library/datetime.html#strftime-and-strptime-format-codes">Python Library Reference: <code>strftime</code> format codes</a>. The full table of every <code>%</code> code. The <a href="https://docs.python.org/3/library/datetime.html">datetime module page</a> is the reference for everything else.</p></div>
+
+<div class="ask-your-teacher">Stuck, or something here does not match what you see? Ask your teacher. Paste the code, say what you expected, and say what you got.</div>
+
+<div class="lesson-nav">
+<a href="./0005-imports-and-math.html">← Lesson 5</a>
+<a href="../index.html">Course contents</a>
+<a href="../reference/imports-math-datetime.html">Cheat sheet: imports, math, datetime</a>
+<a href="./0007-functions.html">Lesson 7 →</a>
+</div>
+</main>
+<script src="../assets/data/load.js"></script>
+<script src="../assets/pyrun.js"></script>
+<script src="../assets/stepper.js"></script>
+<script src="../assets/problems.js"></script>
+</body>
+</html>

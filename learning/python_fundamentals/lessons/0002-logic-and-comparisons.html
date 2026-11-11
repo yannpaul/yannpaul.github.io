@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 2 · Logic and Comparisons</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+<p class="eyebrow">Python Fundamentals · Lesson 2 · Day 1</p>
+<h1>Logic and Comparisons</h1>
+<p class="subtitle">Booleans, <code>not</code>, <code>and</code>, <code>or</code>, and the comparison operators. Work out a long condition one small piece at a time.</p>
+<p class="meta"><span class="pill">⏱ about 20 min</span> <span class="pill">▶ code you can run on this page</span></p>
+
+<h2>Warm-up: from last time</h2>
+<p>Two questions from earlier lessons, from memory. Spacing out your practice like this is what makes it stick.</p>
+<div class="problems" data-ids="prec-07,prec-10"></div>
+
+<div class="lede"><p>Conditions are everywhere: <code>if age &gt;= 18 and has_ticket</code>. After this lesson you can take any condition, find the order Python will work it out in, and write the value under each piece.</p></div>
+
+<h2>The logic ladder from your notes</h2>
+<ol class="ladder">
+  <li><span class="ops">not</span> <small>happens first</small></li>
+  <li><span class="ops">and</span></li>
+  <li><span class="ops">or</span> <small>happens last</small></li>
+</ol>
+<p>That is a ladder inside the bigger ladder from Lesson 1. All of arithmetic, containment, comparison and identity happen <em>before</em> any of these three.</p>
+
+<h2>What each word does</h2>
+<table>
+<tr><th><code>a</code></th><th><code>b</code></th><th><code>not a</code></th><th><code>a and b</code></th><th><code>a or b</code></th></tr>
+<tr><td>True</td><td>True</td><td>False</td><td>True</td><td>True</td></tr>
+<tr><td>True</td><td>False</td><td>False</td><td>False</td><td>True</td></tr>
+<tr><td>False</td><td>True</td><td>True</td><td>False</td><td>True</td></tr>
+<tr><td>False</td><td>False</td><td>True</td><td>False</td><td>False</td></tr>
+</table>
+<p><code>and</code> needs <strong>both</strong> sides True. <code>or</code> needs <strong>at least one</strong>. <code>not</code> flips.</p>
+
+<h2>The comparison operators</h2>
+<table>
+<tr><th>Operator</th><th>Means</th><th>Example</th></tr>
+<tr><td><code>==</code></td><td>equal values</td><td><code>3 == 3</code> is True</td></tr>
+<tr><td><code>!=</code></td><td>not equal</td><td><code>3 != 4</code> is True</td></tr>
+<tr><td><code>&lt;</code> <code>&lt;=</code></td><td>less than, less than or equal</td><td><code>3 &lt;= 3</code> is True</td></tr>
+<tr><td><code>&gt;</code> <code>&gt;=</code></td><td>greater than, greater than or equal</td><td><code>3 &gt; 3</code> is False</td></tr>
+<tr><td><code>in</code>, <code>not in</code></td><td>is it inside?</td><td><code>"an" in "banana"</code> is True</td></tr>
+</table>
+<p>A single <code>=</code> is assignment. A double <code>==</code> is the question &ldquo;are these equal?&rdquo;. Mixing them up is the most common beginner error.</p>
+
+<h2>See it happen</h2>
+<p>Step through this one. Each comparison becomes True or False first. Only then do <code>not</code> and <code>and</code> get a turn.</p>
+<div class="walk-demo" data-problem="logic-08"></div>
+
+<div class="fixit">
+  <span class="callout-label">The one place your class ladder and real Python disagree</span>
+  <p>Your notes put <code>in</code>, <code>==</code> and <code>is</code> on separate rungs. In real Python they share one rung, and a run of them <em>chains</em>: <code>1 &lt; x &lt; 10</code> means <code>1 &lt; x and x &lt; 10</code>. The surprise is that this also applies to <code>in</code> and <code>==</code>. Try it, then do the exam-trap problem about it below.</p>
+</div>
+<pre class="try" data-title="Try it: guess each line first"><code>x = 7
+print(1 < x < 10)
+print(x > 3 and not x == 7)
+print(5 in [1, 5] == True)</code></pre>
+
+<div class="callout good">
+  <span class="callout-label">A good habit</span>
+  <p>When a condition has more than two parts, write the value of each comparison <em>underneath</em> it before you touch <code>not</code>, <code>and</code> or <code>or</code>. On a test, this is the whole trick.</p>
+</div>
+
+<h2>Practice</h2>
+<div class="problems" data-topic="logic" data-limit="6"></div>
+<p>More are in the <a href="../reference/problem-bank.html#logic">problem bank</a>.</p>
+
+<div class="source"><span class="callout-label">Primary source</span><p><a href="https://docs.python.org/3/reference/expressions.html#comparisons">Python Language Reference: Comparisons</a> and <a href="https://docs.python.org/3/reference/expressions.html#boolean-operations">Boolean operations</a>. The comparison section explains chaining.</p></div>
+
+<div class="ask-your-teacher">Stuck, or something here does not match what you see? Ask your teacher. Paste the code, say what you expected, and say what you got.</div>
+
+<div class="lesson-nav">
+<a href="./0001-operator-precedence.html">← Lesson 1</a>
+<a href="../index.html">Course contents</a>
+<a href="../reference/precedence.html">Cheat sheet: precedence</a>
+<a href="./0003-equals-vs-identity.html">Lesson 3 →</a>
+</div>
+</main>
+<script src="../assets/data/load.js"></script>
+<script src="../assets/pyrun.js"></script>
+<script src="../assets/stepper.js"></script>
+<script src="../assets/problems.js"></script>
+</body>
+</html>

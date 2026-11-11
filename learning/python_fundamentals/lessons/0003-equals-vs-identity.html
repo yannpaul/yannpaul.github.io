@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 3 · Equals vs. Identity</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+<p class="eyebrow">Python Fundamentals · Lesson 3 · Day 1</p>
+<h1>Equals vs. Identity</h1>
+<p class="subtitle">Two names can hold the same value, or point at the very same object. <code>==</code> asks the first question and <code>is</code> asks the second.</p>
+<p class="meta"><span class="pill">⏱ about 25 min</span> <span class="pill">▶ code you can run on this page</span></p>
+
+<h2>Warm-up: from last time</h2>
+<p>Two questions from earlier lessons, from memory. Spacing out your practice like this is what makes it stick.</p>
+<div class="problems" data-ids="logic-06,prec-10"></div>
+
+<div class="lede"><p>This is the question from your notes that was marked <em>huh?</em>: <code>c is b</code>. By the end you will be able to answer it, draw it and explain it.</p></div>
+
+<h2>The picture: names are sticky notes</h2>
+<p>An <strong>object</strong> is a thing in memory, like the number 5 or a list. A <strong>name</strong> is a sticky note you stick onto an object. <code>a = 5</code> does not put 5 <em>inside</em> <code>a</code>. It sticks the label <code>a</code> onto a 5.</p>
+<ul>
+  <li><code>b = a</code> sticks a second label onto the <em>same</em> object. It does not make a new one.</li>
+  <li><code>c = b</code> looks at what <code>b</code> is stuck to <em>right now</em>, and sticks <code>c</code> there too.</li>
+  <li><code>b = 7</code> peels <code>b</code> off, and sticks it on a different object. Other labels stay where they were.</li>
+</ul>
+
+<h2>Two questions you can ask</h2>
+<table>
+<tr><th>Operator</th><th>Question</th></tr>
+<tr><td><code>a == b</code></td><td>Do they hold <strong>equal values</strong>?</td></tr>
+<tr><td><code>a is b</code></td><td>Are they the <strong>same object</strong>? (Same place in memory.)</td></tr>
+</table>
+<p>If <code>a is b</code> is True, then <code>a == b</code> is True as well. The other way round is not guaranteed: two separate lists with the same contents are equal, but they are not the same list.</p>
+
+<h2>Your class example, step by step</h2>
+<p>This is your Day 1 problem. Step through it and watch the coloured boxes. Two names with the same box number are stuck to the same object.</p>
+<div class="walk-demo" data-problem="ident-01"></div>
+<p>Your notes say: <em>at the end, a = 5, b = 5, c = 3, and a and b are stored in the same place in memory</em>. That is exactly right, and you just saw why.</p>
+
+<h2>Where it really matters: lists</h2>
+<p>Numbers cannot be changed in place, so sharing one is harmless. A list <em>can</em> be changed in place, so two names on one list is a real thing to watch. Press <strong>Step through</strong>: the memory view is already switched on, so you will see which names share an object.</p>
+<pre class="try" data-memory="on" data-title="Try it: step through, then change b = a to b = a.copy()"><code>a = [1, 2]
+b = a
+b.append(3)
+print(a)
+print(a is b)</code></pre>
+
+<div class="fixit">
+  <span class="callout-label">A small caution about numbers and strings</span>
+  <p>Python sometimes reuses small numbers and short strings, so <code>x is y</code> can be True even when you made them separately. That is an implementation detail you should never rely on. Use <code>==</code> to compare values. The real use for <code>is</code> is <code>x is None</code>, and the exam-style questions about which names share an object.</p>
+</div>
+
+<h2>Practice</h2>
+<p>The first problem is the one from your notes.</p>
+<div class="problems" data-topic="identity" data-limit="6"></div>
+
+<div class="source"><span class="callout-label">Primary source</span><p><a href="https://docs.python.org/3/reference/datamodel.html#objects-values-and-types">Python Language Reference: Objects, values and types</a>. It describes identity (&ldquo;the object&rsquo;s identity never changes once it has been created&rdquo;) and the <code>is</code> operator. Also try <a href="https://pythontutor.com/">Python Tutor</a>: it draws these arrows for you.</p></div>
+
+<div class="ask-your-teacher">Stuck, or something here does not match what you see? Ask your teacher. Paste the code, say what you expected, and say what you got.</div>
+
+<div class="lesson-nav">
+<a href="./0002-logic-and-comparisons.html">← Lesson 2</a>
+<a href="../index.html">Course contents</a>
+<a href="../reference/problem-bank.html#identity">All identity problems</a>
+<a href="./0004-division-floor-remainder.html">Lesson 4 →</a>
+</div>
+</main>
+<script src="../assets/data/load.js"></script>
+<script src="../assets/pyrun.js"></script>
+<script src="../assets/stepper.js"></script>
+<script src="../assets/problems.js"></script>
+</body>
+</html>

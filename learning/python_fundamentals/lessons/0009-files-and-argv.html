@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 9 · Files and sys.argv</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+<p class="eyebrow">Python Fundamentals · Lesson 9 · Day 2 · practice questions</p>
+<h1>Files and sys.argv</h1>
+<p class="subtitle">Open a file for reading, writing or appending, check that it exists, and read what you typed on the command line.</p>
+<p class="meta"><span class="pill">⏱ about 25 min</span> <span class="pill">▶ code you can run on this page</span></p>
+
+<h2>Warm-up: from last time</h2>
+<p>Two questions from earlier lessons, from memory. Spacing out your practice like this is what makes it stick.</p>
+<div class="problems" data-ids="ut-04,ident-03"></div>
+
+<div class="lede"><p>Programs that remember things need files. This lesson covers the three modes of <code>open</code>, why a <code>with</code> block is tidy, how to check a file is there, and what <code>sys.argv</code> holds.</p></div>
+
+<h2>Opening a file: the mode letter</h2>
+<table>
+<tr><th>Mode</th><th>Means</th><th>If the file already exists</th></tr>
+<tr><td><code>'r'</code></td><td>read (the default)</td><td>opens it, you can only read</td></tr>
+<tr><td><code>'w'</code></td><td>write</td><td><strong>erases it</strong> and starts again</td></tr>
+<tr><td><code>'a'</code></td><td>append</td><td>keeps it, adds new text at the <strong>end</strong></td></tr>
+</table>
+<p>This is the heart of the class question about the daily log. <code>open('log.txt', 'w')</code> wipes the file each time it is opened. Use <code>'a'</code> to build up a log.</p>
+
+<h2>with: open and close for you</h2>
+<pre><code>with open('log.txt', 'a') as file:
+    file.write('Daily Log\n')
+# the file is closed here, automatically</code></pre>
+<p>A <code>with</code> block closes the file when the block ends, so <code>file.close()</code> is not needed. Your notes say it &ldquo;removes the file from memory automatically&rdquo;. More exactly, it <em>closes</em> the file.</p>
+
+<h2>Reading</h2>
+<table>
+<tr><th>Call</th><th>Gives</th></tr>
+<tr><td><code>f.read()</code></td><td>everything that is left in the file, as one string</td></tr>
+<tr><td><code>f.readline()</code></td><td>one line, including its newline character</td></tr>
+<tr><td><code>f.seek(n)</code></td><td>moves the reading position to character <code>n</code> (it returns nothing to read)</td></tr>
+</table>
+<p>The reading position moves forward as you read, so a second call carries on where the first one stopped.</p>
+
+<h2>Does the file exist?</h2>
+<p><code>os.path.exists('work.txt')</code> is <code>True</code> or <code>False</code>. Check before reading a file you did not create.</p>
+
+<h2>Try it: write, append, read</h2>
+<p>Files here live in a scratch area inside your browser tab, so you cannot damage anything on your computer.</p>
+<pre class="try" data-title="Try it: change 'a' to 'w' and see what is lost"><code>import os.path
+
+with open("log.txt", "w") as f:
+    f.write("one\n")
+with open("log.txt", "a") as f:
+    f.write("two\n")
+
+if os.path.exists("log.txt"):
+    with open("log.txt") as f:
+        print(f.read())
+else:
+    print("The file is not in this folder.")</code></pre>
+
+<h2>sys.argv: what you typed after python</h2>
+<p>When you start a program with <code>python app.py 5 hello</code>, Python collects the words into a list called <code>sys.argv</code>:</p>
+<table>
+<tr><th>Index</th><th>Holds</th></tr>
+<tr><td><code>sys.argv[0]</code></td><td><code>'app.py'</code>, the <strong>file name</strong> of the script (the answer to your &ldquo;idk this&rdquo;)</td></tr>
+<tr><td><code>sys.argv[1]</code></td><td><code>'5'</code> (text, not a number!)</td></tr>
+<tr><td><code>sys.argv[2]</code></td><td><code>'hello'</code></td></tr>
+</table>
+<p>The box below pretends the command was <code>python app.py 5 hello</code>.</p>
+<pre class="try" data-argv="app.py 5 hello" data-title="Try it: sys.argv for 'python app.py 5 hello'"><code>import sys
+
+print(sys.argv)
+print(sys.argv[0])
+print(len(sys.argv))
+print(sys.argv[1] + sys.argv[1])
+print(int(sys.argv[1]) + int(sys.argv[1]))</code></pre>
+
+<h2>Practice</h2>
+<div class="problems" data-topic="files" data-limit="6"></div>
+<p>More are in the <a href="../reference/problem-bank.html#files">problem bank</a>.</p>
+
+<div class="source"><span class="callout-label">Primary source</span><p><a href="https://docs.python.org/3/tutorial/inputoutput.html#reading-and-writing-files">The Python Tutorial: Reading and Writing Files</a> (modes, <code>with</code>, <code>read</code>, <code>readline</code>) and <a href="https://docs.python.org/3/library/sys.html#sys.argv"><code>sys.argv</code></a> in the library reference.</p></div>
+
+<div class="ask-your-teacher">Stuck, or something here does not match what you see? Ask your teacher. Paste the code, say what you expected, and say what you got.</div>
+
+<div class="lesson-nav">
+<a href="./0008-unit-tests.html">← Lesson 8</a>
+<a href="../index.html">Course contents</a>
+<a href="../reference/files-errors-tests.html">Cheat sheet: functions, tests, files, errors</a>
+<a href="./0010-errors.html">Lesson 10 →</a>
+</div>
+</main>
+<script src="../assets/data/load.js"></script>
+<script src="../assets/pyrun.js"></script>
+<script src="../assets/stepper.js"></script>
+<script src="../assets/problems.js"></script>
+</body>
+</html>

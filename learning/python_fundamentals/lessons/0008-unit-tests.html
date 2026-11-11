@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 8 · Unit Tests</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+<p class="eyebrow">Python Fundamentals · Lesson 8 · Day 2 · practice questions</p>
+<h1>Unit Tests</h1>
+<p class="subtitle">Test code with code. What an <code>assert</code> is, how a <code>unittest</code> class is built, and why <code>if __name__ == '__main__'</code> is there.</p>
+<p class="meta"><span class="pill">⏱ about 25 min</span> <span class="pill">▶ code you can run on this page</span></p>
+
+<h2>Warm-up: from last time</h2>
+<p>Two questions from earlier lessons, from memory. Spacing out your practice like this is what makes it stick.</p>
+<div class="problems" data-ids="ident-04,fn-09"></div>
+
+<div class="lede"><p>A <strong>unit test</strong> is a small piece of code that checks another piece of code does what you expect. Your notes ask <em>&ldquo;what is an assert test?&rdquo;</em>. This lesson answers that.</p></div>
+
+<h2>An assert is a promise</h2>
+<p><code>assert</code> says: &ldquo;this must be True&rdquo;. If it is True, nothing happens. If it is False, Python raises an <code>AssertionError</code>. A test fails when an assertion fails.</p>
+<pre class="try" data-title="Try it: then change 4 to 5"><code>assert 2 + 2 == 4
+print("passed")</code></pre>
+
+<h2>The unittest module</h2>
+<p><code>unittest</code> is Python's built-in testing tool. It gives you a class, <code>TestCase</code>, with ready-made assertion methods:</p>
+<table>
+<tr><th>Method</th><th>Checks</th><th>Like</th></tr>
+<tr><td><code>self.assertEqual(x, y)</code></td><td>equal values</td><td><code>x == y</code></td></tr>
+<tr><td><code>self.assertIs(x, y)</code></td><td>the same object (the same memory space)</td><td><code>x is y</code></td></tr>
+<tr><td><code>self.assertTrue(x)</code></td><td>x is true</td><td><code>bool(x)</code></td></tr>
+<tr><td><code>self.assertIn(x, y)</code></td><td>x is inside y</td><td><code>x in y</code></td></tr>
+</table>
+<p>The names mirror the operators you learned in Lessons 2 and 3. That is why identity (Lesson 3) matters: <code>assertIs</code> is the test for it.</p>
+
+<h2>The anatomy of a test file</h2>
+<pre><code>import unittest                                  # the built-in module
+a = 3
+b = 6
+class Test_Example_UnitTest(unittest.TestCase):  # a test class inherits TestCase
+    def test_equal(self):                        # test method names must start with "test"
+        self.assertEqual(2 + 8, a + b)           # the assertion
+if __name__ == '__main__':                       # run only when this file is launched directly
+    unittest.main()                              # find and run every test method</code></pre>
+<ul>
+  <li>A class that builds a unit test passes through <code>unittest.TestCase</code>.</li>
+  <li><code>__name__</code> is <code>'__main__'</code> only when you run the file directly, not when another file imports it. That check decides whether to run the tests.</li>
+  <li>unittest only runs methods whose names start with <code>test</code>. A method called <code>check_b</code> is silently skipped.</li>
+</ul>
+
+<div class="fixit">
+  <span class="callout-label">Press Run on this one</span>
+  <p>The example in your notes is a good model for the <em>structure</em>, but look at the numbers: <code>2 + 8</code> is 10 and <code>a + b</code> is 9. This test <strong>fails</strong>. That is useful: you get to see what a failing test looks like. Press Run, read the report, then change <code>2 + 8</code> to <code>2 + 7</code> and run again.</p>
+</div>
+<pre class="try" data-title="Try it: a failing test, then a passing one"><code>import unittest
+a = 3
+b = 6
+class Test_Example_UnitTest(unittest.TestCase):
+    def test_equal(self):
+        self.assertEqual(2 + 8, a + b)
+if __name__ == '__main__':
+    unittest.main()</code></pre>
+
+<h2>Practice</h2>
+<div class="problems" data-topic="unittest" data-limit="6"></div>
+<p>More are in the <a href="../reference/problem-bank.html#unittest">problem bank</a>.</p>
+
+<div class="source"><span class="callout-label">Primary source</span><p><a href="https://docs.python.org/3/library/unittest.html">Python Library Reference: <code>unittest</code></a>. The &ldquo;Basic example&rdquo; at the top is the same shape as your class example, and the table of assert methods lists them all.</p></div>
+
+<div class="ask-your-teacher">Stuck, or something here does not match what you see? Ask your teacher. Paste the code, say what you expected, and say what you got.</div>
+
+<div class="lesson-nav">
+<a href="./0007-functions.html">← Lesson 7</a>
+<a href="../index.html">Course contents</a>
+<a href="../reference/files-errors-tests.html">Cheat sheet: functions, tests, files, errors</a>
+<a href="./0009-files-and-argv.html">Lesson 9 →</a>
+</div>
+</main>
+<script src="../assets/data/load.js"></script>
+<script src="../assets/pyrun.js"></script>
+<script src="../assets/stepper.js"></script>
+<script src="../assets/problems.js"></script>
+</body>
+</html>
