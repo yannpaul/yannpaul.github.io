@@ -84,7 +84,7 @@ addProblems([
   },
   {
     id: "imp-10", topic: "imports", level: 2, type: "predict",
-    title: "pow vs **",
+    title: "`pow` vs `**`",
     prompt: "Two ways to write \"2 to the power 3\". What does this print?",
     code: "import math\nprint(math.pow(2, 3), 2 ** 3)",
     answer: "8.0 8",

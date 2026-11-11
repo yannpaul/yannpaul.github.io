@@ -27,10 +27,19 @@
     return e;
   }
 
-  // Notes are authored text: escape everything, then allow `code` and **bold**.
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  // Authored text: `code`, **bold**, _italic_; everything else is escaped. Code spans are cut
+  // out FIRST, so Python inside backticks (like `2 ** 3` or `__name__`) is never read as markup.
   function md(s) {
-    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    return String(s).split(/(`[^`\n]+`)/).map(function (part, i) {
+      if (i % 2 === 1) return "<code>" + esc(part.slice(1, -1)) + "</code>";
+      return esc(part)
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>")
+        .replace(/\n/g, "<br>");
+    }).join("");
   }
 
   function parseVal(raw) {
@@ -95,6 +104,7 @@
     });
     var codeLines = opts.code.replace(/\n$/, "").split("\n");
     var i = 0;
+    var measuring = false;
     // Authored walkthroughs that tag objects open with the memory panel showing; live traces
     // tag every value, so there it stays closed unless asked for.
     var hasTags = steps.some(function (s) {
@@ -129,14 +139,12 @@
 
     var note = el("div", "st-note");
     note.setAttribute("aria-live", "polite");
-    root.appendChild(note);
 
     var outBox = el("div", "st-out");
     var outLabel = el("div", "st-label", "What print() has shown so far");
     var outPre = el("pre", "st-outpre");
     outBox.appendChild(outLabel);
     outBox.appendChild(outPre);
-    root.appendChild(outBox);
 
     var ctrl = el("div", "st-ctrl");
     var first = el("button", "pc-btn", "⏮"); first.type = "button"; first.title = "First step";
@@ -156,8 +164,14 @@
     allLabel.appendChild(allBox);
     allLabel.appendChild(document.createTextNode(" show all variables"));
     allLabel.hidden = !anyHidden;
-    [first, back, fwd, last, counter, memLabel, allLabel].forEach(function (n) { ctrl.appendChild(n); });
+    var expand = el("button", "pc-btn st-expand", "⤢ Expand"); expand.type = "button";
+    expand.title = "Show the walkthrough over the whole page (Esc to close)";
+    [first, back, fwd, last, counter, expand, memLabel, allLabel].forEach(function (n) { ctrl.appendChild(n); });
+    // Controls sit directly under the code, ABOVE the note and the output, which change
+    // height from step to step; that way Next never moves under the learner's finger.
     root.appendChild(ctrl);
+    root.appendChild(note);
+    root.appendChild(outBox);
 
     var legend = el("p", "st-legend",
       "Green arrow: the line that just ran. Red arrow: the line about to run. Orange values just changed.");
@@ -195,7 +209,7 @@
         row.classList.add("next");
         row.querySelector(".st-gutter").textContent = "➜";
         if (prevLine === step.line) row.classList.remove("ran");
-        if (row.scrollIntoView && !opts.noScroll) row.scrollIntoView({ block: "nearest" });
+        if (row.scrollIntoView && !opts.noScroll && !measuring) row.scrollIntoView({ block: "nearest" });
       }
 
       // frames
@@ -301,19 +315,64 @@
     back.addEventListener("click", function () { go(i - 1); });
     fwd.addEventListener("click", function () { go(i + 1); });
     last.addEventListener("click", function () { go(steps.length - 1); });
-    memBox.addEventListener("change", render);
-    allBox.addEventListener("change", render);
+    // Give the variables panel the height of its tallest step, so the code/variables area
+    // (and the controls under it) do not jump as variables appear.
+    function lockHeight() {
+      if (!root.isConnected) return;
+      var keep = i, tallest = 0;
+      measuring = true;
+      side.style.minHeight = "";
+      for (var k = 0; k < steps.length; k++) {
+        i = k;
+        render();
+        tallest = Math.max(tallest, side.offsetHeight);
+      }
+      i = keep;
+      measuring = false;
+      side.style.minHeight = tallest ? tallest + "px" : "";
+      render();
+    }
+    function relock() { lockHeight(); }
+    memBox.addEventListener("change", relock);
+    allBox.addEventListener("change", relock);
+
+    // Expand: lay the walkthrough over the page, for long values or long code.
+    var backdrop = null;
+    function setExpanded(on) {
+      root.classList.toggle("st-expanded", on);
+      expand.textContent = on ? "✕ Close" : "⤢ Expand";
+      if (on) {
+        backdrop = el("div", "st-backdrop");
+        backdrop.addEventListener("click", function () { setExpanded(false); });
+        document.body.appendChild(backdrop);
+        document.body.classList.add("st-noscroll");
+        root.focus();
+      } else {
+        if (backdrop) backdrop.remove();
+        backdrop = null;
+        document.body.classList.remove("st-noscroll");
+      }
+      lockHeight();
+    }
+    expand.addEventListener("click", function () { setExpanded(!root.classList.contains("st-expanded")); });
+    var resizeTimer = null;
+    window.addEventListener("resize", function () {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(lockHeight, 150);
+    });
     root.tabIndex = 0;
     root.addEventListener("keydown", function (ev) {
       if (ev.target && ev.target.tagName === "INPUT") return;
       if (ev.key === "ArrowRight") { go(i + 1); ev.preventDefault(); }
       if (ev.key === "ArrowLeft") { go(i - 1); ev.preventDefault(); }
+      if (ev.key === "Escape" && root.classList.contains("st-expanded")) { setExpanded(false); ev.preventDefault(); }
     });
 
     host.appendChild(root);
     render();
+    lockHeight();
     return { go: go };
   }
 
-  window.Stepper = { mount: mount, fromTrace: fromTrace };
+  window.Stepper = { md: md, mount: mount, fromTrace: fromTrace };
 })();

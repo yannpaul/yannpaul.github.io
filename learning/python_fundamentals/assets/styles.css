@@ -15,7 +15,7 @@
   --bad: #a13a2e;
   --bad-soft: #f7e6e3;
   --code-bg: #f2efe6;
-  --max-width: 42rem;
+  --max-width: 48rem;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -467,6 +467,9 @@ ol li, ul:not(.todo):not(.quiz-options):not(.pb-testlist):not(.pb-why) li { marg
 
 /* Runnable code cells (pyrun.js) */
 .pc-cell { border: 1px solid var(--rule); border-radius: 8px; background: var(--paper-raised); margin: 1.4rem 0; overflow: hidden; }
+/* a walkthrough inside a cell must be able to break out wider than the cell */
+.pc-cell:has(.st) { overflow: visible; }
+.pc-cell:has(.st) .pc-head { border-radius: 8px 8px 0 0; }
 .pc-head { padding: 0.45rem 0.9rem; font-family: var(--ui); font-size: 0.74rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--rule); }
 .pc-editor {
   display: block; width: 100%; border: 0; resize: none; background: var(--code-bg); color: var(--ink);
@@ -610,3 +613,36 @@ ol li, ul:not(.todo):not(.quiz-options):not(.pb-testlist):not(.pb-why) li { marg
 .pb-multi-panel label:hover { background: var(--code-bg); }
 .pb-multi-panel .pb-multi-all { border-bottom: 1px solid var(--rule); font-weight: 600; }
 .pb-multi-panel input { accent-color: var(--accent); }
+
+/* --- Wider walkthroughs ---
+   The reading column is 48rem; a walkthrough needs more room for code and values side by
+   side, so on wide screens it breaks out of the column (centred on it), up to 72rem. */
+@media (min-width: 60rem) {
+  .st {
+    --st-w: min(72rem, calc(100vw - 4rem));
+    width: var(--st-w);
+    margin-left: calc((100% - var(--st-w)) / 2);
+  }
+}
+.st-body { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.st-side { min-width: 0; }
+/* Long values wrap inside their own cell instead of spilling out of the box */
+.st-vars { table-layout: fixed; }
+.st-name { width: 30%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st-val { overflow-wrap: anywhere; }
+.st-chip { white-space: nowrap; }
+.st-obj { max-width: 100%; }
+.st-objval { overflow-wrap: anywhere; }
+.st-ctrl { margin: 0.8rem 0 0; }
+.st-expand { margin-left: 0.4rem; }
+
+/* Expanded: the walkthrough is laid over the page */
+.st.st-expanded {
+  position: fixed; inset: 2vh 2vw; z-index: 1001; width: auto; margin: 0;
+  overflow: auto; box-shadow: 0 12px 48px rgba(0, 0, 0, 0.35);
+}
+.st.st-expanded .st-code, .st.st-expanded .st-vars, .st.st-expanded .st-outpre { font-size: 1rem; }
+.st-backdrop { position: fixed; inset: 0; z-index: 1000; background: rgba(0, 0, 0, 0.45); }
+body.st-noscroll { overflow: hidden; }
+@media (max-width: 40rem) { .st-body { grid-template-columns: 1fr; } }
+.st-mem + .st-mem { margin-left: 0.9rem; }
