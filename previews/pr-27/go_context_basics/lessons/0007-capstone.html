@@ -1,0 +1,162 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_context_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 7 · Capstone</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">context.Context in Go · Lesson 7 of 7</p>
+  <h1>Capstone</h1>
+  <p class="subtitle">Rebuild the fully integrated <code>burrow</code> from memory, put a number on why it mattered, then defend every choice — no hints, same as the other two Go capstones.</p>
+
+  <p class="lede">Six lessons, three independent sources of cancellation, all reaching the same <code>ctx.Done()</code> underneath: a timeout (Lesson 2), a real Ctrl+C (Lesson 4), and a sibling goroutine's own failure (Lesson 6). Today: rebuild all three together from memory, measure exactly what the last one saved you, then a recap and one open-ended design question to close out the course.</p>
+
+  <div class="repeat-banner">Warm-up — rebuild from memory, no hints</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="rebuild-full-integration">
+      <div class="todo-item-head">
+        <input type="checkbox" id="rebuild-full-integration-cb">
+        <label for="rebuild-full-integration-cb">From memory, rebuild <code>burrow</code>'s full context wiring: <code>signal.NotifyContext</code> as the root in <code>main</code>, <code>rootCmd.ExecuteContext(ctx)</code>, <code>du top</code>'s <code>RunE</code> deriving a <code>context.WithTimeout</code> from <code>cmd.Context()</code>, and <code>duTop</code> itself using <code>errgroup.WithContext</code> with a <code>ctx</code>-aware <code>sizeOf</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>No reveal for this one — if you're stuck on a specific piece, that's useful information, and the honest move is to reread that lesson directly rather than lean on a hint here.</p>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Three separate things all still work: <code>du top</code> on a normal fixture succeeds well under its timeout; the same command against a fixture with a deliberately slow entry fails with <code>context deadline exceeded</code> at roughly your configured duration; and pressing <kbd>Ctrl+C</kbd> mid-run on a long fixture stops it almost instantly with <code>context canceled</code>, regardless of how much of its timeout was left.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: putting a number on Lesson 6's fix</h2>
+
+  <p>Lesson 6 showed <code>duTop</code> wasting a full 5 seconds waiting on a slow entry after a different entry had already failed — and then fixed it. Reproduce both numbers side by side, one more time, so the improvement is a measurement, not just a memory.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="measure-before-after">
+      <div class="todo-item-head">
+        <input type="checkbox" id="measure-before-after-cb">
+        <label for="measure-before-after-cb">Build a fixture with one entry that fails <code>sizeOf</code> instantly and one that would take 5 real seconds. Time your final, fully-integrated <code>duTop</code> against it.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The whole command returns in well under a second — not 5. That's the concrete, measured difference between a plain <code>errgroup.Group</code> (Lesson 8 of <code>go_concurrency_basics</code>) and <code>errgroup.WithContext</code> with a <code>ctx</code>-aware <code>sizeOf</code> (this course's Lesson 6): the same failure, the same fixture, roughly 5 real seconds of difference in wall-clock time.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Notice that number came from one goroutine's cancellation reaching another — not from a timeout, not from a human pressing Ctrl+C. All three sources of cancellation in this course end up doing the exact same thing to the exact same mechanism: closing a <code>Done()</code> channel that something else is watching. That uniformity is the actual payoff of learning <code>context.Context</code> as its own topic instead of picking it up piecemeal inside a concurrency lesson or a gRPC lesson — one mental model, three unrelated triggers.</p>
+  </div>
+
+  <h2>Recap — from memory, no hints</h2>
+
+  <p>Answer each question before checking — this is retrieval practice, not a reading exercise. Every option gets an explanation once you answer, right or wrong.</p>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">1. In Lesson 1, calling a context's <code>cancel</code> function a second time printed no error and didn't panic. What does this actually guarantee?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The context package documents this explicitly: after the first call actually cancels the context, every subsequent call to the same cancel function does nothing at all. This is exactly why defer cancel() is a safe standing habit, even when the context might already be done by the time the deferred call runs.">A second call to <code>cancel</code> is a documented no-op — safe to call defensively (e.g. via <code>defer cancel()</code>) even if the context was already canceled some other way.</li>
+      <li data-option="b" data-explain="Cancellation only flows downward, from a context to whatever was derived from it — never upward to a parent. Calling a context's own cancel function never reaches back up to something that created it.">Calling <code>cancel</code> twice cancels the context's parent as well as the context itself.</li>
+      <li data-option="c" data-explain="Once canceled, a context's Done() channel is closed permanently and its Err() stays fixed — there's no way to un-cancel it or reset it back.">Calling <code>cancel</code> twice resets the context back to its original, uncanceled state.</li>
+      <li data-option="d" data-explain="This is explicitly documented, guaranteed behavior, not an implementation detail you happen to get away with — the standard library commits to it.">Calling <code>cancel</code> twice is undefined behavior that happens not to crash in simple programs.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">2. You replaced <code>duTop</code>'s <code>select</code>-against-<code>time.After</code> timeout with <code>context.WithTimeout</code>. What actually changed about its behavior, not just its code?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Not equivalent — a constant deadline compiled into duTop can't be adjusted per call; context.WithTimeout receives its duration from the caller, so different callers get different behavior with zero changes to duTop.">None — they produce identical behavior, <code>context.WithTimeout</code> is just a cleaner way to write the same select/time.After pattern.</li>
+      <li data-option="b" data-explain="This is the actual point of taking a context as a parameter instead of managing a deadline internally: the function doing the work no longer decides how long it's allowed to take.">The timeout now originates from whoever calls <code>duTop</code>, not from a constant baked into <code>duTop</code> itself — different callers can choose different timeouts, or none at all, without <code>duTop</code>'s own code changing.</li>
+      <li data-option="c" data-explain="A timeout doesn't make anything run faster — it only bounds how long you're willing to wait before giving up.">It makes <code>duTop</code>'s goroutines run faster.</li>
+      <li data-option="d" data-explain="duTop's collection loop still uses a select — one case for a real result, one for ctx.Done() — exactly the same shape as the select/time.After version, just watching a different channel.">It removes the need for a <code>select</code> statement inside <code>duTop</code> entirely.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">3. A <code>context.WithTimeout(parent, 10*time.Second)</code> child's own 10 seconds hasn't elapsed, but its parent is canceled after 2 seconds. What happens to the child?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The opposite is true — cancellation flows downward from parent to every context derived from it, regardless of that child's own deadline.">Nothing — a context's own deadline always takes priority over anything that happens to its parent.</li>
+      <li data-option="b" data-explain="Canceling a parent reaches every context derived from it immediately, whatever their own deadlines say. The child's Err() reports context canceled specifically because that's what actually ended it, not a timeout.">The child ends at the 2-second mark too, reporting <code>context canceled</code> (not <code>context deadline exceeded</code>) — its real lifetime is always the shorter of its own deadline and whatever happens to its ancestors.</li>
+      <li data-option="c" data-explain="A child can never outlive its parent's cancellation — the 10-second deadline is a ceiling on how long the child itself is willing to wait, not a guarantee of how long it gets to run regardless of its ancestors.">The child keeps running until its own 10-second deadline, then reports <code>context canceled</code>.</li>
+      <li data-option="d" data-explain="Cancellation isn't queued or delayed — a parent's cancel() closes every descendant's Done() channel immediately, the moment it's called.">The parent's cancellation is queued and only takes effect once the child's own timeout would have fired anyway.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">4. Your program's <code>stop()</code> (from <code>signal.NotifyContext</code>) is only deferred to run at the very end, and code between the first Ctrl+C and program exit hangs. What happens if the user presses Ctrl+C a second time?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Verified directly: with stop() only deferred, a second SIGINT during a simulated hang produced no visible effect at all, and the program ran to the end of its hang before exiting normally. NotifyContext keeps intercepting matching signals until stop() is actually called.">Nothing visible — <code>NotifyContext</code> is still intercepting the signal, so the second Ctrl+C is silently absorbed and the program keeps hanging.</li>
+      <li data-option="b" data-explain="The OS is still delivering the signal — Go's runtime is choosing what to do with it, via NotifyContext, not the OS refusing to send it.">The second Ctrl+C is ignored by the operating system entirely, regardless of your program.</li>
+      <li data-option="c" data-explain="That's only true once stop() has actually been called — with it left deferred to program exit, the second signal has no such effect.">The second Ctrl+C immediately force-kills the process, the same as if <code>NotifyContext</code> were never used.</li>
+      <li data-option="d" data-explain="A context's cancellation only ever happens once — cancel is idempotent (Lesson 1), so the second signal doesn't re-trigger anything even if NotifyContext were still listening.">The second Ctrl+C cancels the context a second time, running any cleanup code twice.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">5. Two unrelated pieces of code both used the bare string <code>"requestID"</code> as a <code>context.WithValue</code> key, and one silently clobbered the other's value. What specifically would have prevented this?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A longer string still collides if another package happens to choose the exact same string — the fix isn't a better string, it's a key that literally can't be typed by other code.">Using a longer, more specific string, like <code>"myPackageRequestID"</code>, instead of a generic one.</li>
+      <li data-option="b" data-explain="ctx.Value's lookup uses ==, which compares both the dynamic type and the value. Two distinct unexported types, even with identical underlying representations, can never be equal — verified directly: two packages' Key(0) constants coexisted under the same context with no collision.">Each defining its own unexported key type — two distinct types are never equal to each other via <code>==</code>, even if both happen to have the same underlying value.</li>
+      <li data-option="c" data-explain="Nothing about this collision was a data race — both writes happened safely, in sequence; the bug was two equal keys pointing at the same slot, not concurrent access.">Calling <code>context.WithValue</code> with a <code>sync.Mutex</code> held.</li>
+      <li data-option="d" data-explain="That would just be a different way to pass state around, one that bypasses context propagation entirely — it doesn't address why the context.WithValue keys collided in the first place.">Storing the value in a package-level variable instead of the context.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">6. You made <code>sizeOf</code> check <code>ctx.Done()</code> during its slow path, then switched <code>duTop</code> to <code>errgroup.WithContext</code>. Why was that check inside <code>sizeOf</code> itself still necessary — why doesn't <code>errgroup.WithContext</code> stop a slow goroutine on its own?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Verified directly: without a ctx.Done() check inside sizeOf's slow path, duTop still took the full ~5 seconds despite the errgroup's context being canceled almost instantly. Cancellation is a signal, not a force — something has to be watching for it.">Canceling a context never forcibly stops running code — it only closes a channel that already-running code has to actively check to notice anything happened at all.</li>
+      <li data-option="b" data-explain="The empirical test showed the opposite when sizeOf didn't check ctx at all: the slow goroutine ran to completion regardless of the group's context being canceled.">It wasn't necessary — <code>errgroup.WithContext</code> always stops every goroutine's execution immediately once one of them fails.</li>
+      <li data-option="c" data-explain="SetLimit bounds how many goroutines run concurrently; it has nothing to do with whether any individual goroutine happens to respect cancellation.">SetLimit requires every goroutine to check <code>ctx.Done()</code>, or it refuses to enforce the concurrency limit.</li>
+      <li data-option="d" data-explain="Without the ctx.Done() check, the 5-second sleep still ran to completion in the earlier, unfixed version — the difference was measured in wall-clock time, not just log output.">It only needed <code>ctx</code> to log a message, not for any functional reason.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Transfer — open-ended, no hints</h2>
+
+  <p>You already sketched a <code>burrow checksum</code> design in the <code>go_concurrency_basics</code> capstone: a per-file <code>context.WithTimeout</code>, an error printed inline for whichever file timed out, the rest of the run continuing regardless. This question hands you back a real tension in that design, now that you've seen how <code>errgroup.WithContext</code> actually behaves.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="reconcile-per-file-timeout-with-withcontext">
+      <div class="todo-item-head">
+        <input type="checkbox" id="reconcile-per-file-timeout-with-withcontext-cb">
+        <label for="reconcile-per-file-timeout-with-withcontext-cb">If a worker's per-file timeout error is returned straight out of its <code>g.Go</code> function, <code>errgroup.WithContext</code> cancels every other in-flight file's context too — the exact all-or-nothing behavior you decided against. Sketch how you'd change the worker so a per-file timeout gets reported (printed inline, still reflected in the command's final exit code) <em>without</em> triggering group-wide cancellation. Then name at least one failure in <code>checksum</code> that genuinely <em>should</em> cancel every sibling — one where the all-or-nothing behavior is exactly what you want.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>No hints, no checkpoint with a "right" answer — this is a synthesis exercise, the same as the other two courses' capstones. Bring your answer to your teacher (me) and defend it.</p>
+      </div>
+    </li>
+  </ul>
+
+  <p>That's the course. You went from a single goroutine nobody waited for, through a real bottleneck fixed with bounded concurrency, to a program that can be stopped by a timeout, a human, or its own internal failures — all through one small, consistent interface. The three Go workspaces in this repo now form a real progression: fundamentals, concurrency, and the cancellation model tying them together. <code>go_grpc_basics</code>' own Lesson 7 is next in line to build on this directly, once you're ready for a network boundary instead of just goroutines inside one process.</p>
+
+  <div class="ask-your-teacher">
+    Bring your reconciled <code>burrow checksum</code> design here — this is exactly the kind of tension this format exists to work through.
+  </div>
+
+  <p class="cite">This capstone deliberately cites no new source — every idea it exercises was already sourced in Lessons 1 through 6.</p>
+
+  <div class="lesson-nav">
+    <a href="./0006-context-and-errgroup.html">← Lesson 6: Context and errgroup</a>
+    <a href="../index.html">Course contents</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

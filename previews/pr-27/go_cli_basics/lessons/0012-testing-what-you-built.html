@@ -1,0 +1,187 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_cli_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 12 · Testing What You Built</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go CLI Basics · Lesson 12 of 13</p>
+  <h1>Testing What You Built</h1>
+  <p class="subtitle">Rebuild Lessons 1–11 from memory first. Then write real, automated tests for two functions that have been correct only because you kept manually re-checking them.</p>
+
+  <p class="lede">Every checkpoint in this course has been you, by hand, running a command and reading its output. That's been the right call for a CLI's end-to-end behavior — but <code>perms</code> and <code>sizeOf</code> are pure enough underneath that they don't need a CLI invocation at all to check. Today: <code>go test</code>, a table-driven test for <code>perms</code>, and an I/O-touching test for <code>sizeOf</code> that cleans up after itself.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–11</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-cobra-tree">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-cobra-tree-cb">
+        <label for="repeat-cobra-tree-cb">Confirm all five commands still work through your Cobra tree, and <code>go build</code>/<code>go vet ./...</code> are both clean, before you add anything below.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>find name</code>, <code>du top</code>, <code>perm check</code>, <code>perm who</code> all behave the same as at the end of Lesson 11.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: a table-driven test for <code>perms</code></h2>
+
+  <p>A Go test lives in a file ending <code>_test.go</code>, in the same package as the code it tests. A test function's name starts with <code>Test</code> and takes one argument, <code>*testing.T</code>. <code>perms</code> is a good first target: no I/O, no dependencies, the same inputs always give the same output — exactly the shape <a href="https://pkg.go.dev/testing"><code>go test</code></a> is built for.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="create-test-file">
+      <div class="todo-item-head">
+        <input type="checkbox" id="create-test-file-cb">
+        <label for="create-test-file-cb">Create <code>main_test.go</code> in your <code>burrow</code> directory, <code>package main</code>, importing <code>"testing"</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the skeleton</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import "testing"</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="write-testperms">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-testperms-cb">
+        <label for="write-testperms-cb">Write <code>TestPerms(t *testing.T)</code>: a slice of cases (name, mode, expected string), looped with <code>t.Run(c.name, func(t *testing.T) {...})</code> so each case reports independently, calling <code>perms</code> and comparing against what you expect with <code>t.Errorf</code> on mismatch.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Cover at least: every bit set, exactly one bit set, and no bits set — the three shapes <code>perms</code>'s own <code>if</code> statements branch on.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the test</summary>
+          <div class="reveal-body">
+            <pre><code>func TestPerms(t *testing.T) {
+	cases := []struct {
+		name string
+		mode os.FileMode
+		want string
+	}{
+		{"all three", 0700, "read, write, execute"},
+		{"read only", 0400, "read"},
+		{"none", 0000, "(none)"},
+		{"write and execute", 0300, "write, execute"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := perms(c.mode, 0400, 0200, 0100)
+			if got != c.want {
+				t.Errorf("perms(%v, ...) = %q, want %q", c.mode, got, c.want)
+			}
+		})
+	}
+}</code></pre>
+            <p>Add <code>"os"</code> to <code>main_test.go</code>'s import block.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-go-test">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-go-test-cb">
+        <label for="run-go-test-cb">Run the test suite verbosely.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>go test -v ./...</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Four <code>=== RUN</code> lines, one per case (named after your case names with spaces turned into underscores), all reporting <code>--- PASS</code>, then an overall <code>PASS</code> and <code>ok</code> line.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: testing something that touches disk</h2>
+
+  <p><code>sizeOf</code> isn't pure — it reads real files. Testing it without leaving junk behind (or depending on files that happen to already exist) means giving it a directory built just for the test and thrown away afterward. <a href="https://pkg.go.dev/testing#T.TempDir"><code>t.TempDir()</code></a> does exactly that: it returns a fresh, empty directory that <code>go test</code> deletes automatically when the test finishes, pass or fail.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-testsizeof">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-testsizeof-cb">
+        <label for="write-testsizeof-cb">Write <code>TestSizeOf(t *testing.T)</code>: get a <code>t.TempDir()</code>, write a 100-byte file directly in it and a 50-byte file inside a subdirectory of it, then call <code>sizeOf</code> on the temp dir and check it returns <code>150</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <p><code>os.WriteFile(path, make([]byte, n), 0644)</code> is a quick way to create a file of an exact size without caring what's in it. Fail fast with <code>t.Fatal</code> on any setup error — if creating the test's own files fails, there's no point continuing to the actual assertion.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the test</summary>
+          <div class="reveal-body">
+            <pre><code>func TestSizeOf(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), make([]byte, 100), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "b.txt"), make([]byte, 50), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := sizeOf(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 150 {
+		t.Errorf("sizeOf(dir) = %d, want 150", got)
+	}
+}</code></pre>
+            <p>Add <code>"path/filepath"</code> to <code>main_test.go</code>'s import block.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-go-test-again">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-go-test-again-cb">
+        <label for="run-go-test-again-cb">Run <code>go test -v ./...</code> again.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>TestSizeOf</code> now runs and passes alongside all of <code>TestPerms</code>'s subtests. Check your <code>burrow</code> directory afterward — no leftover temp directory anywhere; <code>t.TempDir()</code> cleaned it up itself.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Notice which functions got tests today and which didn't: <code>perms</code> and <code>sizeOf</code>, not <code>findName</code>, <code>duTop</code>, <code>checkPerm</code>, or <code>whoOwns</code>. Those four all either print directly to stdout or call one of the two functions you just tested — testing them meaningfully would mean capturing stdout or mocking the filesystem, real techniques with real cost, not a natural next step for a basics course. The functions worth testing first are usually the ones already shaped like this: take arguments, return a value, no side effects (or, like <code>sizeOf</code>, side effects limited to reads you can point at a throwaway directory). That shape isn't an accident here — it's the same "pull the pure logic out of the function that also does I/O or printing" instinct that's been this course's structure since <code>getConfig</code>/<code>run</code> in Lesson 1.</p>
+  </div>
+
+  <p><code>burrow</code> now has working tests for its two purest pieces. Lesson 13 is the capstone: real <code>--help</code> polish, <code>go install</code>, and one last pass through everything this course built.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why <code>t.Run</code> subtests instead of one big loop with plain <code>if</code> checks, why <code>t.TempDir()</code> beats a hand-rolled temp directory, which of the untested functions you'd test first if you kept going, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://pkg.go.dev/testing">pkg.go.dev, the <code>testing</code> package</a> for <code>T.Run</code>, <code>T.Errorf</code>, <code>T.Fatal</code>, and <code>T.TempDir</code>; <a href="https://go.dev/blog/subtests">The Go Blog, "Using Subtests and Sub-benchmarks"</a> for why <code>t.Run</code>-per-case beats one loop with bare assertions.</p>
+
+  <div class="lesson-nav">
+    <a href="./0011-upgrading-to-cobra.html">← Lesson 11: Upgrading to Cobra</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0013-capstone-polish-and-recap.html">Next: Capstone: Polish and Recap →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

@@ -1,0 +1,396 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 4 · Lesson 1 · P2.1 B+Tree Pages: Base, Internal, and Leaf Layouts</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 4 · Lesson 1</p>
+  <h1>P2.1 B+Tree Pages: Base, Internal, and Leaf Layouts</h1>
+  <p class="subtitle">Implement BusTub's three B+tree page types as Go views over a page's bytes, read and write every field with <code>encoding/binary</code> at the offsets the tests check, and compute the <code>MinSize</code> values that the later stages rely on.</p>
+
+  <p class="lede">Unit 3 taught the B+tree on paper. Project 2 builds one, and every node of that tree is a page of your Project 1 buffer pool: the tree creates nodes with <code>NewPage</code>, reads them through read guards and changes them through write guards. This first stage contains no tree logic. It fixes what the bytes of a node mean: where the size is stored, where key 3 starts, where the record IDs begin. Every later stage reads and writes nodes through the accessors you write here, so a wrong offset now shows up later as a corrupted tree.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 1, Lesson 2: a page is a <code>[]byte</code>, and this course never overlays structs on it. How does Go code read the 4-byte integer stored at offset <code>off</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is the unsafe overlay this course avoids. It also depends on the machine's byte order and on the address being aligned.">With <code>*(*int32)(unsafe.Pointer(&amp;page[off]))</code>, the closest thing to a C++ <code>reinterpret_cast</code>.</li>
+      <li data-option="b" data-explain="strconv parses decimal text such as &quot;42&quot;. A page stores the integer's binary representation, not its digits.">With <code>strconv.Atoi(string(page[off:off+4]))</code>.</li>
+      <li data-option="c" data-explain="encoding/binary decodes the four bytes in a fixed byte order, and the int32 conversion restores the sign. The offsets are the ones the C++ code computes.">With <code>int32(binary.LittleEndian.Uint32(page[off:off+4]))</code>.</li>
+      <li data-option="d" data-explain="gob is a self-describing stream format with its own headers; it can't read a raw field in the middle of a page.">With <code>gob.NewDecoder(bytes.NewReader(page[off:])).Decode(&amp;v)</code>.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 3, Lesson 3: under the lecture's rules, with nodes of at most 4 keys, 16 is inserted into the full leaf [13, 14, 15, 17]. What happens to the leaf?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The five keys split with the first three on the left. The right leaf's first key, 16, is copied up into the parent and stays in the leaf too.">It splits into [13, 14, 15] and [16, 17], and 16 is copied up into the parent.</li>
+      <li data-option="b" data-explain="Pushing up (removing the key from both halves) is the inner-node rule. A leaf split keeps every key in a leaf, because values live only in leaves.">It splits into [13, 14, 15] and [17], and 16 moves up into the parent.</li>
+      <li data-option="c" data-explain="The lecture's rule keeps the larger half on the left for five keys: three left, two right.">It splits into [13, 14] and [15, 16, 17], and 15 is copied up into the parent.</li>
+      <li data-option="d" data-explain="A leaf holds at most 4 keys in this example; a fifth key forces a split.">It takes 16 as a fifth key and waits for the next insert to split.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 2, Lesson 6: page guards only ever travel as <code>*ReadPageGuard</code> and <code>*WritePageGuard</code>. What goes wrong if code copies a guard by value, <code>g2 := *g1</code>, and drops both?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The copy is accepted by the compiler; only go vet's copylocks check reports it, through the noCopy marker.">Nothing, because the compiler rejects the copy.</li>
+      <li data-option="b" data-explain="Pointer aliases share one isValid flag. A value copy gets its own, still true.">Nothing, because the two values share one <code>isValid</code> flag.</li>
+      <li data-option="c" data-explain="The race detector reports unsynchronized concurrent accesses, not copies. Both Drops can run in one goroutine.">The race detector reports a data race at the copy.</li>
+      <li data-option="d" data-explain="Each copy has its own isValid flag set to true, so each Drop releases the latch and the pin, and the second release takes away something another holder may own.">Each copy releases the latch and the pin, so they are released twice.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Before you start: Project 1 first, then pull the btree package</h2>
+
+  <p>Project 2 runs on your own Project 1 buffer pool. The tree reaches pages only through <code>NewPage</code>, <code>ReadPage</code>, <code>WritePage</code> and <code>DeletePage</code>, and the tests count pins and wait on latches, so a buffer pool bug shows up as a B+tree failure. The writeup says the same about BusTub: if your Project 1 solution is incorrect, you must fix it first. From <code>go_db_internals/intro_to_db</code>, check that Project 1 passes completely:</p>
+
+<pre><code>go test -race ./bufferpool/</code></pre>
+
+  <p>It must print <code>ok  	intro_to_db/bufferpool</code>. Then commit your work on your branch and pull the Project 2 code from <code>main</code>, as the setup lesson described:</p>
+
+<pre><code>git add -A &amp;&amp; git commit -m "P1 passes"
+git pull --no-rebase origin main</code></pre>
+
+  <p>The merge is clean, because it only adds files: the package <code>btree/</code>, the command <code>cmd/btree_printer/</code>, and <code>common/rid.go</code>, which defines <code>common.RID</code>, the record ID that leaf pages store as their values. The package documentation in <code>btree/doc.go</code> is the project's README; read it with <code>go doc ./btree</code>, or open the file. It lists nine stages, each with its own test regex. This lesson is stage 1; the next three lessons cover stages 2, 3 and 4.</p>
+
+  <p>You edit five files. The three page files belong to this stage; <code>b_plus_tree.go</code> (search, insertion, deletion, latching) and <code>index_iterator.go</code> come later. Everything not marked <code>TODO(P2)</code> is pre-built: keys and comparators in <code>generic_key.go</code>, the header page view, the tracing buffer pool wrapper, and the debug printers in <code>b_plus_tree_debug.go</code>, which read the tree through your page methods and so work as soon as this stage passes.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=YgOvfXl6pss&amp;t=4684s">#10 Latching in Data Structures, "Summary and conclusion" (1:18:04)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/10-indexconcurrency.pdf#page=129">slides 41–46</a>: the chapter ends with the Project 2 announcement, its four tasks and the development hints.</p>
+
+  <h2>A page is a view over its bytes</h2>
+
+  <p>In BusTub a B+tree node is a C++ class laid over the page's memory with <code>reinterpret_cast</code> (or <code>guard.As&lt;BPlusTreeLeafPage&gt;()</code>): the class's fields simply are the page's bytes. Go has no safe way to do that, so the Go port uses a <strong>page view</strong>, a small struct that holds the page's <code>[]byte</code> and whose methods read or write one field each with <code>encoding/binary</code>. Every integer is stored little-endian, which is how BusTub's structs look in memory on x86 and ARM, so the Go pages have the same bytes as BusTub's.</p>
+
+  <p>A view keeps no state of its own. Everything lives in the page bytes, which has two consequences. Two views of the same page always agree. And nothing is lost when the buffer pool evicts the page and reads it back later: <code>TestBPlusTreePageStateLivesInBytes</code> writes two pages through views, pushes them out of a 3-frame pool, and checks every field after reloading them. The stub comments repeat the rule for any helper you add: keep every piece of state in the page bytes.</p>
+
+  <p>Three pre-built constructors build views:</p>
+  <ul>
+    <li><code>AsBPlusTreePage(data)</code> for code that only needs the shared header, for example to ask <code>IsLeafPage</code> before deciding which view to build.</li>
+    <li><code>AsBPlusTreeInternalPage(data, keySize)</code> and <code>AsBPlusTreeLeafPage(data, keySize, numTombs)</code>. They also record the key size, the slot count and the size of the tombstone buffer. In C++ these are template arguments, fixed at compile time; in Go they are run-time values that every tree carries in its <code>Options</code>.</li>
+  </ul>
+  <p>Both node views embed <code>BPlusTreePage</code>, which is how the Go code mirrors BusTub's inheritance: <code>leaf.Size()</code> and <code>internal.MaxSize()</code> are the base view's methods, promoted. Build views of a <code>ReadPageGuard</code>'s <code>Data()</code> only to read; call the <code>Set</code> and <code>Init</code> methods only on a view of a <code>WritePageGuard</code>'s <code>DataMut()</code>. A view is valid as long as the guard it came from: after <code>Drop</code>, the frame can be reused for another page.</p>
+
+  <h3>The shared header</h3>
+
+  <p>Every B+tree page starts with the same 12 bytes. The offsets are pre-built constants in <code>b_plus_tree_page.go</code>:</p>
+
+  <table>
+    <tr><th>Offset</th><th>Bytes</th><th>Field (BusTub)</th><th>Go type in the page</th><th>Accessors you write</th></tr>
+    <tr><td>0</td><td>4</td><td><code>page_type_</code></td><td><code>IndexPageType</code> (<code>uint32</code>)</td><td><code>IsLeafPage</code>, <code>SetPageType</code></td></tr>
+    <tr><td>4</td><td>4</td><td><code>size_</code></td><td><code>int32</code></td><td><code>Size</code>, <code>SetSize</code>, <code>ChangeSizeBy</code></td></tr>
+    <tr><td>8</td><td>4</td><td><code>max_size_</code></td><td><code>int32</code></td><td><code>MaxSize</code>, <code>SetMaxSize</code></td></tr>
+  </table>
+
+  <p>The page types are <code>IndexPageInvalid</code> (0), <code>IndexPageLeaf</code> (1) and <code>IndexPageInternal</code> (2). A freshly allocated page is all zeros, so it reads as invalid until <code>Init</code> sets its type. The size counts key/value pairs; for an internal page that is the number of child pointers. The accessors take and return Go <code>int</code>s, so they convert on the way in and out.</p>
+
+  <h3>Internal pages</h3>
+
+  <figure class="slide">
+    <img src="../assets/slides/L08-bplustree-structure-p56.png" alt="A three-level B+tree: root 20, inner nodes 10 and 35, leaves 6, 10, 20 31 and 38 44, linked by sibling pointers. A callout above the root shows an inner node's layout as node pointer, key, node pointer, and so on, ending with a node pointer; a callout below the first leaf shows a leaf's layout as node pointer, key, value pairs, node pointer." loading="lazy">
+    <figcaption>The lecture draws an inner node as alternating pointers and keys, starting and ending with a pointer. BusTub stores the same sequence as two parallel arrays, and the key slot in front of the first pointer stays unused (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/08-indexes1.pdf#page=56">Lecture #08, slide 15</a>).</figcaption>
+  </figure>
+
+  <p>After the 12-byte header, an internal page holds <code>key_array_</code>, then <code>page_id_array_</code>. Both arrays have <code>InternalPageSlotCount(keySize)</code> slots, which is <code>(8192 − 12) / (keySize + 4)</code> rounded down: 681 slots for 8-byte keys, 409 for 16-byte keys. A child pointer is a <code>common.PageID</code>, 4 bytes. The arrays are sized by the slot count whatever <code>MaxSize</code> is, exactly as in BusTub, so with 8-byte keys the page ID array always starts at byte 12 + 681 × 8 = 5460, even in a tree whose internal max size is 3. The pre-built <code>keyOffset(i)</code> and <code>valueOffset(i)</code> compute these positions; use them, because the tests check bytes at exactly those offsets.</p>
+
+  <p>Index <em>i</em> pairs <code>KeyAt(i)</code> with <code>ValueAt(i)</code>, and child <em>i</em> covers the keys K with <code>KeyAt(i)</code> ≤ K &lt; <code>KeyAt(i+1)</code>, the lecture's "&lt; goes left, ≥ goes right" rule. The key at index 0 is never valid: the leftmost child has no lower bound. So a page whose <code>Size()</code> is <em>n</em> has <em>n</em> children, at indexes 0 to <em>n</em> − 1, and <em>n</em> − 1 valid keys, at indexes 1 to <em>n</em> − 1. The doc comment inherited from BusTub speaks of "<code>n</code> indexed keys and <code>n + 1</code> child pointers", which counts differently; trust the layout and the rule that <code>Size</code> counts child pointers.</p>
+
+  <p>Two accessors have rules of their own. <code>ValueIndex(pageID)</code> returns the index of a child pointer, or −1 if the page has no such child; the insert and delete code uses it to find a node's position in its parent. <code>SetValueAt</code> is a Go addition that BusTub leaves to the student; the stage-2 tests use it to build trees by hand.</p>
+
+  <h3>Leaf pages</h3>
+
+  <p>A leaf page adds a 4-byte next-page pointer to the header, then a tombstone area, then its two arrays:</p>
+
+  <table>
+    <tr><th>Offset</th><th>Bytes</th><th>Field (BusTub)</th><th>Go accessors</th></tr>
+    <tr><td>0</td><td>12</td><td>shared header</td><td>the base view's methods</td></tr>
+    <tr><td>12</td><td>4</td><td><code>next_page_id_</code></td><td><code>NextPageID</code>, <code>SetNextPageID</code></td></tr>
+    <tr><td>16</td><td>8</td><td><code>num_tombstones_</code> (a <code>size_t</code>)</td><td>none public (stage 7)</td></tr>
+    <tr><td>24</td><td>8 per slot</td><td><code>tombstones_[tombCount]</code></td><td><code>Tombstones</code></td></tr>
+    <tr><td><code>keyOffset(0)</code> = 24 + 8 × tombCount</td><td>keySize per slot</td><td><code>key_array_[slotCount]</code></td><td><code>KeyAt</code>, <code>SetKeyAt</code></td></tr>
+    <tr><td><code>valueOffset(0)</code> = <code>keyOffset(slotCount)</code></td><td>8 per slot</td><td><code>rid_array_[slotCount]</code></td><td><code>ValueAt</code>, <code>SetValueAt</code></td></tr>
+  </table>
+
+  <p>The slot count is <code>LeafPageSlotCount(keySize, numTombs)</code>, which is <code>(8192 − 16 − 8 − 8 × tombCount) / (keySize + 8)</code> rounded down: 510 for 8-byte keys and no tombstones, 509 with a buffer of 2 or 3 tombstones, 340 for 16-byte keys. A stored RID is 8 bytes: the <code>PageID</code> (4 bytes, signed) and then the <code>SlotNum</code> (4 bytes, unsigned). Leaves are linked in one direction only; the lecture's leaves also have a previous pointer, BusTub's don't.</p>
+
+  <p>The tombstone buffer is Fall 2025's addition, the "simplified Bε-tree" that Unit 3 introduced: a deleted key's entry stays in the arrays and its index is recorded in the buffer. Its rules arrive in stage 7. In this stage, <code>Init</code> sets the count to 0, and <code>Tombstones</code> only has to report the keys of whatever indexes the buffer holds, which for now is none. What matters already is the space: with <code>NumTombs</code> = 2, the key array starts at byte 40, not 24, and a leaf that ignores <code>keyOffset</code> overwrites the buffer.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=u7ii_Lvm9rM&amp;t=1022s">#08 B+Trees, "Introduction to B+ trees" (17:02)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/08-indexes1.pdf#page=47">slides 12–19</a>: the node and leaf layouts these pages implement, with sorted keys in one array and values in another.</p>
+
+  <h2>MinSize: the rounding the tests pin</h2>
+
+  <p>The B+tree's invariant says every node other than the root is at least half full. BusTub leaves the rounding open; its comment on <code>GetMinSize</code> says "whether you will take ceil() or floor() depends on your implementation". This course fixes it, and <code>TestBPlusTreePageMinSize</code> checks it:</p>
+  <ul>
+    <li>A leaf page's <code>MinSize</code> is <code>MaxSize / 2</code>, rounded down. Leaf max sizes 2, 3, 4, 5, 6 give 1, 1, 2, 2, 3.</li>
+    <li>An internal page's <code>MinSize</code> is <code>(MaxSize + 1) / 2</code>, rounded up. Internal max sizes 3, 4, 5, 6 give 2, 2, 3, 3.</li>
+  </ul>
+
+  <p>The two roundings come from the split rules of the next lessons. A leaf splits when an insertion brings it to <code>MaxSize</code> entries, and the left half keeps <code>MaxSize / 2</code> of them, rounded down; that is the largest minimum a leaf split can always respect. An internal page splits when it already holds <code>MaxSize</code> children and one more arrives: <code>MaxSize + 1</code> pointers, of which the left half keeps half, rounded down, which is <code>MaxSize / 2</code> rounded up. The same values make merges fit. An underflowing page holds <code>MinSize − 1</code> entries, and merging it with a sibling at <code>MinSize</code> gives at most <code>MaxSize − 1</code> entries for a leaf (still below the size that triggers a split) and at most <code>MaxSize</code> children for an internal page. Stages 5 and 6 rely on that.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>A view has value receivers, <code>func (p BPlusTreeLeafPage) SetKeyAt(...)</code>, and the setters still work, because the struct holds a slice header and writes go through it to the shared bytes. Copying a view is cheap and harmless: it owns nothing, unlike a page guard, which owns a latch and a pin and therefore only travels as a pointer. The aliasing that makes setters work is also a trap for getters. A slice of the page, <code>p.data[off : off+keySize]</code>, changes when the page changes, and points into whatever page the frame holds after an eviction. In C++, <code>KeyAt</code> returns the key by value; in Go, <code>KeyAt</code> must return a new slice, which <code>TestBPlusTreePage*KeysAndValues</code> checks by modifying the returned key.</p>
+  </div>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Page IDs are signed (<code>common.PageID</code> is an <code>int32</code>), and <code>common.InvalidPageID</code> is −1. <code>PutUint32(b, uint32(id))</code> stores −1 as the four bytes <code>ff ff ff ff</code>, and <code>int32(Uint32(b))</code> turns them back into −1. Skip the <code>int32</code> conversion on the way back and you get 4294967295, a page that does not exist. The pre-built <code>BPlusTreeHeaderPage.RootPageID</code> shows the round trip.</p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A tree has 8-byte keys and <code>NumTombs</code> = 3. In one of its leaf pages, at which byte does <code>key_array_[0]</code> start, and how many key slots does the page have?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="24 is where the tombstone buffer starts. Three 8-byte tombstone slots come first, and they also take space away from the arrays: (8192 − 16 − 8 − 24) / 16 = 509.">At byte 24, with 510 slots.</li>
+      <li data-option="b" data-explain="The buffer holds 3 slots of 8 bytes from byte 24, so keys start at 24 + 24 = 48. The slot count is (8192 − 16 − 8 − 24) / (8 + 8) = 8144 / 16 = 509.">At byte 48, with 509 slots.</li>
+      <li data-option="c" data-explain="40 would be right for a buffer of 2 tombstones. With 3, keyOffset(0) = 24 + 3 × 8 = 48.">At byte 40, with 509 slots.</li>
+      <li data-option="d" data-explain="The offset is right, but the tombstone buffer also shrinks the arrays: 8144 / 16 = 509 slots, not 510.">At byte 48, with 510 slots.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">A tree has <code>LeafMaxSize</code> = 7 and <code>InternalMaxSize</code> = 7. What do its leaf and internal pages return from <code>MinSize</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Leaves round down: 7 / 2 = 3. Internal pages round up: (7 + 1) / 2 = 4. A leaf split of 7 entries leaves 3 on the left; an internal split of 8 pointers leaves 4.">3 for leaves, 4 for internal pages.</li>
+      <li data-option="b" data-explain="This swaps the two rules. Leaves take the floor and internal pages the ceiling.">4 for leaves, 3 for internal pages.</li>
+      <li data-option="c" data-explain="3 is right for leaves, but internal pages round up, so they need 4 children.">3 for both page types.</li>
+      <li data-option="d" data-explain="4 is right for internal pages, but a leaf split of 7 entries leaves only 3 on the left, so a leaf minimum of 4 would be broken by every split.">4 for both page types.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">An internal page view's <code>Size()</code> returns 4. Which indexes hold valid keys and which hold child page IDs?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That would be 4 keys and 5 children. Size counts the child pointers, and slot 0's key is unused.">Keys at indexes 0 to 3, children at indexes 0 to 4.</li>
+      <li data-option="b" data-explain="Slot 0's key is the invalid one, not the last slot's.">Keys at indexes 0 to 2, children at indexes 0 to 3.</li>
+      <li data-option="c" data-explain="Index 4 is past the page's size. A page with 4 children has 3 separators.">Keys at indexes 1 to 4, children at indexes 1 to 4.</li>
+      <li data-option="d" data-explain="Size is the number of children, here 4, at indexes 0 to 3. There is one key fewer, and slot 0's key is invalid, so the keys sit at 1 to 3.">Keys at indexes 1 to 3, children at indexes 0 to 3.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Someone writes <code>KeyAt</code> as <code>return p.data[off : off+p.keySize]</code>. A caller gets a key this way from a read guard's page, drops the guard, and compares the key later. What can happen?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Slicing never copies in Go; the result shares the page's backing array, which belongs to the frame.">Nothing, because slicing copies the bytes.</li>
+      <li data-option="b" data-explain="The compiler doesn't track guard lifetimes; the slice stays a valid Go slice, which is exactly the problem.">The compiler rejects using the slice after <code>Drop</code>.</li>
+      <li data-option="c" data-explain="The slice points into the frame. Once the guard is gone, a writer can change the page, or the frame can be reset and filled with another page, and the key's bytes change under the caller. TestBPlusTreePageInternalKeysAndValues catches the aliasing directly.">The key's bytes can change silently, because another writer or another page can reuse that memory.</li>
+      <li data-option="d" data-explain="Go is memory safe: the frame's slice stays allocated, so there is no crash, just wrong bytes.">The program crashes with a segmentation fault when the frame is reused.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question"><code>Init</code> on a leaf page sets the next page ID to <code>common.InvalidPageID</code>. Which bytes does the page hold at offsets 12 to 15 afterwards?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Zero bytes would decode to page 0, which is a real page (the tests' header page is usually page 0).">00 00 00 00</li>
+      <li data-option="b" data-explain="InvalidPageID is −1. As a uint32 it is 0xFFFFFFFF, and little-endian or not, all four bytes are ff.">ff ff ff ff</li>
+      <li data-option="c" data-explain="That is −1 written as a single byte followed by zeros, which decodes to 255.">ff 00 00 00</li>
+      <li data-option="d" data-explain="Offset 12 holds the next page ID, not a copy of max size.">The same bytes as offsets 8 to 11, the max size.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Build it: the page layouts (stage P2.1)</h2>
+
+  <p>You edit three files: <code>btree/b_plus_tree_page.go</code>, <code>btree/b_plus_tree_internal_page.go</code> and <code>btree/b_plus_tree_leaf_page.go</code>. Run commands from <code>go_db_internals/intro_to_db</code>. The rules, in plain words:</p>
+  <ul>
+    <li>Read and write every field with <code>binary.LittleEndian</code>, at the pre-built offset constants and the pre-built <code>keyOffset</code>, <code>valueOffset</code> and <code>tombstoneOffset</code> methods. Never hard-code 8 for the key size: the tests use 4-, 8- and 16-byte keys.</li>
+    <li><code>Init(maxSize)</code> sets the page type, a size of 0 and the max size; a leaf's <code>Init</code> also sets the next page ID to <code>common.InvalidPageID</code> and the tombstone count to 0. The tests run <code>Init</code> over pages full of garbage bytes.</li>
+    <li><code>KeyAt</code> returns a copy, on both page types. <code>ValueIndex</code> returns −1 for a page ID that is not a child.</li>
+    <li>Leaf <code>MinSize</code> rounds down, internal <code>MinSize</code> rounds up.</li>
+    <li>Keep all state in the page bytes. You may add helper methods (the stubs suggest a few for later stages), but no fields that hold page data.</li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u4-01-header">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-01-header-cb">
+        <label for="u4-01-header-cb">Implement the header accessors in b_plus_tree_page.go: IsLeafPage, SetPageType, Size, SetSize, ChangeSizeBy, MaxSize and SetMaxSize.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Each field is 4 bytes at a known offset. Which <code>encoding/binary</code> calls read and write exactly 4 bytes? The page stores an <code>int32</code> and the method returns an <code>int</code>: where do the conversions go, and why does the <code>int32</code> step matter for negative values? What does <code>ChangeSizeBy</code> need beyond the other two size methods?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Write two private helpers on <code>BPlusTreePage</code>, one that reads the little-endian <code>int32</code> at an offset and returns an <code>int</code>, and one that writes an <code>int</code> back as an <code>int32</code>. The size and max-size accessors become one line each, at <code>sizeOffset</code> and <code>maxSizeOffset</code>. <code>ChangeSizeBy</code> sets the size to the current size plus the amount. <code>SetPageType</code> stores <code>uint32(pageType)</code> at <code>pageTypeOffset</code>, and <code>IsLeafPage</code> compares the stored value with <code>IndexPageLeaf</code>. Since the node views embed <code>BPlusTreePage</code>, they can use your helpers too.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><p>The pre-built header page view does the same round trip for its root page ID:</p>
+<pre><code>return common.PageID(int32(binary.LittleEndian.Uint32(h.data[0:4])))
+// and to write it:
+binary.LittleEndian.PutUint32(h.data[0:4], uint32(rootPageID))</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: the header</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreePageHeaderFields$' ./btree/</code>. It checks each field through your accessors and in the raw bytes, and that a second view of the same bytes agrees. Success prints <code>ok  	intro_to_db/btree</code>. A field at the wrong offset fails with a message such as <code>bytes 4-7 = 0 after SetSize(7), want 7 (little-endian size at offset 4)</code>.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-01-internal-children">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-01-internal-children-cb">
+        <label for="u4-01-internal-children-cb">Implement the internal page's Init and its child pointers: ValueAt, SetValueAt and ValueIndex.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which three header fields does a fresh internal page need? A child pointer is a <code>common.PageID</code>: how many bytes, signed or unsigned, and which pre-built method gives its offset? Which indexes can <code>ValueIndex</code> return, and how many entries does it have to look at?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p><code>Init</code> calls <code>SetPageType(IndexPageInternal)</code>, <code>SetSize(0)</code> and <code>SetMaxSize(maxSize)</code>. <code>ValueAt</code> and <code>SetValueAt</code> read and write 4 bytes at <code>p.valueOffset(index)</code>, converting through <code>int32</code> as in the header. <code>ValueIndex</code> looks at the children 0 to <code>Size() − 1</code> and returns the first index whose value matches, or −1. A linear scan is fine: the tests don't require anything faster, and the tree calls it only a few times per split or merge.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>for i := 0; i &lt; p.Size(); i++ { // only the live children, not the whole slot array
+	// compare p.ValueAt(i) with value
+}</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-01-internal-keys">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-01-internal-keys-cb">
+        <label for="u4-01-internal-keys-cb">Implement the internal page's KeyAt and SetKeyAt, returning keys as copies.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Where does key <em>i</em> start, and how long is it? What would a caller see later if <code>KeyAt</code> returned a slice of the page itself? What should <code>SetKeyAt</code> do if it is handed a key of the wrong length?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>The key occupies <code>p.keySize</code> bytes from <code>p.keyOffset(index)</code>. <code>KeyAt</code> returns a fresh slice holding a copy of those bytes, typed as <code>GenericKey</code>. <code>SetKeyAt</code> copies the key's bytes into the same range. A <code>panic</code> on a key whose length isn't <code>p.keySize</code> is optional, but it turns a silent corruption into a clear message. A private helper that returns the key's range as a slice of the page is handy for later stages (binary search and memmove), as long as nothing outside the page methods keeps it.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>a := page[i:j]             // shares the page's memory
+b := bytes.Clone(page[i:j]) // a copy the caller can keep</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: internal pages</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreePageInternal' ./btree/</code>. It runs <code>TestBPlusTreePageInternalInit</code> and <code>TestBPlusTreePageInternalKeysAndValues</code>, the second with 8- and 16-byte keys, and prints <code>ok  	intro_to_db/btree</code> on success. A <code>KeyAt</code> that returns a slice of the page fails with <code>modifying the slice returned by KeyAt(1) changed the page (KeyAt(1) = 245): KeyAt must return a copy</code>.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-01-leaf-header">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-01-leaf-header-cb">
+        <label for="u4-01-leaf-header-cb">Implement the leaf page's Init, NextPageID, SetNextPageID and Tombstones.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>The tests run a leaf's <code>Init</code> over a page full of garbage bytes. Which fields must it set so that the leaf has no next page and no tombstones, and how wide is <code>num_tombstones_</code>? For <code>Tombstones</code>, where does the count live, and what does each buffer slot hold: a key, or an index into the key array?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p><code>Init</code> sets the type to <code>IndexPageLeaf</code>, the size to 0, the max size, the next page ID to <code>common.InvalidPageID</code>, and writes 0 as a <code>uint64</code> at <code>numTombstonesOffset</code>. The next page ID is a signed 4-byte value at <code>nextPageIDOffset</code>. <code>Tombstones</code> reads the count, then for each of the first <em>count</em> buffer slots reads the 8-byte entry index at <code>p.tombstoneOffset(i)</code> and appends <code>KeyAt(thatIndex)</code>. With a count of 0 it returns an empty slice, which is all this stage needs; stage 7 fills the buffer.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>n := int(binary.LittleEndian.Uint64(p.data[numTombstonesOffset:])) // size_t: 8 bytes</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-01-leaf-entries">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-01-leaf-entries-cb">
+        <label for="u4-01-leaf-entries-cb">Implement the leaf page's KeyAt, SetKeyAt, ValueAt and SetValueAt, with RIDs stored as page ID then slot number.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>The keys work exactly like the internal page's, at the leaf's own <code>keyOffset</code>. A <code>common.RID</code> has two fields: which comes first in the 8 bytes, and which one is signed?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Reuse the key logic from the internal page (copy out in <code>KeyAt</code>, copy in in <code>SetKeyAt</code>). For values, compute <code>off := p.valueOffset(index)</code>; the page ID is the <code>int32</code> at <code>off</code> and the slot number the <code>uint32</code> at <code>off + 4</code>. Build the result with <code>common.RID{PageID: ..., SlotNum: ...}</code> or <code>common.NewRID</code>.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>// rid_array_[index], 8 bytes from off := p.valueOffset(index):
+//   [off, off+4)   PageID  (int32, convert through int32 when reading)
+//   [off+4, off+8) SlotNum (uint32)</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: leaf pages</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreePageLeaf' ./btree/</code>. It runs <code>TestBPlusTreePageLeafInit</code> (over garbage bytes, with tombstone buffers of 0 and 3) and <code>TestBPlusTreePageLeafKeysAndValues</code> (key sizes 4, 8 and 16, tombstone buffers of 0, 2 and 3). A leaf that hard-codes 8-byte keys fails on the 16-byte case with <code>bytes at keyOffset(1) = [...], want ... (use the pre-built keyOffset; it accounts for the tombstone buffer)</code>; an <code>Init</code> that forgets the next page fails with <code>NextPageID() = -842150451 after Init, want common.InvalidPageID</code>.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-01-minsize">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-01-minsize-cb">
+        <label for="u4-01-minsize-cb">Implement MinSize: half the max size, rounded down for leaf pages and rounded up for internal pages.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p><code>MinSize</code> is a method of the base view, which doesn't know which node view it came from. What in the page bytes tells it? How do you write a rounded-up integer division without <code>math.Ceil</code>?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Branch on <code>IsLeafPage()</code>. For a leaf, return <code>MaxSize() / 2</code> (Go's integer division truncates, which rounds down for positive numbers). For an internal page, add 1 before dividing. Check yourself against the table: leaf 2, 3, 4, 5, 6 give 1, 1, 2, 2, 3; internal 3, 4, 5, 6 give 2, 2, 3, 3.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>// ceil(a / b) for positive ints, without floats:
+(a + b - 1) / b</code></pre></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage P2.1</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestBPlusTreePage' ./btree/</code></pre>
+    <p>It runs the seven stage-1 tests: <code>TestBPlusTreePageHeaderFields</code>, <code>TestBPlusTreePageMinSize</code>, <code>TestBPlusTreePageInternalInit</code>, <code>TestBPlusTreePageInternalKeysAndValues</code>, <code>TestBPlusTreePageLeafInit</code>, <code>TestBPlusTreePageLeafKeysAndValues</code> and <code>TestBPlusTreePageStateLivesInBytes</code>. BusTub has no tests of its own for the pages; these check the documented layout. Success prints one line, <code>ok  	intro_to_db/btree</code> and the time, about a second.</p>
+    <p>A typical failure names the test, the method and the expected value:</p>
+<pre><code>--- FAIL: TestBPlusTreePageMinSize (0.00s)
+    b_plus_tree_page_test.go:87: leaf page with max size 3: MinSize() = 2, want 1 (MaxSize/2, rounded down)
+FAIL
+FAIL	intro_to_db/btree	0.021s</code></pre>
+    <p>A method you haven't written yet fails with its stub's panic, for example <code>panic: TODO(P2): BPlusTreePage.SetPageType not implemented</code>, followed by the file and line. A <code>panic: TODO(P1)</code> message, or a hang in <code>TestBPlusTreePageStateLivesInBytes</code>, points to Project 1. If a run ever sits silent, stop it and rerun with a time limit after the regex, which makes <code>go test</code> print every goroutine's stack when it fires:</p>
+<pre><code>go test -race -run '^TestBPlusTreePage' -timeout 120s ./btree/</code></pre>
+    <p>Keep that habit for the whole project: some B+tree bugs, such as an internal page left with a single child, loop forever without waiting on any latch, and only <code>go test</code>'s timeout stops them.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why the page ID array starts at byte 5460 even when the max size is tiny, why an internal page of size 4 has only 3 keys, or why leaves round <code>MinSize</code> down while internal pages round it up. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: the CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/project2/">Project #2 writeup</a> (Task #1, Requirements and Hints); BusTub <code>src/include/storage/page/b_plus_tree_page.h</code>, <code>b_plus_tree_internal_page.h</code>, <code>b_plus_tree_leaf_page.h</code>, <code>b_plus_tree_header_page.h</code> and <code>src/storage/page/b_plus_tree_page.cpp</code> at commit d49b823; Lecture #08 slides 12–19 and Lecture #10 slides 41–46; this course's <code>btree/doc.go</code>, the three page files and <code>btree/b_plus_tree_page_test.go</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u3-08-latch-crabbing.html">← Index Concurrency Control: Latch Crabbing</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u4-02-p2-search.html">Next: P2.2 Point Search →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

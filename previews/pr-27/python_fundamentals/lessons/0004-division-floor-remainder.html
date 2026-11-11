@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 4 · Division, Floor and Remainder</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+<p class="eyebrow">Python Fundamentals · Lesson 4 · Day 1</p>
+<h1>Division, Floor and Remainder</h1>
+<p class="subtitle">Three ways to divide: <code>/</code>, <code>//</code> and <code>%</code>. Plus the power operator, and the traps that appear with negative numbers.</p>
+<p class="meta"><span class="pill">⏱ about 20 min</span> <span class="pill">▶ code you can run on this page</span></p>
+
+<h2>Warm-up: from last time</h2>
+<p>Two questions from earlier lessons, from memory. Spacing out your practice like this is what makes it stick.</p>
+<div class="problems" data-ids="ident-07,logic-12"></div>
+
+<div class="lede"><p>Dividing 17 sweets between 5 children has three useful answers: 3.4 sweets each (<code>/</code>), 3 whole sweets each (<code>//</code>) and 2 sweets left over (<code>%</code>). Python has an operator for each.</p></div>
+
+<h2>The operators</h2>
+<table>
+<tr><th>Operator</th><th>Name</th><th><code>17</code> and <code>5</code> gives</th></tr>
+<tr><td><code>17 / 5</code></td><td>true division</td><td><code>3.4</code> (always a float)</td></tr>
+<tr><td><code>17 // 5</code></td><td>floor division: divide, round <em>down</em></td><td><code>3</code></td></tr>
+<tr><td><code>17 % 5</code></td><td>modulus: the remainder</td><td><code>2</code></td></tr>
+<tr><td><code>17 ** 2</code></td><td>power</td><td><code>289</code></td></tr>
+</table>
+<p>Your notes: <em>modulus (%) returns the remainder after division. Floor division (//) rounds down and returns the integer value.</em> Two small details to add to that second one:</p>
+<div class="fixit">
+  <span class="callout-label">Two details about <code>//</code></span>
+  <p><strong>1. It only returns an int if both numbers are ints.</strong> <code>7.0 // 2</code> is <code>3.0</code>, a float that has been rounded down.</p>
+  <p><strong>2. &ldquo;Down&rdquo; means toward the smaller number, not toward zero.</strong> <code>-7 // 2</code> is <code>-4</code>, because -4 is below -3.5. This one is on a lot of tests.</p>
+</div>
+
+<h2>They fit back together</h2>
+<p><code>//</code> and <code>%</code> are two halves of one idea. For any numbers: <code>a == (a // b) * b + a % b</code>. So 17 is 3 fives plus 2.</p>
+<p>The classic use is splitting up a quantity. 135 minutes is how many hours and minutes? Step through to see it.</p>
+<div class="walk-demo" data-problem="num-05"></div>
+
+<h2>Try it</h2>
+<pre class="try" data-title="Try it: guess each line first"><code>print(17 / 5)
+print(17 // 5)
+print(17 % 5)
+print(-7 // 2)
+print(-7 % 3)
+print(7.0 // 2)</code></pre>
+
+<div class="callout good">
+  <span class="callout-label">Remember</span>
+  <p><code>*</code>, <code>/</code>, <code>//</code> and <code>%</code> are all tied, so a line such as <code>n // 10 % 10</code> goes left to right: first <code>n // 10</code>, then <code>% 10</code>. Strip off the last digit, then keep the next one.</p>
+</div>
+
+<h2>Practice</h2>
+<div class="problems" data-ids="num-04,num-06,num-14"></div>
+<p>More are in the <a href="../reference/problem-bank.html#numbers">problem bank</a>.</p>
+
+<div class="source"><span class="callout-label">Primary source</span><p><a href="https://docs.python.org/3/library/stdtypes.html#numeric-types-int-float-complex">Python Library Reference: Numeric types</a>. The table of operations lists <code>//</code> as &ldquo;floored quotient&rdquo; and <code>%</code> as &ldquo;remainder&rdquo;.</p></div>
+
+<div class="ask-your-teacher">Stuck, or something here does not match what you see? Ask your teacher. Paste the code, say what you expected, and say what you got.</div>
+
+<div class="lesson-nav">
+<a href="./0003-equals-vs-identity.html">← Lesson 3</a>
+<a href="../index.html">Course contents</a>
+<a href="../reference/precedence.html">Cheat sheet: precedence</a>
+<a href="./0005-imports-and-math.html">Lesson 5 →</a>
+</div>
+</main>
+<script src="../assets/data/load.js"></script>
+<script src="../assets/pyrun.js"></script>
+<script src="../assets/stepper.js"></script>
+<script src="../assets/problems.js"></script>
+</body>
+</html>

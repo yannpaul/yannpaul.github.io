@@ -1,0 +1,140 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_context_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 4 · Cancellation on Interrupt</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">context.Context in Go · Lesson 4 of 7</p>
+  <h1>Cancellation on Interrupt</h1>
+  <p class="subtitle">Rebuild Lesson 3's context tree in <code>burrow</code> from memory first. Then replace the simulated external cancellation with a real one: your own Ctrl+C.</p>
+
+  <p class="lede">Lesson 3 proved <code>burrow</code>'s context tree really works by simulating an external cancellation — a goroutine that slept 300ms and called the root's <code>cancel()</code>, standing in for "something outside this program decided to stop it." Today that simulation becomes real. <code>os/signal.NotifyContext</code> turns an actual OS signal — Ctrl+C in your terminal — into exactly the same kind of cancellation, reaching the same root context, propagating through the same tree.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–3</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-lesson3-tree">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-lesson3-tree-cb">
+        <label for="repeat-lesson3-tree-cb">Confirm <code>burrow</code>'s <code>main</code> still creates a root context and calls <code>rootCmd.ExecuteContext(ctx)</code>, and that <code>du top</code>'s <code>RunE</code> still derives its timeout from <code>cmd.Context()</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>burrow du top --path scratch --n 10</code> still behaves exactly as it did at the end of Lesson 3.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: turning a real signal into a real context</h2>
+
+  <p><code>signal.NotifyContext(parent, signals...)</code> returns a context derived from <code>parent</code>, plus a <code>stop</code> function. The moment your process receives any of the listed signals (<code>os.Interrupt</code> is Ctrl+C; <code>syscall.SIGTERM</code> is the polite "please stop" most process managers send), that context is canceled — same <code>Done()</code>, same <code>Err()</code>, same everything you've already been using.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="scratch-signal-demo">
+      <div class="todo-item-head">
+        <input type="checkbox" id="scratch-signal-demo-cb">
+        <label for="scratch-signal-demo-cb">In a throwaway scratch file: create a context with <code>signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)</code>. Print the process's own PID, then block on a <code>select</code> between a 10-second <code>time.After</code> ("finished normally") and <code>ctx.Done()</code> ("interrupted").</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+)
+
+func longRunningWork(ctx context.Context) error {
+	select {
+	case <-time.After(10 * time.Second):
+		fmt.Println("work: finished normally")
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("work: interrupted: %w", ctx.Err())
+	}
+}
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	fmt.Println("pid:", os.Getpid())
+	if err := longRunningWork(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Run it, then press <kbd>Ctrl+C</kbd> in that same terminal within 10 seconds. It prints <code>work: interrupted: context canceled</code> and exits with status 1 — no stack trace, no "killed," just an ordinary error your own code produced and handled.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: wiring it into burrow's root</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="swap-withcancel-for-notifycontext">
+      <div class="todo-item-head">
+        <input type="checkbox" id="swap-withcancel-for-notifycontext-cb">
+        <label for="swap-withcancel-for-notifycontext-cb">In <code>burrow</code>'s <code>main</code>, replace the root <code>context.WithCancel(context.Background())</code> from Lesson 3 with <code>signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)</code>. Everything else — <code>ExecuteContext</code>, <code>cmd.Context()</code>, the per-command timeout — stays exactly as it was.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the change</summary>
+          <div class="reveal-body">
+            <pre><code>ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+
+if err := rootCmd.ExecuteContext(ctx); err != nil {
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(1)
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Start a <code>du top</code> against a fixture with a deliberately slow entry and a generous timeout (10+ seconds), so it's still running. Press <kbd>Ctrl+C</kbd>. The command stops within a fraction of a second, printing an error containing <code>context canceled</code> — nowhere near its own long timeout. This is Lesson 3's simulated cancellation, now genuinely triggered by you, reaching all the way down through <code>cmd.Context()</code> into <code>duTop</code>'s own <code>ctx.Done()</code>.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Watch what happens if some later code between the cancellation and your program's actual exit ever hangs — a goroutine that doesn't check <code>ctx</code>, say. With <code>stop()</code> only deferred to run at the very end, a <em>second</em> Ctrl+C during that hang does nothing at all: <code>NotifyContext</code> is still intercepting the signal, silently, and your process just sits there. Calling <code>stop()</code> immediately once you've already reacted to the first cancellation — not waiting for the deferred call — hands signal handling back to the normal OS default, so a second Ctrl+C actually terminates the process instead of being swallowed. For a command as fast-exiting as <code>burrow</code>'s, the deferred-only version is fine; for anything with a real cleanup phase after cancellation, call <code>stop()</code> as soon as you've received the first signal, not only at the end.</p>
+  </div>
+
+  <p><code>burrow</code> can now be stopped from outside, cleanly, the moment you ask it to — not just when its own timeout happens to elapse. Lesson 5 turns to a different, unrelated thing a context can carry: request-scoped values, and exactly how narrow that use case is meant to be.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why a second Ctrl+C can get silently swallowed if <code>stop()</code> is only deferred, why <code>SIGTERM</code> is worth listening for alongside <code>os.Interrupt</code>, what happens to goroutines that never check <code>ctx.Done()</code> at all when cancellation happens, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary source for this lesson: <a href="https://pkg.go.dev/os/signal#NotifyContext">pkg.go.dev, <code>os/signal.NotifyContext</code></a> for its exact contract, including the signal-handling-reverts-to-default behavior once <code>stop</code> is called.</p>
+
+  <div class="lesson-nav">
+    <a href="./0003-propagating-context-through-call-chains.html">← Lesson 3: Propagating Context Through Call Chains</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0005-context-withvalue.html">Next: context.WithValue →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

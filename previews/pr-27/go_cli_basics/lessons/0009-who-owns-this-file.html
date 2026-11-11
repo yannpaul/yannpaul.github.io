@@ -1,0 +1,193 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_cli_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 9 · Who Owns This File</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go CLI Basics · Lesson 9 of 13</p>
+  <h1>Who Owns This File</h1>
+  <p class="subtitle">Rebuild Lessons 1–8 from memory first. Then give <code>perm</code> a second verb — and hit this course's first real platform limitation.</p>
+
+  <p class="lede"><code>perm check</code> tells you <em>what</em> the permission bits allow. It can't tell you <em>whose</em> file it is — permission bits alone don't say who "owner" refers to. Today: <code>burrow perm who --path .</code>, using the exact same nested-dispatch recipe you've now written four times, applied to <code>perm</code> a second time.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–8</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-perm-check">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-perm-check-cb">
+        <label for="repeat-perm-check-cb">Confirm <code>burrow perm check --path .</code> still reports the same owner/group/other breakdown it did at the end of Lesson 8, on the same test files.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Forgot the shape of a perm subcommand? Show <code>getPermConfig</code></summary>
+          <div class="reveal-body">
+            <pre><code>func getPermConfig() (Config, error) {
+	if len(os.Args) < 3 {
+		return Config{}, fmt.Errorf("expected a perm subcommand: check")
+	}
+
+	switch os.Args[2] {
+	case "check":
+		fs := flag.NewFlagSet("perm check", flag.ExitOnError)
+		path := fs.String("path", ".", "path to inspect")
+		fs.Parse(os.Args[3:])
+		return Config{Command: "perm check", Path: *path}, nil
+	default:
+		return Config{}, fmt.Errorf("unknown perm subcommand %q", os.Args[2])
+	}
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Same owner/group/other output as Lesson 8, before you add anything below.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: a second <code>perm</code> subcommand</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="add-who-case">
+      <div class="todo-item-head">
+        <input type="checkbox" id="add-who-case-cb">
+        <label for="add-who-case-cb">Add a <code>"who"</code> case to <code>getPermConfig</code>'s switch, the same shape as <code>"check"</code>: its own <code>flag.NewFlagSet("perm who", flag.ExitOnError)</code> with a <code>-path</code> flag, parsed from <code>os.Args[3:]</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the case</summary>
+          <div class="reveal-body">
+            <pre><code>case "who":
+	fs := flag.NewFlagSet("perm who", flag.ExitOnError)
+	path := fs.String("path", ".", "path to inspect")
+	fs.Parse(os.Args[3:])
+	return Config{Command: "perm who", Path: *path}, nil</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: looking up an owner's name</h2>
+
+  <p>An <code>fs.FileInfo</code>'s <a href="https://pkg.go.dev/io/fs#FileInfo"><code>.Sys()</code></a> method returns <code>any</code> — an escape hatch to operating-system-specific data <code>fs.FileInfo</code> doesn't standardize, because not every OS represents file ownership the same way. On Unix-like systems (Linux, macOS), the concrete type behind that <code>any</code> is <code>*syscall.Stat_t</code>, which has numeric <code>Uid</code> and <code>Gid</code> fields — a user ID and group ID, not names. Turning those into names is a second step, via <a href="https://pkg.go.dev/os/user"><code>os/user</code></a>: <code>user.LookupId</code> and <code>user.LookupGroupId</code>, both of which take the ID as a <em>string</em>, not an int.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-whoowns">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-whoowns-cb">
+        <label for="write-whoowns-cb">Write <code>whoOwns(path string) error</code>: <code>os.Stat</code> the path, type-assert <code>.Sys()</code> to <code>*syscall.Stat_t</code>, then look up the username and group name from its <code>Uid</code>/<code>Gid</code> and print both.</label>
+      </div>
+      <div class="todo-item-body">
+        <p><code>user.LookupId</code> takes a string, and <code>Uid</code>/<code>Gid</code> are numeric — <code>strconv.Itoa(int(stat.Uid))</code> converts it. Handle the type assertion's second return value: if it's <code>false</code>, you're not on a platform where this works (see the idiom callout below) — return a clear error rather than letting a failed assertion panic.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func whoOwns(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("can't read owner info for %s on this platform", path)
+	}
+
+	owner, err := user.LookupId(strconv.Itoa(int(stat.Uid)))
+	if err != nil {
+		return err
+	}
+	group, err := user.LookupGroupId(strconv.Itoa(int(stat.Gid)))
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(path)
+	fmt.Println("  owner:", owner.Username)
+	fmt.Println("  group:", group.Name)
+	return nil
+}</code></pre>
+            <p>Add <code>"os/user"</code>, <code>"strconv"</code>, and <code>"syscall"</code> to your import block.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-calls-whoowns">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-calls-whoowns-cb">
+        <label for="run-calls-whoowns-cb">In <code>run</code>, add a <code>"perm who"</code> case calling <code>whoOwns(cfg.Path)</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the case</summary>
+          <div class="reveal-body">
+            <pre><code>case "perm who":
+	return whoOwns(cfg.Path)</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="try-perm-who">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-perm-who-cb">
+        <label for="try-perm-who-cb">Run <code>burrow perm who --path .</code>, and compare it against your own username.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Not sure what to compare against? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>whoami</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The printed owner matches whatever <code>whoami</code> reports — you created the file, so on almost any normal setup, you own it.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="try-perm-who-check-both">
+      <div class="todo-item-head">
+        <input type="checkbox" id="try-perm-who-check-both-cb">
+        <label for="try-perm-who-check-both-cb">Confirm <code>perm check</code> and <code>perm who</code> both still work side by side, and that <code>find</code>/<code>du</code> are untouched.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>All five commands (<code>find name</code>, <code>du top</code>, <code>perm check</code>, <code>perm who</code>) work independently, and <code>go vet ./...</code> is clean.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>This is the mission's promised platform caveat, and it's a real one, not a hedge: <code>syscall.Stat_t</code> only exists on Unix-like systems. Cross-compiling this exact code for Windows (<code>GOOS=windows go build</code>) fails outright at compile time — <code>undefined: syscall.Stat_t</code> — because Windows represents file ownership completely differently (via security descriptors, not a numeric UID/GID pair), and Go's <code>syscall</code> package only defines <code>Stat_t</code> for the platforms where it makes sense. macOS and Linux both cross-compile clean, since both are POSIX-like here. If <code>burrow</code> ever needed to run on Windows, <code>perm who</code> specifically would need a build-tag-gated Windows implementation calling a completely different API — a real, separate piece of work this course intentionally leaves out.</p>
+  </div>
+
+  <p>Every subcommand this course set out to build — <code>find name</code>, <code>du top</code>, <code>perm check</code>, <code>perm who</code> — now does real work. Lesson 10 steps back and cleans up the dispatch code itself, before Lesson 11 replaces it with a real library.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why <code>.Sys()</code> returns <code>any</code> instead of something more specific, the two-value type assertion form, why Windows needs a totally different approach, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://pkg.go.dev/os/user">pkg.go.dev, <code>os/user</code></a> for <code>LookupId</code>/<code>LookupGroupId</code>; <a href="https://pkg.go.dev/io/fs#FileInfo">pkg.go.dev, <code>fs.FileInfo</code></a> for the <code>Sys()</code> escape hatch and its documented platform-dependence.</p>
+
+  <div class="lesson-nav">
+    <a href="./0008-permission-bits.html">← Lesson 8: Permission Bits</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0010-cleaning-up-the-dispatch.html">Next: Cleaning Up the Dispatch →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

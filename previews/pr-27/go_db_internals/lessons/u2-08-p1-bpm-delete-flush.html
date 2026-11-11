@@ -1,0 +1,377 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 2 · Lesson 8 · P1.6 Buffer Pool Manager: Delete, Flush, and Concurrency</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 2 · Lesson 8</p>
+  <h1>P1.6 Buffer Pool Manager: Delete, Flush, and Concurrency</h1>
+  <p class="subtitle">Implement DeletePage and the four flush methods, explain when a delete must fail and how the safe and Unsafe flushes differ, and run the concurrency tests that check the whole buffer pool under the race detector.</p>
+
+  <p class="lede">After P1.5 the buffer pool can bring pages in and push them out, but it can't forget a page for good, and it writes a dirty page only when it evicts one. This stage adds both: <code>DeletePage</code> removes a page from memory and disk, and the flush methods write pages out while they stay in memory. Both have to work while other goroutines fetch, write and drop guards, so the stage ends with the concurrency tests and the full test suite under <code>-race</code>.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">The pre-built <code>disk.FileManager</code> stores every page in one database file. What does its <code>DeletePage</code> do with the deleted page's slot in the file?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The file never shrinks on a delete. The slot stays in the file and is handed out again.">It truncates the file so that the slot's bytes are given back to the operating system.</li>
+      <li data-option="b" data-explain="DeletePage puts the slot on a free list, and the next page that is written or read for the first time gets it. That reuse is why a deleted page must never be written back afterwards: its bytes would land in another page's slot.">It puts the slot on a free list, and a page accessed for the first time later can reuse it.</li>
+      <li data-option="c" data-explain="FileManager keeps no tombstones; it removes the page from its map and frees the slot.">It writes a tombstone into the slot, so that a later read of the page returns an error.</li>
+      <li data-option="d" data-explain="The map from page IDs to offsets lives only in memory, and the slot is reused, so nothing about the deleted page survives.">It keeps the slot reserved for the same page ID, in case that page is created again.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Lecture #04 describes background writing, which Project 1 doesn't have. What does a background writer do?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Writing every change at once is a write-through cache. The buffer pool is a write-back cache, and background writing is an optimization of write-back.">It writes each change to disk as soon as a thread modifies the page.</li>
+      <li data-option="b" data-explain="Choosing victims is the replacement policy's job. Background writing only cleans pages, so that a later eviction can take the fast path.">It picks the next victim ahead of time, so that eviction doesn't have to call the replacer.</li>
+      <li data-option="c" data-explain="Background writing writes dirty pages; clean pages already match the disk. The slide's warning is about writing a dirty page before its log records, not about re-reading.">It re-reads clean pages from disk so that their copies in memory stay current.</li>
+      <li data-option="d" data-explain="Slide 33: it walks the page table, writes dirty pages to disk early, and then either evicts each page or just resets its dirty flag. The flush methods in this stage are the second option, done on request.">It periodically writes dirty pages out early, then evicts them or just clears their dirty flags.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">In Project 1's <code>ArcReplacer</code>, what does <code>Remove(frameID)</code> do?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Remove is for deleted pages. It drops an evictable frame and lowers Size, leaves no ghost entry because the page no longer exists, panics on a frame that isn't evictable, and ignores a frame it doesn't track.">It drops an evictable frame without leaving a ghost entry, and panics if the frame isn't evictable.</li>
+      <li data-option="b" data-explain="That describes Evict, which moves the victim's page ID to a ghost list. Remove forgets the page entirely.">It moves the frame's page ID to the front of its list's ghost list, as an eviction does.</li>
+      <li data-option="c" data-explain="Remove panics on a frame that isn't evictable, so the caller must make sure the page is unpinned first.">It removes the frame whether or not it is evictable, because a deleted page is never used again.</li>
+      <li data-option="d" data-explain="Remove never changes p. Only the ghost hits in RecordAccess move the target size.">It removes the frame and lowers the target size p, since the cache now holds one page fewer.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Deleting a page</h2>
+
+  <p>The doc comment of <code>DeletePage</code> gives the rule and the hint. The rule: "If the page is pinned in the buffer pool, this function does nothing and returns false. Otherwise, this function removes the page from both disk and memory (if it is still in the buffer pool), returning true." The hint: "Think about all of the places that a page or a page's metadata could be." After P1.5 you can list them:</p>
+  <ul>
+    <li>the page table, and your reverse map from frames to pages;</li>
+    <li>the frame itself: its bytes, its pin count and its dirty flag;</li>
+    <li>the replacer, which tracks the frame as an alive entry;</li>
+    <li>the free list, where the frame belongs once it holds nothing;</li>
+    <li>the disk, where <code>DiskScheduler.DeallocatePage</code> frees the page's space.</li>
+  </ul>
+
+  <p>A delete must fail on a pinned page because a pin means some goroutine holds a guard on it. Its owner can read or write the frame's bytes at any moment, and the guard's <code>Drop</code> will later unpin that frame. Freeing the frame would hand those bytes to the next fetch while the old guard still uses them. The replacer enforces this too: your <code>Remove</code> panics on a frame that isn't evictable, so a delete that skips the pin check shows up as that panic. Do the whole delete under <code>bpmLatch</code>, so that no fetch can pin the page between your check and your cleanup.</p>
+
+  <p>Two more rules come from the doc comment and this course's tests:</p>
+  <ul>
+    <li>A page that isn't in memory is still deleted on disk, and the call returns <code>true</code>: the doc comment returns "true if the page didn't exist or deletion succeeded". <code>TestBufferPoolManagerDeleteNonResidentPage</code> expects exactly one <code>DeallocatePage</code> for a page that lives only on disk, and <code>true</code> for a page ID that never existed.</li>
+    <li>A deleted page's data is discarded, even if it is dirty. Writing it back would be wasted work at best. With the file manager it is worse: the deleted page's slot goes on the free list, and a late write-back would claim a slot for a page that no longer exists. <code>TestBufferPoolManagerDeleteFreesFrame</code> checks that a deleted dirty page is never written, not even by a later <code>FlushAllPages</code>.</li>
+  </ul>
+
+  <p>Deleting never makes a page ID available again. <code>NewPage</code> counts upwards only, so a stale reference to a deleted page can't silently land on a newer page with the same ID.</p>
+
+  <h2>Flushing: writing a page without evicting it</h2>
+
+  <p>A <strong>flush</strong> writes a page's bytes to disk if the page is dirty, clears its dirty flag, and leaves everything else alone: the page stays in its frame with the same pin count. A clean page needs no write. All four methods report <code>false</code> for a page that isn't in the page table, because there is nothing in memory to write. The flush tests check every part of that: the bytes on disk, the dirty flag, the pin count, and that the page is still in memory afterwards.</p>
+
+  <p>The methods come in two pairs, and the pairs differ in one thing: whether they take the frame's latch.</p>
+
+  <table>
+    <tr><th></th><th><code>FlushPageUnsafe</code>, <code>FlushAllPagesUnsafe</code></th><th><code>FlushPage</code>, <code>FlushAllPages</code></th></tr>
+    <tr><td>Frame latch</td><td>none ("You should not take a lock on the page")</td><td>shared, for each page while it is written</td></tr>
+    <tr><td>A writer active on the page</td><td>its half-done changes can be written; in Go that is a data race, which <code>-race</code> reports</td><td>the flush waits until the writer drops its guard</td></tr>
+    <tr><td>Can wait for other goroutines</td><td>no</td><td>yes, so it must not hold <code>bpmLatch</code> while it waits</td></tr>
+    <tr><td>Safe to call while you hold a write guard on the page</td><td>yes: you are the only writer</td><td>no: it would wait for your own guard forever</td></tr>
+  </table>
+
+  <p>The safe flush brings back the lock-order rule from P1.5. Waiting for the frame latch while holding <code>bpmLatch</code> deadlocks the whole pool behind one slow writer. But releasing <code>bpmLatch</code> leaves a different hole: while the flush waits for the latch, the page could be evicted and its frame reused for another page, and the flush would then write that page's bytes under the wrong page ID. The answer is the same pin-then-release move a fetch makes:</p>
+  <ol>
+    <li>Under <code>bpmLatch</code>, look the page up (absent: return <code>false</code>), add a pin and call <code>SetEvictable(frameID, false)</code>. Skip <code>RecordAccess</code>: a flush doesn't use the page, and counting it as an access would make ARC treat a flushed page as popular.</li>
+    <li>Release <code>bpmLatch</code>.</li>
+    <li>Take the frame's latch in shared mode, which waits for any writer. Write the page if it is dirty, wait for the callback, and release the latch.</li>
+    <li>Give the pin back exactly as a guard's <code>Drop</code> does: under <code>bpmLatch</code>, decrement the pin count, and if it reached 0, call <code>SetEvictable(frameID, true)</code>.</li>
+  </ol>
+
+  <p><code>TestBufferPoolManagerFlushWaitsForWriter</code> checks both halves. It holds a write guard while another goroutine calls <code>FlushPage</code>, expects the flush to wait, fetches a different page meanwhile (which hangs if the flush holds <code>bpmLatch</code>), then finishes writing and expects the final bytes on disk.</p>
+
+  <p><code>FlushAllPages</code> applies the same protocol to every page. Copy the page IDs out of the page table under <code>bpmLatch</code>, release it, and flush each page with <code>FlushPage</code>. A page evicted in between was written back by its eviction if it was dirty, so <code>FlushPage</code> returning <code>false</code> for it is fine. <code>FlushAllPagesUnsafe</code> takes no frame latches, so it can simply walk the page table while holding <code>bpmLatch</code>.</p>
+
+  <h3>When to clear the dirty flag</h3>
+
+  <p>The doc comment of <code>FlushPageUnsafe</code> warns that without the page latch "you should carefully consider when to toggle the isDirty bit." Picture a writer still changing the page while an Unsafe flush runs. If the flush clears the flag <em>after</em> writing, a change made during the write is in memory, missing from disk, and the page looks clean, so the next eviction drops it. If the flush clears the flag <em>before</em> writing, any later change can set it again, and the page is written once more when it is evicted. That only works if writers also mark the page dirty when they finish. Your write guard already marks the page when it is created (the P1.4 tests require it). Marking it again in <code>Drop</code>, before the frame latch is released, also covers a change made after the guard's own <code>Flush</code>. In Go, a flush racing a writer is a data race anyway, so the tests never do it; the same ordering is what keeps a guard's <code>Flush</code> followed by more writes correct.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p><code>FrameHeader.isDirty</code> is an <code>atomic.Bool</code>. Its <code>Swap(false)</code> clears the flag and returns the old value in one atomic step, which is "test and clear before writing" without a gap in between. Eviction, the guards' <code>Flush</code> and all four flush methods do the same thing (write the frame if it is dirty, then wait for the callback), so one small helper serves them all. Likewise, factor the unpin step of <code>Drop</code> into a helper and call it from <code>FlushPage</code>, so both release a pin the same way.</p>
+  </div>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=8-2yv4z0VZc&amp;t=4016s">#04 Memory Management, "Flushing and IO scheduling" (1:06:56)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf#page=86">slides 32–33</a>: the fast and slow paths for evicting clean and dirty pages, and background writing, which writes dirty pages early and resets their flags.</p>
+
+  <h2>The concurrency tests</h2>
+
+  <p>The stage-6 regex also runs seven <code>TestBufferPoolManagerConcurrency</code> tests. Four are BusTub's own, and they need nothing from this stage: <code>PageAccessTest</code>, <code>ContentionTest</code>, <code>DeadlockTest</code> and <code>EvictableTest</code> pass as soon as P1.5 is correct, which is why the previous lesson already ran <code>DeadlockTest</code>. They stay here as regression and stress tests: any change you make in this stage, or later for performance, runs them again under <code>-race</code>.</p>
+
+  <table>
+    <tr><th>Test</th><th>What it does</th><th>What it catches</th></tr>
+    <tr><td><code>...PageAccess</code></td><td>1 frame; a writer rewrites a page every 5 ms while a reader holds a read guard and checks that the bytes don't change</td><td>read guards that don't exclude writers</td></tr>
+    <tr><td><code>...Contention</code></td><td>4 goroutines × 100,000 <code>WritePage</code> calls on one page, bounded by 3 minutes</td><td>races and very slow hit paths</td></tr>
+    <tr><td><code>...Deadlock</code></td><td>the P1.5 lock-order scenario</td><td>waiting for a frame latch while holding <code>bpmLatch</code></td></tr>
+    <tr><td><code>...Evictable</code></td><td>1 frame, 8 readers, 1000 rounds; while the "winner" page is pinned, loading the "loser" page must fail</td><td>a pinned frame left evictable</td></tr>
+    <tr><td><code>...ReadersShareLatch</code></td><td>8 read guards on one page at once</td><td>read guards that take the latch exclusively</td></tr>
+    <tr><td><code>...CreateDeleteChurn</code></td><td>8 goroutines create, write, read and delete their own pages on the file manager</td><td>deleted pages written back, stale frames, slot reuse corrupting other pages</td></tr>
+    <tr><td><code>...Stress</code></td><td>BusTub's leaderboard workload (scans and skewed updates) on 16 frames and 256 pages, plus a goroutine calling <code>FlushPage</code> and <code>FlushAllPages</code>; afterwards every page, in memory and on disk, must be consistent</td><td>lost updates, flush races, eviction bugs under load</td></tr>
+  </table>
+
+  <p><code>EvictableTest</code> is the one that checks the writeup's warning that the pin count and <code>SetEvictable</code> must stay in sync. Two places can break the sync. A fetch that hits a page with pin count 0 must call <code>SetEvictable(false)</code> (P1.5). And the last unpin must happen under <code>bpmLatch</code>, together with its <code>SetEvictable(true)</code>. If a guard's <code>Drop</code> decrements the count outside the latch, three goroutines can interleave like this:</p>
+
+<pre><code>reader A: Drop: pin 1 → 0                     (no bpmLatch)
+reader B: fetch hit under bpmLatch: pin 0 → 1, RecordAccess, SetEvictable(false)
+reader A: SetEvictable(true)                  ← the frame is pinned, yet evictable
+reader C: fetch of another page evicts the frame out from under B's guard</code></pre>
+
+  <p>The P1.5 tests run one goroutine at a time and never produce this interleaving. <code>EvictableTest</code> repeats the race 1000 times with 8 readers, and it reports <code>round N: CheckedReadPage(1) succeeded although the only frame is pinned</code>.</p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Page 4 is in memory, and a goroutine holds a read guard on it, so its pin count is 1. Another goroutine calls <code>DeletePage(4)</code>. What should happen?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The page isn't deleted at all, so nothing should be deallocated on disk either; TestBufferPoolManagerDeletePinnedPage checks that the disk saw no delete.">The call returns false, but the page's space on disk is deallocated so the delete finishes later.</li>
+      <li data-option="b" data-explain="Delete never waits for guards. The doc comment says it does nothing and returns false while the page is pinned.">The call waits until the read guard is dropped, then deletes the page and returns true.</li>
+      <li data-option="c" data-explain="A pinned page can't be deleted: the guard's owner may still use the frame. DeletePage returns false and changes nothing, in memory or on disk.">The call returns false and changes nothing; the page stays in memory with pin count 1.</li>
+      <li data-option="d" data-explain="Removing a pinned frame from the replacer panics, and freeing the frame would hand its bytes to another page while the guard still uses them.">The page leaves the page table and the replacer, and the frame is freed once the guard is dropped.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Page 9 is in memory, unpinned and dirty. <code>DeletePage(9)</code> is called. Which list describes everything it should do?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The page is unpinned, so it can be deleted. Its data is discarded without a write, every structure that knows about it is cleaned up, the frame goes back on the free list, and the disk frees the page's space.">Remove the frame from the replacer, delete the page-table entry, reset the frame, put it on the free list, call DeallocatePage and return true.</li>
+      <li data-option="b" data-explain="Writing a page that is being deleted is wasted work, and with the file manager the write can claim a slot for a page that no longer exists. TestBufferPoolManagerDeleteFreesFrame expects no write.">Write the page back because it is dirty, then remove it from the page table and the replacer and return true.</li>
+      <li data-option="c" data-explain="A frame that holds nothing belongs on the free list. Left in the replacer, it would only come back through an eviction, and Remove exists for exactly this case.">Delete the page-table entry and call DeallocatePage, leaving the frame in the replacer to be evicted later.</li>
+      <li data-option="d" data-explain="Only a pinned page makes DeletePage return false. Dirtiness has nothing to do with whether a page can be deleted.">Return false, because a dirty page must be flushed before it can be deleted.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question"><code>FlushPage</code> pins the page under <code>bpmLatch</code> before it releases the latch and waits for the frame latch. What would go wrong without that pin?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Readers take the frame latch in shared mode and can hold it together with the flush. The pin has nothing to do with readers.">Read guards on the page would be unable to share the frame latch with the flush.</li>
+      <li data-option="b" data-explain="Pins don't order disk requests. The scheduler's single worker already processes requests in the order they were scheduled.">The disk scheduler could run the flush's write before an earlier read of the same page.</li>
+      <li data-option="c" data-explain="The pin count is atomic, so GetPinCount can't read a torn value. The problem is what can happen to the frame, not to the counter.">GetPinCount could return a torn value while the flush is running.</li>
+      <li data-option="d" data-explain="Once bpmLatch is released, an unpinned page can be evicted and its frame reused. The flush, waiting for that frame's latch, would then write another page's bytes under this page's ID.">The page could be evicted while the flush waits, and the flush would write another page's bytes under its ID.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A buffer pool's <code>Drop</code> releases the frame latch, then decrements the pin count with an atomic <code>Add(-1)</code>, and only then takes <code>bpmLatch</code> to call <code>SetEvictable(true)</code> when the count reached 0. Why does <code>EvictableTest</code> fail on it?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The frame latch is released correctly here, and a second Drop is a no-op through the guard's validity flag. The bug is in the unpin step.">The frame latch is released twice, so the second reader's guard panics.</li>
+      <li data-option="b" data-explain="Between the decrement and SetEvictable(true), another reader can pin the frame and mark it non-evictable. The late SetEvictable(true) then leaves a pinned frame evictable, and loading the loser page succeeds.">Another reader can pin the frame between the decrement and SetEvictable(true), which then leaves a pinned frame evictable.</li>
+      <li data-option="c" data-explain="An atomic Add can't lose an update; that is what atomics are for. The pin count itself stays right, while the replacer's flag goes wrong.">The atomic decrement can be lost when two readers drop at the same moment.</li>
+      <li data-option="d" data-explain="Taking bpmLatch after releasing the frame latch follows the lock order (frame latch first, pool latch second) and holds only one latch at a time, so it can't deadlock.">Taking bpmLatch after the frame latch makes Drop deadlock against a fetch.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Build it: delete, flush, and harden</h2>
+
+  <p>Everything is in <code>bufferpool/buffer_pool_manager.go</code>, except the last task, which reviews <code>bufferpool/page_guard.go</code>. Read the doc comments of <code>DeletePage</code> and the four flush methods in full; each says when its method should be written, and in which order relative to the others. Each task ends with a check that runs only that method's tests.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u2-08-delete">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u2-08-delete-cb">
+        <label for="u2-08-delete-cb">Implement DeletePage: refuse a pinned page, otherwise remove the page from every structure that knows about it and deallocate it on disk.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>List every place the page or its metadata can be. Which checks must come before you change anything, and what must <code>DeletePage</code> still do for a page that isn't in memory at all?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Lock <code>bpmLatch</code> for the whole call. If the page is in the page table: if its pin count is above 0, return <code>false</code>; otherwise call <code>replacer.Remove</code> on its frame, delete the page-table entry and the reverse-map entry, reset the frame (dropping the bytes, dirty or not), and append the frame to <code>freeFrames</code>. Then, whether or not the page was in memory, call <code>diskScheduler.DeallocatePage</code> and return <code>true</code>.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>if frame.pinCount.Load() &gt; 0 {
+	return false // a guard still uses this frame
+}
+bpm.replacer.Remove(frameID) // legal now: the frame is evictable</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go test -race -run '^TestBufferPoolManagerDelete(VeryBasic|PinnedPage|NonResidentPage)$' ./bufferpool/</code> runs BusTub's full <code>VeryBasicTest</code> and the pinned and non-resident delete tests, and prints <code>ok  	intro_to_db/bufferpool</code>. The fourth delete test, <code>...DeleteFreesFrame</code>, also calls <code>FlushAllPages</code>, so it fails with <code>panic: TODO(P1): BufferPoolManager.FlushAllPages not implemented</code> until the last flush task. A delete that ignores pins ends in your replacer's panic from <code>Remove</code>.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u2-08-flush-unsafe">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u2-08-flush-unsafe-cb">
+        <label for="u2-08-flush-unsafe-cb">Implement FlushPageUnsafe: under the pool latch, write the page if it is dirty, without taking the frame's latch.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>What does the method return for a page that isn't in memory, and for a clean page that is? When do you clear the dirty flag relative to the write, and why does the order matter only when a writer could be active?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Lock <code>bpmLatch</code>. Look the page up; if it is absent, return <code>false</code>. Clear the dirty flag, and if it was set, schedule a write of the frame's bytes under this page ID and wait on the callback. If the callback reports <code>false</code>, set the flag again, since the page still differs from disk. Return <code>true</code> otherwise. This "write if dirty" step is the same one your eviction does; make it a shared helper.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>if frame.isDirty.Swap(false) { // clear first, then write
+	// schedule IsWrite: true for this page and wait on the callback
+}</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go test -race -run '^TestBufferPoolManagerFlushPageUnsafe$' ./bufferpool/</code> prints <code>ok  	intro_to_db/bufferpool</code>. The test checks <code>false</code> for a page that isn't in memory, the bytes on disk after the flush, a cleared dirty flag, and a page that is still in memory with pin count 0.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u2-08-flush-safe">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u2-08-flush-safe-cb">
+        <label for="u2-08-flush-safe-cb">Implement FlushPage: pin the page under the pool latch, release the pool latch, flush under the frame's shared latch, then unpin the way a guard's Drop does.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>You will wait for the frame latch. What must you not be holding while you wait, and what stops the page from being evicted once you let go of it? Is a flush an access that ARC should hear about?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Lock <code>bpmLatch</code> and look the page up; if it is absent, unlock and return <code>false</code>. Add a pin and call <code>SetEvictable(frameID, false)</code>, but not <code>RecordAccess</code>. Unlock. Take the frame's latch with <code>RLock</code>, run your "write if dirty" helper, and <code>RUnlock</code>. Finally unpin under <code>bpmLatch</code>: decrement, and call <code>SetEvictable(frameID, true)</code> if the count reached 0. Return what the write reported.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>bpm.bpmLatch.Unlock() // the pin keeps the frame from being evicted
+frame.rwlatch.RLock() // waits for a writer, holding no pool latch</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go test -race -run '^TestBufferPoolManagerFlush(Page|WaitsForWriter)$' ./bufferpool/</code> prints <code>ok  	intro_to_db/bufferpool</code>. If <code>FlushPage</code> waits for the frame latch while holding <code>bpmLatch</code>, <code>TestBufferPoolManagerFlushWaitsForWriter</code> fails after 10 seconds with <code>ReadPage of another page while FlushPage waits for a page latch did not return within 10s</code>. If it takes no frame latch, the test reports <code>FlushPage returned while another goroutine held a WritePageGuard on the page</code>.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u2-08-flush-all-unsafe">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u2-08-flush-all-unsafe-cb">
+        <label for="u2-08-flush-all-unsafe-cb">Implement FlushAllPagesUnsafe: write every dirty page in the page table, under the pool latch and without frame latches.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which pages count as "in memory"? Can anything in this method wait for another goroutine, and so is it safe to keep <code>bpmLatch</code> for the whole loop?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Lock <code>bpmLatch</code> with a deferred unlock, range over the page table, and run your "write if dirty" helper on each page's frame. Waiting on disk callbacks under the pool latch is fine, because the disk worker never takes it.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>for pageID, frameID := range bpm.pageTable {
+	// write bpm.frames[frameID] as pageID if it is dirty
+}</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go test -race -run '^TestBufferPoolManagerFlushAllPagesUnsafe$' ./bufferpool/</code> prints <code>ok  	intro_to_db/bufferpool</code>. The test writes six pages through four frames, so two were written back by eviction and four are flushed by your method; it then checks all six on disk.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u2-08-flush-all">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u2-08-flush-all-cb">
+        <label for="u2-08-flush-all-cb">Implement FlushAllPages: copy the page IDs out under the pool latch, release it, and flush each page safely.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Each safe flush may wait for a writer. Can you range over <code>pageTable</code> while doing that? What happens to a page that is evicted between the moment you list it and the moment you flush it?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Under <code>bpmLatch</code>, copy the page table's keys into a slice. Unlock. Call <code>FlushPage</code> for each ID and ignore its result: a page evicted in the meantime was written back by the eviction if it was dirty, and a deleted page should not be written at all.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>ids := make([]common.PageID, 0, len(bpm.pageTable))
+for pageID := range bpm.pageTable {
+	ids = append(ids, pageID)
+}</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go test -race -run '^TestBufferPoolManagerFlushAllPages$' ./bufferpool/</code> prints <code>ok  	intro_to_db/bufferpool</code>. Rerun the delete tests now: <code>...DeleteFreesFrame</code> can pass at last.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u2-08-harden">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u2-08-harden-cb">
+        <label for="u2-08-harden-cb">Review the concurrency rules across the buffer pool and the guards, then run the concurrency tests under the race detector.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Find every place your code waits: on a frame latch, on <code>bpmLatch</code>, on a disk callback. For each one, which latches does the goroutine hold at that moment? And find every place a pin count can reach 0: is <code>bpmLatch</code> held there?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Check four rules. No goroutine waits for a frame latch while holding <code>bpmLatch</code> (fetches, <code>FlushPage</code>, <code>FlushAllPages</code>). Every fetch that succeeds calls <code>SetEvictable(false)</code>, hits included. Every unpin (guards' <code>Drop</code> and <code>FlushPage</code>) decrements the count and calls <code>SetEvictable(true)</code> at 0, both under <code>bpmLatch</code>, after the frame latch has been released. And a write guard marks the page dirty in <code>Drop</code> before releasing its latch, as well as when it is created. Then run the concurrency tests; when one fails or hangs, add <code>-v</code> and <code>-timeout 120s</code> after the regex to see which test and which goroutines are stuck.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>g.frame.isDirty.Store(true) // in WritePageGuard.Drop: still holding the latch
+g.frame.rwlatch.Unlock()    // latch first...
+// ...then unpin under bpmLatch</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go test -race -run '^TestBufferPoolManagerConcurrency' ./bufferpool/</code> runs the seven concurrency tests in a few seconds and prints <code>ok  	intro_to_db/bufferpool</code>. A goroutine that never finishes makes its test fail when the bounded wait expires, for example <code>the readers did not finish within 10s: a latch is never released, or there is a deadlock</code>.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage P1.6</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestBufferPoolManager(Delete|Flush|Concurrency)' ./bufferpool/</code></pre>
+    <p>It runs the 16 stage-6 tests: four delete tests (including BusTub's full <code>VeryBasicTest</code>), five flush tests and the seven concurrency tests. It takes several seconds, mostly in <code>ContentionTest</code> and the stress test. Success prints:</p>
+<pre><code>ok  	intro_to_db/bufferpool	6.808s</code></pre>
+    <p>Typical failures: a stub still in place (<code>panic: TODO(P1): BufferPoolManager.FlushPage not implemented</code>); a pinned frame left evictable (<code>round 0: CheckedReadPage(1) succeeded although the only frame is pinned</code>); and deadlocks, which fail when a bounded wait expires, after 10 seconds with <code>... did not return within 10s: a page latch is probably never released (or the buffer pool latch is held while waiting for a page latch)</code>. A hang outside those bounds runs until <code>go test</code>'s own 10-minute timeout, which prints <code>panic: test timed out after 10m0s</code> and every goroutine's stack; add <code>-timeout 120s</code> after the regex to see it sooner.</p>
+    <p>Then run the whole project once, every package and every stage:</p>
+<pre><code>go test -race -count=1 ./...</code></pre>
+    <p><code>-count=1</code> makes Go run the tests again instead of printing cached results, which matters for concurrency tests: a lucky pass shouldn't be replayed from the cache. It prints three <code>ok</code> lines, for <code>intro_to_db/bufferpool</code>, <code>intro_to_db/common</code> and <code>intro_to_db/storage/disk</code>, and takes around ten seconds or more with the race detector. Run it a few times; a concurrency bug can pass once and fail the next run. When it passes repeatedly, Project 1 is done. Commit your branch.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why <code>DeletePage</code> returns <code>true</code> for a page that never existed, why <code>FlushPage</code> pins the page but doesn't call <code>RecordAccess</code>, or how the unpin race in <code>EvictableTest</code> can happen with an atomic pin count. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: the <a href="https://15445.courses.cs.cmu.edu/fall2025/project1/">Project #1 writeup</a>, Task #3 (Concurrency and Implementation); BusTub <code>src/include/buffer/buffer_pool_manager.h</code>, <code>src/buffer/buffer_pool_manager.cpp</code> and <code>test/buffer/buffer_pool_manager_test.cpp</code> at commit d49b823; CMU 15-445/645 Fall 2025 Lecture #04 <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/04-bufferpool.pdf">slides</a> 32–33; this course's <code>bufferpool/buffer_pool_manager.go</code>, <code>page_guard.go</code>, <code>buffer_pool_manager_test.go</code>, <code>buffer_pool_manager_extra_test.go</code> and <code>storage/disk/file_manager.go</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u2-07-p1-bpm-fetch-evict.html">← P1.5 Buffer Pool Manager: Fetching and Evicting Pages</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u2-09-p1-stretch-leaderboard.html">Next: P1 Stretch: Leaderboard Benchmark →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

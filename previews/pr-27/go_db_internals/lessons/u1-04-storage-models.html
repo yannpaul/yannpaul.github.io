@@ -1,0 +1,312 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 1 · Lesson 4 · Storage Models: NSM, DSM, and PAX</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 1 · Lesson 4</p>
+  <h1>Storage Models: NSM, DSM, and PAX</h1>
+  <p class="subtitle">Which attributes a DBMS stores together, why the answer depends on the workload, and how to count the pages a query must read under each choice.</p>
+
+  <p class="lede">Lessons 1–3 assumed a row-oriented storage model, in which all of a tuple's attributes sit together in one page. The relational model never required that, and for some workloads it isn't the best layout. Lecture #06 sorts workloads into two kinds, transactional and analytical, and matches each with a storage model: the row store, the column store, and PAX, a hybrid used by formats such as Parquet. CMU's HW2 then turns the choice into arithmetic: how many pages does each model read for a given query?</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">An application stores account balances, and rounding errors are unacceptable. Which type does lecture #03 point to, and how is it stored?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="FLOAT, REAL and DOUBLE are variable-precision IEEE-754 numbers: fast, but inexact. 0.1 + 0.2 isn't exactly 0.3.">DOUBLE, because its 64 bits store every decimal fraction exactly.</li>
+      <li data-option="b" data-explain="Fixed-precision NUMERIC/DECIMAL is the lecture's answer when rounding errors are unacceptable. PostgreSQL's numeric, for example, stores digits, weight, scale and sign in an exact, variable-length representation. (BusTub's DECIMAL is a double, so it doesn't have this property.)">NUMERIC/DECIMAL, a fixed-precision type with an exact representation.</li>
+      <li data-option="c" data-explain="REAL is a variable-precision IEEE-754 type, the same family as FLOAT.">REAL, because the CPU has instructions that make it exact.</li>
+      <li data-option="d" data-explain="Timestamps are stored as integers of micro- or milliseconds since the epoch; that has nothing to do with exact decimal arithmetic.">TIMESTAMP, stored as an integer number of microseconds.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Lesson 1: how does the pre-built <code>disk.FileManager</code> (BusTub's <code>DiskManager</code>) find where a page lives in the database file?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="It never multiplies the page ID by the page size. A page's offset depends on when it first got a slot and whether a freed slot was reused.">It multiplies the page ID by the page size, 8,192 bytes.</li>
+      <li data-option="b" data-explain="The map lives only in memory; a new FileManager starts with no pages. Nothing like a page directory is written to disk.">It reads an on-disk page directory that is updated on every write.</li>
+      <li data-option="c" data-explain="The OS knows nothing about the contents of the database file; the storage layer keeps its own mapping.">It asks the operating system, which tracks each page's location.</li>
+      <li data-option="d" data-explain="Each page gets a slot the first time it's written or read: a freed slot if one exists, otherwise the next one at the end of the file. DeletePage puts the slot on a free list.">It looks the page ID up in an in-memory map from page IDs to offsets.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">On Lecture #02's example database, you want the courses whose students' average gpa exceeds 3.9. Which clause does it?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="HAVING filters groups after aggregation. On the example data only 15-721 (3.95) qualifies. Checked in DuckDB.">… GROUP BY e.cid HAVING AVG(s.gpa) &gt; 3.9</li>
+      <li data-option="b" data-explain="WHERE filters tuples before grouping, so it can't use an aggregate. DuckDB says: &quot;WHERE clause cannot contain aggregates!&quot;">… WHERE AVG(s.gpa) &gt; 3.9 GROUP BY e.cid</li>
+      <li data-option="c" data-explain="WHERE must come before GROUP BY; DuckDB reports a syntax error at WHERE.">… GROUP BY e.cid WHERE AVG(s.gpa) &gt; 3.9</li>
+      <li data-option="d" data-explain="ORDER BY sorts the groups by the boolean; it doesn't remove any. All three courses come back.">… GROUP BY e.cid ORDER BY AVG(s.gpa) &gt; 3.9</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Workloads: OLTP, OLAP and HTAP</h2>
+
+  <ul>
+    <li><strong>OLTP</strong> (on-line transaction processing): fast, simple operations that read or update a small amount of data each time, usually about a single entity. Amazon's storefront is the notes' example: adding to a cart or buying something touches only your account. These workloads are typically write-heavy, and they are usually the kind of application people build first.</li>
+    <li><strong>OLAP</strong> (on-line analytical processing): complex queries that read large portions of the database, spanning many entities, to compute aggregates. They usually run on data collected by OLTP applications; the notes' example is choosing personalized ads from everyone's carts and purchases. These workloads are read-heavy.</li>
+    <li><strong>HTAP</strong> (hybrid transaction and analytical processing): OLTP and OLAP together on the same database instance.</li>
+  </ul>
+
+  <p>The lecture's running example is a Wikipedia-like schema with tables <code>useracct</code>, <code>pages</code> and <code>revisions</code>. Its OLTP queries look up one page with its latest revision, record a user's login, and insert a new revision:</p>
+
+<pre><code>SELECT P.*, R.* FROM pages AS P
+  INNER JOIN revisions AS R ON P.latest = R.revID
+ WHERE P.pageID = ?
+
+UPDATE useracct SET lastLogin = NOW(), hostname = ? WHERE userID = ?
+
+INSERT INTO revisions VALUES (?,?…,?)</code></pre>
+
+  <p>Its OLAP query counts the logins per month of users whose host name ends in <code>.gov</code>:</p>
+
+<pre><code>SELECT COUNT(U.lastLogin),
+       EXTRACT(month FROM U.lastLogin) AS month
+  FROM useracct AS U
+ WHERE U.hostname LIKE '%.gov'
+ GROUP BY EXTRACT(month FROM U.lastLogin)</code></pre>
+
+  <p>The OLTP queries want whole tuples, one at a time. The OLAP query wants two attributes, <code>hostname</code> and <code>lastLogin</code>, from every tuple. A DBMS's <strong>storage model</strong> is how it physically organizes tuples on disk and in memory, and the right one depends on which of these patterns dominates. The lecture covers three: the n-ary storage model (NSM), the decomposition storage model (DSM) and PAX.</p>
+
+  <h2>NSM: the row store</h2>
+
+  <p>In the <strong>n-ary storage model</strong>, a <strong>row store</strong>, the DBMS stores (almost) all of a tuple's attributes contiguously in a single page. Everything from Lessons 1–3 was NSM: a disk-oriented NSM system keeps each tuple's fixed- and variable-length attributes together in a slotted page, and identifies the tuple by its record ID (page#, slot#). NSM page sizes are typically a constant multiple of the 4 KB hardware page.</p>
+
+  <p>NSM is ideal for OLTP. To fetch a user's tuple, an index lookup (Unit 3) leads to one page that holds the entire tuple, and an insert writes the whole tuple into one free slot. For the OLAP query, though, NSM reads mostly data that the query never uses:</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L06-nsm-olap-useless-data-p30.png" alt="The OLAP query, with U.lastLogin and U.hostname highlighted. Below it, a database file on disk with one NSM page enlarged: four rows, each with a header followed by userID, userName, userPass, hostname and lastLogin. The userID, userName and userPass columns are boxed in red and labelled Useless Data!" loading="lazy">
+    <figcaption>To scan <code>hostname</code> and <code>lastLogin</code>, an NSM system must read every page in full, so most of each page it reads (<code>userID</code>, <code>userName</code>, <code>userPass</code>) is useless to the query (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/06-storage3.pdf#page=30">Lecture #06, slide 16</a>).</figcaption>
+  </figure>
+
+  <table>
+    <tr><th>NSM advantages</th><th>NSM disadvantages</th></tr>
+    <tr><td>Fast inserts, updates and deletes.<br>Good for queries that need the entire tuple (OLTP).<br>Can use index-organized physical storage for clustering.</td><td>Bad for scanning large portions of a table, or a subset of its attributes.<br>Terrible memory locality in access patterns.<br>Hard to compress, because one page mixes several value domains.</td></tr>
+  </table>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=yWnToWrskXE&amp;t=448s">#06 Storage Models &amp; Compression, "Database workload types" (7:28)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/06-storage3.pdf#page=7">slides 6–17</a>: OLTP, OLAP and HTAP, the Wikipedia example, and NSM with its OLTP and OLAP examples.</p>
+
+  <h2>DSM: the column store</h2>
+
+  <p>In the <strong>decomposition storage model</strong>, a <strong>column store</strong>, the DBMS stores a single attribute for all tuples contiguously. It is ideal for OLAP, where read-only queries scan large parts of a table but only a subset of its attributes. The price is that the DBMS must split each tuple into its attributes on write and stitch the attributes back together on read.</p>
+
+  <p>Physically, each attribute's values sit in their own pages, as an array of fixed-length values, with a header holding metadata about the whole column, such as a null bitmap:</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L06-dsm-physical-p35.png" alt="A table with columns A, B and C and rows 0 to 5. Below it, three pages: Page #1 holds a header, a null bitmap and the values a0 to a5; Page #2 holds a header, a null bitmap and b0 to b5; Page #3 holds a header, a null bitmap and the wider values c0 to c5, which spill onto a second line." loading="lazy">
+    <figcaption>Each column gets its own pages: a header with metadata about the column (such as a null bitmap), then the values in tuple order (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/06-storage3.pdf#page=35">Lecture #06, slide 19</a>).</figcaption>
+  </figure>
+
+  <p>Now the OLAP query reads only the <code>hostname</code> pages, to find the <code>.gov</code> users, and then the <code>lastLogin</code> pages. It never touches <code>userID</code>, <code>userName</code> or <code>userPass</code>.</p>
+
+  <h3>Tuple identification</h3>
+
+  <p>The DBMS needs a way to find the other attributes of the tuple a value belongs to. The lecture gives two choices:</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L06-dsm-tuple-id-p40.png" alt="Left, labelled Offsets: four columns A, B, C and D side by side, with row numbers 0 to 3 written once to their left. Right, labelled Embedded Ids: the same four columns, but each column carries its own copy of the ids 0 to 3 next to its values." loading="lazy">
+    <figcaption>With fixed-length offsets (left), the i-th value of every column belongs to tuple i, so no IDs are stored. With embedded tuple IDs (right), every value carries its tuple's ID, which the lecture says not to do (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/06-storage3.pdf#page=40">Lecture #06, slide 21</a>).</figcaption>
+  </figure>
+
+  <ol>
+    <li><strong>Fixed-length offsets</strong>, the common choice. Every value of an attribute has the same length, so the value at position <em>i</em> in one column belongs to the same tuple as the value at position <em>i</em> in every other column. HW2 calls this "DSM with implicit offsets".</li>
+    <li><strong>Embedded tuple IDs.</strong> Each value is stored with its tuple's ID, and the DBMS keeps a mapping to jump to each attribute with that ID. Storing an ID with every single value has a large storage overhead; the slide's verdict is "Don't do this!"</li>
+  </ol>
+
+  <p>Fixed-length offsets need fixed-length values. Padding variable-length values to a fixed length is wasteful, especially for large attributes. The better approach is dictionary compression, which replaces repetitive variable-length values with fixed-length codes, typically 32-bit integers; that's Lesson 5.</p>
+
+  <table>
+    <tr><th>DSM advantages</th><th>DSM disadvantages</th></tr>
+    <tr><td>Less wasted I/O per query, because the DBMS reads only the data it needs.<br>Faster query processing, from better locality and cached data reuse.<br>Better data compression.</td><td>Slow for point queries, inserts, updates and deletes, because tuples must be split, stitched back together and reorganized.</td></tr>
+  </table>
+
+  <h2>PAX: columns inside row groups</h2>
+
+  <p>OLAP queries almost never access a single column on its own: at some point the DBMS must fetch other columns and stitch tuples back together. So the ideal is a columnar format that still keeps each tuple's data physically close. <strong>PAX</strong> (Partition Attributes Across) is a hybrid storage model that vertically partitions attributes <em>within</em> a database page. It aims for the faster processing of columnar storage with the spatial locality of row storage. Parquet (2013), ORC (2013), Arrow (2016), Nimble (2023) and Vortex (2025) all use it.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L06-pax-physical-p46.png" alt="A table with columns A, B and C and rows 0 to 5; rows 3 to 5 are boxed by column. Below, a PAX file holds two row groups. Each row group starts with Row Group Meta-Data and holds column chunks: a0 a1 a2, b0 b1 b2 and c0 c1 c2 in the first group, and a3 a4 a5, b3 b4 b5 and c3 c4 c5 in the second. File Meta-Data sits at the end of the file." loading="lazy">
+    <figcaption>Rows 3–5 (boxed) form the second row group, stored column by column as three column chunks after that group's own metadata (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/06-storage3.pdf#page=46">Lecture #06, slide 26</a>).</figcaption>
+  </figure>
+
+  <p>The rows are first partitioned horizontally into <strong>row groups</strong>. Within each row group, the attributes are partitioned vertically into <strong>column chunks</strong>, so each row group works like a small column store for its rows. Each row group has its own metadata header about its contents, and a global metadata directory records the offsets of the file's row groups. In immutable files, such as Parquet and ORC, that directory is stored in the footer.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=yWnToWrskXE&amp;t=1585s">#06 Storage Models &amp; Compression, "Columnar storage models" (26:25)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/06-storage3.pdf#page=32">slides 18–26</a>: DSM's layout and OLAP example, tuple identification, variable-length data, and PAX.</p>
+
+  <h2>Running OLTP and OLAP together</h2>
+
+  <p>Since an OLAP DBMS is better at analytical queries than an OLTP DBMS, it makes sense to run them there. But new data arrives at the OLTP side, so it has to move. With two separate systems (a <em>bifurcated</em> environment), the data is moved by Extract-Transform-Load (ETL), or extracted and loaded first and transformed inside the OLAP database (ELT).</p>
+
+  <p>A single DBMS can also serve both workloads by exploiting how data ages: a tuple is "hot" when it enters the database and is updated less often as it gets older. This <strong>hybrid storage model</strong> (not to be confused with PAX) runs separate execution engines for NSM and DSM data, stores new data in NSM for fast OLTP, migrates it to DSM for efficient OLAP, and combines the two engines' results so the application sees one logical database. There are two designs:</p>
+  <ul>
+    <li><strong>Fractured mirrors</strong> (Oracle, IBM DB2 Blu, Microsoft SQL Server) keep a second copy of the database in a DSM layout that is updated automatically. Every update goes to the NSM copy first and is eventually copied into the DSM mirror. If the DBMS supports updates, it must invalidate the changed tuples in the mirror.</li>
+    <li>A <strong>delta store</strong> (SAP HANA, Vertica, SingleStore, Databricks, Google Napa) stages updates in an NSM table. A background thread migrates them to the DSM data, batching large chunks and writing them out as PAX files, then deletes the migrated records from the delta store.</li>
+  </ul>
+
+  <p>The lecture's conclusion: choose the storage model for the target workload. OLTP means a row store; OLAP means a column store.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=yWnToWrskXE&amp;t=2342s">#06 Storage Models &amp; Compression, "Hybrid storage models" (39:02)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/06-storage3.pdf#page=83">slides 48–54</a>: moving data from OLTP to OLAP, fractured mirrors and the delta store.</p>
+
+  <h2>Counting pages</h2>
+
+  <p>CMU's HW2 turns storage models into arithmetic: how many pages must the DBMS read to answer a query? All of its Question 2 uses one setup.</p>
+
+  <div class="callout">
+    <p class="callout-label">HW2 Q2 setup</p>
+    <p>The database has one table, <code>P(player_id, team_id, G_all, HR)</code>, where <code>player_id</code> is the primary key and all four attributes have the same fixed width. P has 20,000 tuples that fit into 200 pages. Ignore page and tuple headers, and assume that:</p>
+    <ul>
+      <li>the DBMS has no additional metadata;</li>
+      <li>P has no indexes, not even on <code>player_id</code>;</li>
+      <li>none of P's pages start in memory, and memory can hold an unlimited number of pages;</li>
+      <li>the tuples' contents always make each query run as long as possible and read as many pages as possible;</li>
+      <li>the tuples can be in any order, which is what the minimum and maximum page counts depend on.</li>
+    </ul>
+  </div>
+
+  <p>Derive the layout first. Under NSM, each page holds 20,000 / 200 = 100 tuples. Under DSM, each attribute takes a quarter of the space: 200 / 4 = <strong>50 pages per attribute</strong>, each holding 400 values. With implicit offsets, the tuple at position <em>i</em> has its value of every attribute at position <em>i</em> of that attribute's column, so it sits on the same-numbered page in every column.</p>
+
+  <p>Then count with four rules:</p>
+  <ol>
+    <li>With no index, the DBMS must scan the attribute in the <code>WHERE</code> clause, and under worst-case contents every tuple may match.</li>
+    <li>An equality on the primary key matches at most one tuple, so once every key the query names has been found, the scan can stop. The best ordering puts the matches early; the worst puts one on the last page.</li>
+    <li>With implicit offsets, the DBMS jumps straight to a match's other attributes: one page per distinct page touched, not the whole column.</li>
+    <li>With unlimited memory, a page read once is never read from disk again.</li>
+  </ol>
+
+  <h2>Work it out: count the pages</h2>
+
+  <p>Practice the rules on a new table before the homework questions. <code>R(a, b, c, d, e)</code> has five attributes of the same fixed width, and <code>a</code> is the primary key. It has 50,000 tuples in 500 pages, no indexes and no metadata, nothing starts in memory, memory is unlimited, and contents are worst case.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u1l4-sum-query">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u1l4-sum-query-cb">
+        <label for="u1l4-sum-query-cb">Count the pages read for SELECT SUM(e) FROM R WHERE b = 7, first under NSM, then under DSM with implicit offsets.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>How many pages does each DSM column take? Which columns does the query touch, and how many of their values does it need when every tuple might match?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>NSM: every page holds every attribute, and every tuple must be checked. DSM: each column takes 500 / 5 = 100 pages. Scan all of <code>b</code>; with worst-case contents every tuple matches, so all of <code>e</code> is needed too.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>NSM: <strong>500</strong> pages. DSM: 100 + 100 = <strong>200</strong> pages.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u1l4-point-query">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u1l4-point-query-cb">
+        <label for="u1l4-point-query-cb">Count the minimum and maximum pages read for SELECT c FROM R WHERE a = 42, under NSM and under DSM with implicit offsets.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p><code>a</code> is the primary key, so at most one tuple matches. When can the scan stop, and which tuple orders give the best and the worst case?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Best case: the match is on the first page scanned. Worst case: it is on the last. In DSM, after finding the match in <code>a</code>'s column, read the one <code>c</code> page at the same offset.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>NSM: minimum <strong>1</strong>, maximum <strong>500</strong>. DSM: minimum 1 + 1 = <strong>2</strong>, maximum 100 + 1 = <strong>101</strong>.</p></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="callout"><!-- homework-box -->
+    <p class="callout-label">The homework behind these questions</p>
+    <p>The questions marked HW2 come from CMU's Homework #2: <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw2-clean.pdf#page=3">Question 2</a>, with the original figures. Work each one out on paper first, then click the option you got. The quiz tells you at once whether it matches CMU's official answer, and explains why. To compare your working step by step, open the official solutions for <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw2-sols.pdf#page=3">Question 2</a>.</p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <p>The first four questions are HW2 Question 2 (all seven parts), using the setup above. The answers match CMU's official solutions.</p>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">HW2 Q2(a): how many pages will the DBMS potentially have to read for <code>SELECT MAX(HR) FROM P WHERE team_id = 15445</code>, under NSM and under DSM with implicit offsets?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Reading only team_id's 50 pages isn't enough: with worst-case contents every tuple matches, so HR is needed for every tuple too.">NSM 200, DSM 50</li>
+      <li data-option="b" data-explain="NSM can't skip attributes: each of the 200 pages mixes all four, and every tuple must be checked.">NSM 100, DSM 100</li>
+      <li data-option="c" data-explain="NSM: to find team_id and HR for all tuples, all 200 pages must be read. DSM: 200 / 4 = 50 pages per attribute; 50 pages to scan team_id, and with worst-case contents HR is needed for all tuples, another 50. 50 + 50 = 100.">NSM 200, DSM 100</li>
+      <li data-option="d" data-explain="150 = 3 × 50 reads a third column, but the query never touches player_id or G_all.">NSM 200, DSM 150</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">HW2 Q2(b)i: under NSM, what are the minimum and maximum numbers of pages the DBMS will potentially have to read for <code>SELECT HR, team_id FROM P WHERE player_id = 1 OR player_id = 999</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Minimum: both tuples are on the first page, and since all attributes are stored together and player_id is the key, nothing else needs reading: 1 page. Maximum: at least one matching tuple is on the last page, so the DBMS scans all 200.">Minimum 1, maximum 200</li>
+      <li data-option="b" data-explain="Nothing forces the two tuples onto different pages; the best ordering puts both on page 1.">Minimum 2, maximum 200</li>
+      <li data-option="c" data-explain="The maximum comes from the worst ordering, where a match sits on the last of the 200 pages, not from an average.">Minimum 1, maximum 100</li>
+      <li data-option="d" data-explain="Jumping straight to the two tuples would need an index, and P has none, so the DBMS must scan until it finds both.">Minimum 1, maximum 2</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">HW2 Q2(b)ii: under DSM with implicit offsets, what are the minimum and maximum numbers of pages for the same query, <code>SELECT HR, team_id FROM P WHERE player_id = 1 OR player_id = 999</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Even in the best case, HR and team_id live in their own columns, separate from player_id: one page each on top of the player_id page.">Minimum 1, maximum 54</li>
+      <li data-option="b" data-explain="Implicit offsets let the DBMS jump to the matching positions; it never has to scan the whole HR and team_id columns.">Minimum 3, maximum 150</li>
+      <li data-option="c" data-explain="2 treats HR and team_id as sharing a page, and 52 = 50 + 1 + 1 assumes both matches share one HR page and one team_id page. In the worst ordering they are on different pages.">Minimum 2, maximum 52</li>
+      <li data-option="d" data-explain="Minimum: both keys are on the first player_id page, and fixed widths put their HR and team_id values on the first page of those columns too: 1 + 1 + 1 = 3. Maximum: scan all 50 player_id pages; the two keys are on different pages, so 2 HR pages and 2 team_id pages: 50 + 2 + 2 = 54.">Minimum 3, maximum 54</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">HW2 Q2(c): under DSM with implicit offsets, what is the minimum number of pages the DBMS will potentially have to read from disk for <code>SELECT MIN(player_id) FROM P WHERE HR = (SELECT MIN(HR) FROM P)</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="50 covers only the inner MIN(HR) scan. The outer query still needs player_id values.">50</li>
+      <li data-option="b" data-explain="Official: 50 pages for the inner select, and 50 pages to get player_id, since the buffer pool already holds the HR pages from the inner select. 50 + 50 = 100. Only the order of tuples varies; their contents are always worst case.">100</li>
+      <li data-option="c" data-explain="150 re-reads the 50 HR pages for the outer WHERE, but memory is unlimited, so they are still cached from the inner query.">150</li>
+      <li data-option="d" data-explain="51 assumes only one tuple has the minimum HR. With worst-case contents every tuple can have it, so all 50 player_id pages are needed.">51</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Which description matches PAX as presented in lecture #06?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is DSM with embedded tuple IDs, which slide 21 says not to do.">Each attribute is stored in its own pages, and every value carries an embedded tuple ID so the DBMS can stitch tuples back together.</li>
+      <li data-option="b" data-explain="Slide 26: horizontally partition data into row groups, then vertically partition their attributes into column chunks. A global metadata directory holds the row groups' offsets, in the footer for immutable files (Parquet, ORC), and each row group has its own metadata header.">Rows are split into row groups, each row group's attributes into column chunks, and file metadata records each row group's offset.</li>
+      <li data-option="c" data-explain="That is the delta-store design (slide 53). It writes its batches out as PAX files, but it isn't PAX itself.">New tuples are written to an NSM delta store, and a background thread later migrates them into a DSM copy.</li>
+      <li data-option="d" data-explain="That is NSM (slide 14).">All attributes of a tuple are stored contiguously in a slotted page, and the record ID (page#, slot#) identifies the tuple.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why worst-case contents and best-case ordering can both apply in one question, why implicit offsets put a tuple's values on the same-numbered page of every column, or how the hybrid storage model differs from PAX. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 lecture #06, Storage Models &amp; Compression (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/06-storage3.pdf">slides</a> 4–26 and 48–54, <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/06-storage3.pdf">notes</a> §1–2); Homework #2 Question 2 and its official solutions.</p>
+
+  <div class="lesson-nav">
+    <a href="./u1-03-index-organized-and-log-structured.html">← Index-Organized and Log-Structured Storage</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u1-05-compression.html">Next: Database Compression →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

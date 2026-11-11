@@ -1,0 +1,172 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_context_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 5 · context.WithValue</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">context.Context in Go · Lesson 5 of 7</p>
+  <h1>context.WithValue</h1>
+  <p class="subtitle">A small standalone demo today — not <code>burrow</code>'s cancellation path. This is a different, unrelated job a context can do.</p>
+
+  <p class="lede">Everything so far has been about <code>Done()</code> and <code>Err()</code> — cancellation and deadlines. A <code>context.Context</code> can also carry arbitrary key/value data through a call chain, the same way it carries cancellation: attach it once, and any function holding that context down the chain can read it back, no matter how many calls deep. That sounds like a convenient way to avoid threading a parameter through five function signatures — and that instinct is exactly what this lesson pushes back on.</p>
+
+  <h2>Before you start</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="scratch-dir">
+      <div class="todo-item-head">
+        <input type="checkbox" id="scratch-dir-cb">
+        <label for="scratch-dir-cb">Create a throwaway scratch module, separate from <code>burrow</code>, for today's demo.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>mkdir ctxvalue
+cd ctxvalue
+go mod init ctxvalue</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: attaching and reading a value</h2>
+
+  <p><code>context.WithValue(parent, key, value)</code> returns a child context carrying that key/value pair alongside everything the parent already carries. <code>ctx.Value(key)</code> reads it back — from that context, or from anything derived from it. The key should never be a bare string or int: use an unexported type defined specifically for this purpose, so nothing outside your own code could ever accidentally construct an equal key.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-withvalue-demo">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-withvalue-demo-cb">
+        <label for="write-withvalue-demo-cb">Define an unexported <code>ctxKey</code> type and a constant of that type. Write <code>withRequestID</code> (attaches a string under that key) and <code>requestIDFrom</code> (reads it back via a comma-ok type assertion). Call a <code>logSomething</code> function, three calls deep, that prints the request ID if one is present.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"context"
+	"fmt"
+)
+
+// unexported key type — prevents collisions with keys defined in other
+// packages, even if they happen to use the same underlying value.
+type ctxKey int
+
+const requestIDKey ctxKey = 0
+
+func withRequestID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, requestIDKey, id)
+}
+
+func requestIDFrom(ctx context.Context) (string, bool) {
+	id, ok := ctx.Value(requestIDKey).(string)
+	return id, ok
+}
+
+func logSomething(ctx context.Context, msg string) {
+	if id, ok := requestIDFrom(ctx); ok {
+		fmt.Printf("[req=%s] %s\n", id, msg)
+	} else {
+		fmt.Printf("[no request id] %s\n", msg)
+	}
+}
+
+func main() {
+	ctx := context.Background()
+	logSomething(ctx, "before attaching a request id")
+
+	ctx = withRequestID(ctx, "abc-123")
+	logSomething(ctx, "after attaching a request id")
+
+	func(ctx context.Context) {
+		func(ctx context.Context) {
+			logSomething(ctx, "three calls deep")
+		}(ctx)
+	}(ctx)
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Prints <code>[no request id] before attaching a request id</code>, then <code>[req=abc-123] after attaching a request id</code>, then <code>[req=abc-123] three calls deep</code> — the value survives being passed through two more layers of ordinary function calls with no extra parameters anywhere.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: why a bare string key is a real, demonstrable bug</h2>
+
+  <p>The unexported-type requirement above isn't caution for its own sake. <code>ctx.Value(key)</code> finds a match using ordinary <code>==</code> comparison — and two bare strings with the same text are always equal, even if they were written by two completely unrelated pieces of code that have never heard of each other.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="demonstrate-string-key-collision">
+      <div class="todo-item-head">
+        <input type="checkbox" id="demonstrate-string-key-collision-cb">
+        <label for="demonstrate-string-key-collision-cb">Write two unrelated functions that both use the bare string <code>"requestID"</code> as a context key — one attaching a string, the other (standing in for a completely different, unrelated piece of code) attaching an unrelated int under the exact same string. Read the value back after both have run.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>func componentA_attach(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, "requestID", id) // plain string key
+}
+
+func componentB_attach(ctx context.Context, retryCount int) context.Context {
+	return context.WithValue(ctx, "requestID", retryCount) // same string, unrelated meaning
+}
+
+func main() {
+	ctx := context.Background()
+	ctx = componentA_attach(ctx, "abc-123")
+	fmt.Println(ctx.Value("requestID")) // "abc-123"
+
+	ctx = componentB_attach(ctx, 3)
+	fmt.Println(ctx.Value("requestID")) // component A's value is gone
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The second print shows <code>3</code>, not <code>abc-123</code> — component B's completely unrelated value silently overwrote component A's, because both used the identical string key. Worse: if component A had read it with an unchecked type assertion (<code>ctx.Value("requestID").(string)</code>) instead of the comma-ok form, this would <em>panic</em> at runtime — <code>interface conversion: interface {} is int, not string</code> — the moment component B's code ran anywhere upstream, for a reason that would look nothing like its actual cause.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>An unexported type defined inside your own package fixes this completely — not by convention, but by the language itself. Two types declared in different packages are different types to the Go compiler even if they're both defined as <code>int</code> with the same underlying value; <code>==</code> on two interface values compares <em>both</em> the dynamic type and the value, so <code>pkgA.Key(0)</code> and <code>pkgB.Key(0)</code> can never be equal to each other, no matter what either package does. This is exactly why every serious use of <code>context.WithValue</code> defines its own private key type rather than reaching for a string or a shared constant — it turns an entire category of accidental collision into something the type system rules out, rather than something you have to remember to avoid.</p>
+  </div>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p><code>context.WithValue</code> is for request-scoped metadata that genuinely crosses API boundaries you don't control the full call chain of — a trace ID threaded through a web framework's middleware and handlers, say. It is not a general substitute for passing a parameter. If a function's caller always has a value ready to hand it directly, pass it as a real, typed, named parameter — the compiler checks that it's present and correctly typed, <code>go doc</code> shows it, and a reader doesn't have to guess what a function silently expects to find buried in a context. Reach for <code>WithValue</code> only when threading an explicit parameter through every intermediate function would mean touching code that isn't yours to change.</p>
+  </div>
+
+  <p>You've now used a context for both of its two real jobs: carrying cancellation, and — much more narrowly — carrying request-scoped data across a boundary you don't control. Lesson 6 returns to cancellation, combining it with <code>errgroup</code> so a single failing goroutine can stop its siblings early instead of letting them run to completion pointlessly.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why <code>==</code> comparing both type and value is what actually prevents the collision, when threading an explicit parameter is preferable to <code>WithValue</code> even if it means a longer function signature, what a real framework (like an HTTP server) uses request-scoped context values for, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary source for this lesson: <a href="https://pkg.go.dev/context#WithValue">pkg.go.dev, package <code>context</code>: <code>WithValue</code></a>, whose own documentation states the unexported-key-type convention and the "use only for request-scoped data" guidance this lesson is built around.</p>
+
+  <div class="lesson-nav">
+    <a href="./0004-cancellation-on-interrupt.html">← Lesson 4: Cancellation on Interrupt</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0006-context-and-errgroup.html">Next: Context and errgroup →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>
