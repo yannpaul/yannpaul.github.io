@@ -1,0 +1,144 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_concurrency_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 5 · Buffered vs. Unbuffered Channels</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go Concurrency Basics · Lesson 5 of 9</p>
+  <h1>Buffered vs. Unbuffered Channels</h1>
+  <p class="subtitle">Rebuild Lesson 3's channel-based <code>duTop</code> from memory first. Then see, provably, exactly when a send blocks and when it doesn't.</p>
+
+  <p class="lede">Every channel you've made so far — <code>make(chan sizeResult)</code> — is unbuffered: a send has to wait for a receive to actually happen before it completes. A second number in <code>make</code> changes that. Today: a small demo that proves the difference in print order, not just in words, then one line changed in <code>duTop</code> to apply it.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–4</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-lesson3-again">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-lesson3-again-cb">
+        <label for="repeat-lesson3-again-cb">Confirm your channel-based <code>duTop</code> is back in place (not the broken version from Lesson 4) and still race-free.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run -race . du top --path race-test --n 10</code> reliably prints all your test entries, no warnings.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: proving a send blocks</h2>
+
+  <p><code>make(chan sizeResult)</code> makes an <strong>unbuffered</strong> channel — capacity zero. A send onto it (<code>ch &lt;- v</code>) doesn't complete until some goroutine is actively receiving at that exact moment; until then, the sending goroutine is stuck at that line. <code>make(chan sizeResult, n)</code> makes a <strong>buffered</strong> channel with room for <code>n</code> values in flight — a send completes immediately as long as the buffer isn't full, with nobody needing to be receiving yet at all.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="scratch-unbuffered">
+      <div class="todo-item-head">
+        <input type="checkbox" id="scratch-unbuffered-cb">
+        <label for="scratch-unbuffered-cb">In a throwaway scratch file: make an unbuffered <code>chan int</code>. Start a goroutine that prints, sends <code>1</code> on the channel, then prints again. In <code>main</code>, sleep 200ms, print, then receive from the channel.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	ch := make(chan int) // unbuffered
+
+	go func() {
+		fmt.Println("goroutine: about to send")
+		ch <- 1
+		fmt.Println("goroutine: send completed")
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	fmt.Println("main: about to receive")
+	fmt.Println("main: received", <-ch)
+	time.Sleep(50 * time.Millisecond)
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The order is: <code>goroutine: about to send</code>, then (after the 200ms sleep) <code>main: about to receive</code>, <code>main: received 1</code>, and only <em>then</em> <code>goroutine: send completed</code>. The send genuinely sat blocked for the whole 200ms — it didn't complete until <code>main</code> was ready to receive.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="scratch-buffered">
+      <div class="todo-item-head">
+        <input type="checkbox" id="scratch-buffered-cb">
+        <label for="scratch-buffered-cb">Change only the <code>make</code> line to give the channel a buffer of <code>1</code>, and run it again.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the change</summary>
+          <div class="reveal-body">
+            <pre><code>ch := make(chan int, 1) // buffered, capacity 1</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The order changes completely: <code>goroutine: about to send</code> <em>and</em> <code>goroutine: send completed</code> both print immediately, before <code>main</code> even wakes up from its sleep. The send didn't wait for anyone — it just dropped its value into the buffer and moved on.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: buffering <code>duTop</code>'s results channel</h2>
+
+  <p>Your <code>results</code> channel in <code>duTop</code> is unbuffered right now, and it's worked fine — every send does eventually get received, since the loop reads exactly <code>len(dirs)</code> times. Buffering it doesn't fix a bug here; it changes a tradeoff. With an unbuffered channel, a goroutine that finishes early has to wait for the receive loop to get around to it. With enough buffer for every result, every goroutine can drop its result off and move on immediately, regardless of how fast <code>duTop</code> is consuming them.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="buffer-results-channel">
+      <div class="todo-item-head">
+        <input type="checkbox" id="buffer-results-channel-cb">
+        <label for="buffer-results-channel-cb">Change <code>results := make(chan sizeResult)</code> to <code>results := make(chan sizeResult, len(dirs))</code> — exactly enough room for every goroutine's result at once.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the line</summary>
+          <div class="reveal-body">
+            <pre><code>results := make(chan sizeResult, len(dirs))</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Same output, same <code>-race</code> silence, as before — for this program, buffering is invisible from the outside. Confirm it anyway: <code>go run -race . du top --path race-test --n 10</code>.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Sizing a buffer to exactly the number of sends you know are coming — <code>len(dirs)</code> here — is a specific, safe pattern: every goroutine is guaranteed room, so no send ever blocks, and nothing is unbounded. That's different from picking an arbitrary buffer size "to be safe," which just delays a blocking send instead of eliminating it, or from a buffer sized by something you don't control (imagine <code>len(dirs)</code> in the millions) — Lesson 7's worker pools exist specifically for that second case, where you can't or shouldn't size a buffer to match the input.</p>
+  </div>
+
+  <p>Buffering didn't change what <code>duTop</code> does — only how tightly the goroutines and the receive loop are coupled in time. Lesson 6 uses that same channel to solve a different problem: what happens if one of them takes too long.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why the print order flips so cleanly between the two versions, when a buffered send can still block (once the buffer's full), why <code>len(dirs)</code> is a safe buffer size specifically here, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary source for this lesson: <a href="https://go.dev/tour/concurrency/3">go.dev, "A Tour of Go": Buffered Channels</a> for the exact blocking rule (a send blocks only when the buffer is full; a receive blocks only when it's empty).</p>
+
+  <div class="lesson-nav">
+    <a href="./0004-a-real-data-race-on-purpose.html">← Lesson 4: A Real Data Race, On Purpose</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0006-select-and-timeouts.html">Next: select and Timeouts →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

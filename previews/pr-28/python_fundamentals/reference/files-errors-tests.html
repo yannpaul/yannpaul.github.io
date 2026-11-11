@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cheat Sheet · Functions, Tests, Files, Errors</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+<p class="eyebrow">Python Fundamentals · Cheat sheet</p>
+<h1>Functions, Tests, Files and Errors</h1>
+<p class="subtitle">The patterns from the Day 2 practice questions, side by side.</p>
+
+<h2>Function</h2>
+<pre><code>def calcSubtotal(amount, salesTaxRate):
+    subtotal = amount * (1 + salesTaxRate)
+    return subtotal</code></pre>
+<p><code>def</code>, name, parameters in parentheses, colon, indented body, <code>return</code>. No <code>return</code> gives back <code>None</code>.</p>
+
+<h2>Unit test</h2>
+<pre><code>import unittest
+class Test_Example_UnitTest(unittest.TestCase):
+    def test_equal(self):                    # name must start with "test"
+        self.assertEqual(2 + 8, 10)
+if __name__ == '__main__':
+    unittest.main()</code></pre>
+<table>
+<tr><td><code>assertEqual(a, b)</code></td><td><code>a == b</code></td></tr>
+<tr><td><code>assertIs(a, b)</code></td><td><code>a is b</code> (same object / same memory)</td></tr>
+<tr><td><code>assertTrue(x)</code></td><td><code>x</code> is true</td></tr>
+<tr><td><code>assertIn(a, b)</code></td><td><code>a in b</code></td></tr>
+</table>
+<p>An <code>assert</code> says &ldquo;this must be True&rdquo;. If not, an <code>AssertionError</code> is raised and the test fails.</p>
+
+<h2>Files</h2>
+<table>
+<tr><th>Mode</th><th>Means</th></tr>
+<tr><td><code>'r'</code></td><td>read (default)</td></tr>
+<tr><td><code>'w'</code></td><td>write: <strong>erases</strong> an existing file</td></tr>
+<tr><td><code>'a'</code></td><td>append: adds at the end</td></tr>
+</table>
+<pre><code>import os.path
+if os.path.exists('work.txt'):
+    with open('work.txt', 'r') as f:     # with closes the file for you
+        text = f.read()                  # read() = all, readline() = one line
+else:
+    print("The work file is not in this folder.")</code></pre>
+<p><code>sys.argv</code> for <code>python app.py 5 hello</code> is <code>['app.py', '5', 'hello']</code>. Index 0 is the script name. Everything is text.</p>
+
+<h2>Errors</h2>
+<pre><code>try:
+    print(x / y)
+except ZeroDivisionError:      # runs only if the try raised this error
+    raise Exception("You cannot divide by zero")
+else:                          # runs only if the try had no error
+    print("worked")
+finally:                       # always runs, last
+    print("Thank you for playing.")</code></pre>
+<p><code>raise</code> throws an exception (Java says <code>throw</code>). <code>except</code> catches (Java says <code>catch</code>).</p>
+
+<div class="lesson-nav">
+<a href="../index.html">Course contents</a>
+<a href="./problem-bank.html">Problem bank</a>
+</div>
+</main>
+</body>
+</html>

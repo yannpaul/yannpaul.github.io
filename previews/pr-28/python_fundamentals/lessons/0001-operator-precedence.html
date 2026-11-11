@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1 · Operator Precedence</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+<p class="eyebrow">Python Fundamentals · Lesson 1 of 10 · Day 1</p>
+<h1>Operator Precedence</h1>
+<p class="subtitle">When a line has several operators, which one does Python do first? Learn to read a line the way Python does, and <code>a += 4 + 5</code> stops being a trick question.</p>
+<p class="meta"><span class="pill">⏱ about 20 min</span> <span class="pill">▶ code you can run on this page</span> <span class="pill">3 practice problems here, 17 in the bank</span></p>
+
+<div class="lede"><p>Your teacher's list ranks the kinds of operators from "happens first" to "happens last". This lesson turns that list into a three-step habit you can apply to any line, and then gives you plenty of lines to practise on.</p></div>
+
+<h2>The ladder from your notes</h2>
+<p class="ladder-end">▲ Happens first</p>
+<ol class="ladder">
+  <li><span>Arithmetic</span> <span class="ops">+ - * / %</span></li>
+  <li><span>Containment</span> <span class="ops">in, not in</span></li>
+  <li><span>Comparison</span> <span class="ops">&lt; &gt; == !=</span></li>
+  <li><span>Identity</span> <span class="ops">is, is not</span></li>
+  <li><span>Logical</span> <span class="ops">not, and, or</span></li>
+  <li><span>Assignment</span> <span class="ops">= += -=</span></li>
+</ol>
+<p class="ladder-end">▼ Happens last</p>
+
+<div class="fixit">
+  <span class="callout-label">Two small corrections to your notes</span>
+  <p><strong>1. Arithmetic has its own little ladder.</strong> <code>*</code>, <code>/</code>, <code>//</code> and <code>%</code> happen before <code>+</code> and <code>-</code>, and <code>**</code> (power) happens before all of those. That is why <code>2 + 3 * 4</code> is 14, not 20.</p>
+  <p><strong>2. In real Python, containment, comparison and identity are one level, not three.</strong> <code>in</code>, <code>is</code>, <code>&lt;</code>, <code>==</code> and friends are tied and are worked out left to right. Your class list is fine for nearly every test question, because it is rare for two of them to meet in one line. Lesson 2 shows the one case where it matters. Source: the <a href="https://docs.python.org/3/reference/expressions.html#operator-precedence">operator precedence table</a> in the Python docs.</p>
+</div>
+
+<h2>The three-step habit</h2>
+<ol>
+  <li><strong>Circle the operators</strong> on the line.</li>
+  <li><strong>Rank them</strong> with the ladder. Parentheses beat everything.</li>
+  <li><strong>Do the highest first.</strong> If two are tied, go left to right. Assignment (<code>=</code>, <code>+=</code>) is always last.</li>
+</ol>
+
+<h2>See it happen</h2>
+<p>This is the problem from class, <code>a = 10</code> then <code>a += 4 + 5</code>. Press <strong>Next ▶</strong> and read the note at each step. Watch the orange row: it marks the variable that just changed.</p>
+<div class="walk-demo" data-problem="prec-01"></div>
+
+<p>Now run it for real. Edit the numbers, press <strong>▶ Run</strong> (or Ctrl+Enter), and check your guess <em>before</em> you press it.</p>
+<pre class="try" data-title="Try it: guess the answer first"><code>a = 10
+a += 4 + 5
+print(a)</code></pre>
+
+<div class="callout good">
+  <span class="callout-label">What <code>+=</code> really means</span>
+  <p><code>a += b</code> is shorthand for <code>a = a + b</code>. The same goes for <code>-=</code>, <code>*=</code>, <code>/=</code>, <code>//=</code> and <code>%=</code>. Everything on the right of the <code>+=</code> is worked out <em>first</em>, because assignment is last.</p>
+</div>
+
+<h2>Practice</h2>
+<p>Do these three now. Use the tips only when you are stuck: each one is a nudge, not an answer. When you get one wrong, press <strong>Show the answer</strong> and then <strong>Full walkthrough</strong> to watch where your reading went off. The other 14 precedence problems are in the <a href="../reference/problem-bank.html#precedence">problem bank</a>.</p>
+<div class="problems" data-ids="prec-02,prec-07,prec-10"></div>
+
+<div class="source"><span class="callout-label">Primary source</span><p><a href="https://docs.python.org/3/reference/expressions.html#operator-precedence">The Python Language Reference: Operator precedence</a>. The official table, lowest to highest. It is the final word on any argument about order.</p>
+<p>Also useful: <a href="https://pythontutor.com/">Python Tutor</a> draws the same step-by-step pictures for any code you paste in, and every code box on this page has an "Open in Python Tutor" link.</p></div>
+
+<div class="ask-your-teacher">Not sure why a line gives the answer it does? Ask your teacher. Paste the line, say what you expected, and say what you got.</div>
+
+<div class="lesson-nav">
+<a href="../index.html">Course contents</a>
+<a href="../reference/precedence.html">Cheat sheet: precedence</a>
+<a href="./0002-logic-and-comparisons.html">Lesson 2 →</a>
+</div>
+</main>
+<script src="../assets/data/load.js"></script>
+<script src="../assets/pyrun.js"></script>
+<script src="../assets/stepper.js"></script>
+<script src="../assets/problems.js"></script>
+</body>
+</html>

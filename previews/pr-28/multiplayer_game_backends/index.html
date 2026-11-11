@@ -1,0 +1,37 @@
+<!-- Mirrored to yannpaul.github.io/learning/multiplayer_game_backends/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multiplayer Game Backend Architecture</title>
+<link rel="stylesheet" href="./assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Learning · Multiplayer Game Backend Architecture</p>
+  <h1>Multiplayer Game Backend Architecture</h1>
+  <p class="subtitle">How gaming platforms host multiplayer sessions — languages, technologies, and the real production systems behind them — taught by translating each idea into distributed-systems vocabulary you already own.</p>
+
+  <p class="lede">Nine short lessons, each a self-contained page with a quick retrieval-practice check. Start at Lesson 1 and work through in order — each one builds on the last. Only Lessons 1–2 are written so far; the rest are scoped below and will be built out in future sessions.</p>
+
+  <h2>Lessons</h2>
+  <ol>
+    <li><a href="./lessons/0001-the-shape-of-a-multiplayer-backend.html">The Shape of a Multiplayer Backend</a> — client-server authoritative model vs. peer-to-peer, tick rate and the game loop, and the distributed-systems vocabulary this whole course maps onto</li>
+    <li><a href="./lessons/0002-hiding-latency.html">Hiding Latency</a> — client-side prediction, server reconciliation, entity interpolation, and lag compensation: four fixes for a round-trip time nobody can engineer away</li>
+    <li><strong>Coming up — State Sync vs. Deterministic Lockstep</strong> — broadcasting authoritative snapshots (Overwatch) vs. broadcasting only inputs and replaying an identical simulation everywhere (Age of Empires' "1500 Archers on a 28.8"): two different answers to how N machines agree on one world</li>
+    <li><strong>Coming up — Rollback Netcode</strong> — how modern fighting games (GGPO) and physics-heavy games (Rocket League) use optimistic execution plus rewind-and-replay to get low-latency peer-to-peer play without full determinism-or-nothing</li>
+    <li><strong>Coming up — Matchmaking and Session Orchestration</strong> — Open Match and AWS GameLift FlexMatch as two different answers to grouping players into fair matches, and why this is a scheduling/bin-packing problem in game clothing</li>
+    <li><strong>Coming up — Dedicated Server Fleets on Kubernetes</strong> — Agones' GameServer/Fleet/GameServerAllocation model, and exactly what a stateful, un-killable-mid-match game server process breaks about ordinary container scheduling</li>
+    <li><strong>Coming up — Scaling the World: Interest Management and Sharding</strong> — area-of-interest filtering, zoning a world across servers, and EVE Online's single-shard cluster plus Time Dilation as a real large-scale case study</li>
+    <li><strong>Coming up — Trust, Cheating, and the Authoritative Boundary</strong> — why "never trust the client" is the load-bearing principle underneath every lesson so far, with concrete cheat vectors it defends against</li>
+    <li><strong>Coming up — Capstone: Design a Minimal Multiplayer Backend</strong> — interleaved recall across all eight lessons, then a first-pass backend design for a new hypothetical game to test whether it transfers</li>
+  </ol>
+
+  <div class="lesson-nav">
+    <a href="../">← All topics</a>
+    <a href="./lessons/0001-the-shape-of-a-multiplayer-backend.html">Start: Lesson 1 →</a>
+  </div>
+</main>
+</body>
+</html>

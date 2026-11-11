@@ -1,0 +1,231 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_project_structure_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 2 · A Library Package and a Second Binary</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go Programs Beyond One main.go · Lesson 2 of 7</p>
+  <h1>A Library Package and a Second Binary</h1>
+  <p class="subtitle">Rebuild Lesson 1's <code>greet</code> package from memory first. Then pull real logic out of <code>burrow</code>'s <code>main.go</code>, and build a second, independent binary that reuses it.</p>
+
+  <p class="lede">Every function in <code>burrow</code> — <code>findName</code>, <code>sizeOf</code>, <code>duTop</code>, <code>checkPerm</code>, <code>whoOwns</code> — still lives in one <code>main.go</code>, in <code>package main</code>, alongside the Cobra command tree that wires them up. Nothing about the scanning logic itself needs <code>package main</code> or Cobra at all; it's trapped there only because that's where it was first written. Today: move it into its own importable package, confirm the CLI still works exactly as before, then prove the extraction was worth it by building a second, much smaller binary that reuses the same code.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lesson 1</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-lesson1-greet">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-lesson1-greet-cb">
+        <label for="repeat-lesson1-greet-cb">Confirm your <code>greetdemo</code> module from Lesson 1 still builds and runs, and that reintroducing the direct <code>greet.defaultName</code> access still fails to compile with the same error.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run .</code> prints its two greeting lines; temporarily adding <code>fmt.Println(greet.defaultName)</code> and running <code>go build .</code> fails with <code>name defaultName not exported by package greet</code>, exactly as before.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: extracting a library package from burrow</h2>
+
+  <p>Pick the logic in <code>burrow</code> that's genuinely independent of the CLI: the directory-scanning functions (<code>sizeOf</code>, and whatever computes a sorted top-N — <code>duTop</code> or equivalent, depending on which lesson's shape you're on). None of it needs <code>os.Args</code>, a <code>Cobra</code> command, or anything else CLI-specific to run.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="create-scanner-package">
+      <div class="todo-item-head">
+        <input type="checkbox" id="create-scanner-package-cb">
+        <label for="create-scanner-package-cb">In your <code>burrow</code> module, create a <code>scanner/</code> directory with a doc comment and <code>package scanner</code>. Move your directory-size logic into it, renaming anything that needs to be called from outside to start with a capital letter.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the package</summary>
+          <div class="reveal-body">
+            <pre><code>// Package scanner holds burrow's directory-scanning logic, independent of
+// any CLI framework, so it can be imported by more than one binary.
+package scanner
+
+import (
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+)
+
+type DirSize struct {
+	Name string
+	Size int64
+}
+
+func SizeOf(root string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			total += info.Size()
+		}
+		return nil
+	})
+	return total, err
+}
+
+func Top(root string, n int) ([]DirSize, error) {
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+
+	sizes := make([]DirSize, 0, len(dirs))
+	for _, d := range dirs {
+		p := filepath.Join(root, d.Name())
+		s, err := SizeOf(p)
+		if err != nil {
+			return nil, err
+		}
+		sizes = append(sizes, DirSize{Name: p, Size: s})
+	}
+
+	sort.Slice(sizes, func(i, j int) bool { return sizes[i].Size > sizes[j].Size })
+	if n < len(sizes) {
+		sizes = sizes[:n]
+	}
+	return sizes, nil
+}</code></pre>
+            <p>This is a simplified, single-goroutine version to keep the extraction itself the focus — if your own <code>duTop</code> is already concurrent (from <code>go_concurrency_basics</code>) or context-aware (from <code>go_context_basics</code>), extract that version instead; the package boundary works identically either way. <code>DirSize</code>, <code>SizeOf</code>, and <code>Top</code> are all exported (capitalized) because <code>package main</code> needs to call every one of them.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="move-cli-to-cmd">
+      <div class="todo-item-head">
+        <input type="checkbox" id="move-cli-to-cmd-cb">
+        <label for="move-cli-to-cmd-cb">Move your existing <code>main.go</code> (the Cobra command tree and anything still CLI-specific) into <code>cmd/burrow/main.go</code>, and update it to import your new <code>scanner</code> package instead of calling the old in-file functions directly.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show a minimal example</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"fmt"
+	"os"
+
+	"burrow/scanner"
+)
+
+func main() {
+	sizes, err := scanner.Top(os.Args[1], 10)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	for _, s := range sizes {
+		fmt.Printf("%10d %q\n", s.Size, s.Name)
+	}
+}</code></pre>
+            <p>This is deliberately stripped down to just the scanning call — your real <code>cmd/burrow/main.go</code> keeps its full Cobra command tree (<code>find</code>, <code>du</code>, <code>perm</code>, all their subcommands and flags); only the internals of whichever handler called the scanning logic directly need to change to call <code>scanner.Top</code>/<code>scanner.SizeOf</code> instead.</p>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go build ./...</code> succeeds, and <code>go run ./cmd/burrow du top --path . --n 5</code> (or your CLI's equivalent invocation) prints exactly the same output it did before the extraction. The behavior hasn't changed at all — only where the logic physically lives.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>A useful test for "does this belong in a library package": could you explain what this function does without mentioning the command line at all? <code>SizeOf</code> and <code>Top</code> pass that test — they're about filesystem sizes, full stop. Something like "parse the <code>--path</code> flag and call <code>Top</code>" does not — it's fundamentally about the CLI's interface to a human, and stays in <code>cmd/burrow/main.go</code>. This distinction is what a later lesson in this course comes back to directly when deciding what does and doesn't belong in <code>internal/</code>.</p>
+  </div>
+
+  <h2>New: a second binary, same package</h2>
+
+  <p>Now that <code>scanner</code> is a real importable package, nothing says only <code>cmd/burrow</code> can import it. A second <code>package main</code> directory, anywhere else in the same module, is a second, completely independent binary — built separately, run separately, sharing only the library code both of them import.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="create-second-binary">
+      <div class="todo-item-head">
+        <input type="checkbox" id="create-second-binary-cb">
+        <label for="create-second-binary-cb">Create <code>cmd/burrowstat/main.go</code>: a tiny second binary that takes one path as an argument and prints just its total size (a single call to <code>scanner.SizeOf</code>), with no subcommands, no flags, no Cobra at all.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"fmt"
+	"os"
+
+	"burrow/scanner"
+)
+
+func main() {
+	total, err := scanner.SizeOf(os.Args[1])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("%d\n", total)
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="build-both-binaries">
+      <div class="todo-item-head">
+        <input type="checkbox" id="build-both-binaries-cb">
+        <label for="build-both-binaries-cb">Build everything in the module at once, then run both binaries against the same directory.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>go build ./...
+go run ./cmd/burrow du top --path . --n 5
+go run ./cmd/burrowstat .</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go build ./...</code> produces two separate binaries — one per <code>cmd/</code> subdirectory. <code>burrow</code> prints its usual sorted report; <code>burrowstat</code> prints one number, the same directory's total size, computed by the exact same <code>SizeOf</code> function both binaries import. Neither binary knows the other exists — they only share code, not runtime state.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p><code>go build ./...</code> walks every package in your module and, for each <code>package main</code> it finds, produces a separate executable named after that directory. This is why the <code>cmd/&lt;name&gt;</code> convention exists at all: it's not a build-system feature with special rules, just a directory layout that happens to make "one subdirectory per binary" fall out naturally from how <code>go build ./...</code> already works. A library package like <code>scanner</code> produces no binary of its own — <code>go build</code> compiles it only insofar as something else imports it.</p>
+  </div>
+
+  <p>You now have real logic living outside any single binary, and a second, independent program proving that extraction actually bought you something. Lesson 3 looks at <code>internal/</code> — the convention (and, unlike exported/unexported, the actual compiler-enforced rule) for a package that should never be imported from outside your own module.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — how you decided what counts as "CLI-specific" versus belonging in <code>scanner</code>, why two <code>package main</code> directories don't conflict with each other, what <code>go build ./...</code> actually does under the hood, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://go.dev/doc/modules/layout">go.dev, "Organizing a Go module"</a> for the <code>cmd/</code> convention this lesson's layout follows directly; <a href="https://go.dev/doc/code">go.dev, "How to Write Go Code"</a> for how <code>go build ./...</code> discovers and builds every package in a module.</p>
+
+  <div class="lesson-nav">
+    <a href="./0001-packages-beyond-main.html">← Lesson 1: Packages Beyond main</a>
+    <a href="../index.html">Course contents</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

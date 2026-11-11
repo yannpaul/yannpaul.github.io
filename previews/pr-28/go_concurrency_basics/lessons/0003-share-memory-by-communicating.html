@@ -1,0 +1,194 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_concurrency_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 3 · Share Memory By Communicating</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go Concurrency Basics · Lesson 3 of 9</p>
+  <h1>Share Memory By Communicating</h1>
+  <p class="subtitle">Rebuild Lesson 2's <code>duTop</code> from memory first. Then replace its mutex with a channel — and notice how much else disappears with it.</p>
+
+  <p class="lede">Lesson 2's <code>duTop</code> works, and the race detector agrees. But it needed two different synchronization mechanisms for two different pieces of shared state: indexed writes for <code>dSizes</code>, a mutex for <code>firstErr</code>. Today, one mechanism handles both — a channel, carrying each goroutine's entire result (size <em>and</em> error) back to a single place that's the only thing touching either.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–2</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-lesson2-dutop">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-lesson2-dutop-cb">
+        <label for="repeat-lesson2-dutop-cb">Confirm your current <code>duTop</code> — one goroutine per entry, indexed slice writes, a mutex-protected <code>firstErr</code> — still produces correct, race-free output.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Forgot the shape? Show Lesson 2's function</summary>
+          <div class="reveal-body">
+            <pre><code>func duTop(root string, n int) error {
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+
+	dSizes := make([]dirSize, len(dirs))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
+	for i, d := range dirs {
+		wg.Add(1)
+		go func(i int, name string) {
+			defer wg.Done()
+			p := filepath.Join(root, name)
+			s, err := sizeOf(p)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
+			}
+			dSizes[i] = dirSize{p, s}
+		}(i, d.Name())
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+
+	sort.Slice(dSizes, func(i, j int) bool { return dSizes[i].Size > dSizes[j].Size })
+	n = min(len(dSizes), n)
+	for _, d := range dSizes[:n] {
+		fmt.Printf("%10d %q\n", d.Size, d.Name)
+	}
+	return nil
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>burrow du top --path scratch --n 10</code> and <code>go run -race . du top --path scratch --n 10</code> both behave exactly as they did at the end of Lesson 2.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: a channel instead of a mutex</h2>
+
+  <p>A <a href="https://go.dev/tour/concurrency/2">channel</a> is a typed pipe: one goroutine sends a value into it with <code>ch &lt;- value</code>, another receives it with <code>&lt;-ch</code>, and the receive blocks until a value is actually there. That blocking is the whole trick — instead of a shared variable multiple goroutines write to (needing a lock to keep them from colliding), each goroutine sends its <em>own</em> result down a channel, and exactly one goroutine — the one receiving — ever touches what comes out the other end. This is the idea behind Go's own stated preference, quoted in nearly every serious discussion of the language: <a href="https://go.dev/blog/codelab-share">"Don't communicate by sharing memory; share memory by communicating."</a></p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="define-sizeresult">
+      <div class="todo-item-head">
+        <input type="checkbox" id="define-sizeresult-cb">
+        <label for="define-sizeresult-cb">Define a <code>sizeResult</code> struct with <code>Name string</code>, <code>Size int64</code>, and <code>Err error</code> — everything one goroutine needs to report back about one entry.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the type</summary>
+          <div class="reveal-body">
+            <pre><code>type sizeResult struct {
+	Name string
+	Size int64
+	Err  error
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="rewrite-dutop-channel">
+      <div class="todo-item-head">
+        <input type="checkbox" id="rewrite-dutop-channel-cb">
+        <label for="rewrite-dutop-channel-cb">Rewrite <code>duTop</code>: make a <code>chan sizeResult</code>, launch one goroutine per entry that sends its own <code>sizeResult</code> into it (no shared slice, no mutex, no <code>WaitGroup</code>), then receive from the channel exactly <code>len(dirs)</code> times, building <code>dSizes</code> with a plain <code>append</code> and tracking the first error — both perfectly safe now, since only the receiving goroutine ever touches either.</label>
+      </div>
+      <div class="todo-item-body">
+        <p>Receive exactly <code>len(dirs)</code> times no matter what — even after seeing an error, keep receiving until every goroutine's send has been read. If you stopped early, any goroutine still trying to send on an unbuffered channel with nobody receiving would block forever: a real goroutine leak, not just a style problem. Lesson 5 comes back to exactly this risk.</p>
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>func duTop(root string, n int) error {
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+
+	results := make(chan sizeResult)
+	for _, d := range dirs {
+		go func(name string) {
+			p := filepath.Join(root, name)
+			s, err := sizeOf(p)
+			results <- sizeResult{Name: p, Size: s, Err: err}
+		}(d.Name())
+	}
+
+	var dSizes []dirSize
+	var firstErr error
+	for range dirs {
+		r := <-results
+		if r.Err != nil {
+			if firstErr == nil {
+				firstErr = r.Err
+			}
+			continue
+		}
+		dSizes = append(dSizes, dirSize{r.Name, r.Size})
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+
+	sort.Slice(dSizes, func(i, j int) bool { return dSizes[i].Size > dSizes[j].Size })
+	n = min(len(dSizes), n)
+	for _, d := range dSizes[:n] {
+		fmt.Printf("%10d %q\n", d.Size, d.Name)
+	}
+	return nil
+}</code></pre>
+            <p>You can delete the <code>"sync"</code> import now — nothing in this version uses <code>WaitGroup</code> or <code>Mutex</code> at all.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="verify-channel-version">
+      <div class="todo-item-head">
+        <input type="checkbox" id="verify-channel-version-cb">
+        <label for="verify-channel-version-cb">Run the same scratch-fixture command as the warm-up, then run it again under <code>-race</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Identical output to before — <code>big</code> at <code>100</code>, <code>small</code> at <code>20</code>, <code>empty</code> at <code>0</code> — and <code>-race</code> stays silent, with less code and zero explicit locks.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Notice what quietly vanished: no <code>sync.WaitGroup</code>, no <code>sync.Mutex</code>, no indexed writes. Receiving from <code>results</code> exactly <code>len(dirs)</code> times <em>is</em> the wait — you can't finish that loop until every goroutine has sent, which is the same guarantee <code>wg.Wait()</code> gave you, produced as a side effect of the channel's own blocking behavior instead of a second, separate primitive. This is the pattern Go's channels are specifically good at: collecting an unknown-in-advance-but-countable set of results from independent work, without anyone needing to share memory to do it.</p>
+  </div>
+
+  <p><code>duTop</code> is shorter, and arguably easier to convince yourself is correct, than Lesson 2's version — one synchronization idea instead of two. Lesson 4 breaks it on purpose, to see exactly what the race detector says when that guarantee is violated for real.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why receiving <code>len(dirs)</code> times replaces <code>wg.Wait()</code>, what would happen if you stopped receiving early after an error, why <code>append</code> is safe here but wasn't safe in the version this lesson is about to break, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://go.dev/tour/concurrency/2">go.dev, "A Tour of Go": Channels</a> for the core send/receive mechanics; The Go Blog, <a href="https://go.dev/blog/codelab-share">"Share Memory By Communicating"</a> for the design philosophy this lesson is a worked example of.</p>
+
+  <div class="lesson-nav">
+    <a href="./0002-goroutines-that-do-real-work.html">← Lesson 2: Goroutines That Do Real Work</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0004-a-real-data-race-on-purpose.html">Next: A Real Data Race, On Purpose →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

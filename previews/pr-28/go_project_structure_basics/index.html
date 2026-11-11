@@ -1,0 +1,35 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_project_structure_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Go Programs Beyond One main.go</title>
+<link rel="stylesheet" href="./assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Learning · Go Programs Beyond One main.go</p>
+  <h1>Go Programs Beyond One main.go</h1>
+  <p class="subtitle">Learn packages, libraries, and multiple binaries by fixing a real structural problem in <code>burrow</code>, the CLI tool from <a href="../go_cli_basics/">Go CLI Basics</a>: everything it does still lives in one <code>main.go</code>, thirteen lessons later. Same format as the other Go workspaces — a checklist, not a script, with code hidden behind collapsed disclosures until you're stuck.</p>
+
+  <p class="lede">Seven lessons, each a self-contained page. Every lesson (from Lesson 2 on) opens by making you redo everything structural from prior lessons before teaching anything new. Only Lessons 1–2 are written so far; the rest are scoped below and will be built out in future sessions. This workspace assumes you already have a working <code>burrow</code> — built across <a href="../go_cli_basics/">Go CLI Basics</a>' lessons — on your own machine; Lesson 2 on tells you what to change in that existing code.</p>
+
+  <h2>Lessons</h2>
+  <ol>
+    <li><a href="./lessons/0001-packages-beyond-main.html">Packages Beyond <code>main</code></a> — what makes a directory a package, the exported/unexported visibility rule, and importing one package from another inside the same module, on a small standalone demo before touching <code>burrow</code></li>
+    <li><a href="./lessons/0002-a-library-and-a-second-binary.html">A Library Package and a Second Binary</a> — extract real logic out of <code>burrow</code>'s <code>main.go</code> into an importable <code>scanner</code> package, confirm the existing CLI still behaves identically, then build a second, independent binary that reuses it</li>
+    <li><strong>Coming up — <code>internal/</code> and What It Actually Enforces</strong> — the directory convention the Go compiler itself checks, not just a naming suggestion, for code that shouldn't be imported from outside the module</li>
+    <li><strong>Coming up — Multiple Binaries, One Module</strong> — a deeper look at the <code>cmd/</code> layout now that two binaries already exist, and what <code>go build ./...</code> actually does across all of them</li>
+    <li><strong>Coming up — Sharing Config and Version Info Across Binaries</strong> — a small pattern for constants (like a version string) shared between multiple binaries without duplicating literals</li>
+    <li><strong>Coming up — Testing a Library Package in Isolation</strong> — table-driven tests against the extracted package directly, no CLI framework or <code>os.Args</code> parsing involved</li>
+    <li><strong>Coming up — Capstone</strong> — pull every technique together and defend every package-boundary decision in the finished layout</li>
+  </ol>
+
+  <div class="lesson-nav">
+    <a href="../">← All topics</a>
+    <a href="./lessons/0001-packages-beyond-main.html">Start: Lesson 1 →</a>
+  </div>
+</main>
+</body>
+</html>

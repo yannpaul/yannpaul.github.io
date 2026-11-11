@@ -1,0 +1,283 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_grpc_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 2 · Your First Unary RPC</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">gRPC and Protobuf in Go · Lesson 2 of 9</p>
+  <h1>Your First Unary RPC</h1>
+  <p class="subtitle">Rebuild Lesson 1's <code>LogEntry</code> message and generated code from memory first. Then give <code>logline</code> its first real RPC — a server, a client, and an actual network connection between them.</p>
+
+  <p class="lede">Lesson 1 got a message from a <code>.proto</code> file into working Go code, but nothing left your own process — <code>proto.Marshal</code> and <code>proto.Unmarshal</code> ran back to back in the same program. Today those bytes actually travel: a separate server process implements <code>Append</code>, a separate client process calls it, and gRPC is what makes calling a function on another process feel like calling an ordinary Go function.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lesson 1</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-lesson1-proto">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-lesson1-proto-cb">
+        <label for="repeat-lesson1-proto-cb">Confirm your <code>logline</code> project from Lesson 1 still generates cleanly and <code>cmd/inspect</code> still runs.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Forgot the command? Show it</summary>
+          <div class="reveal-body">
+            <pre><code>protoc --go_out=gen --go_opt=paths=source_relative \
+  --proto_path=proto \
+  proto/logline/v1/logline.proto
+go run ./cmd/inspect</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Same output as the end of Lesson 1: field values, a byte count, the round-tripped values again, and the nil-getter check printing <code>true</code>.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: adding a service to the schema</h2>
+
+  <p>A <code>service</code> block in a <code>.proto</code> file declares an RPC: a name, a request message type, and a reply message type. <code>rpc Append(AppendRequest) returns (AppendReply);</code> is the entire contract — the client sends one <code>AppendRequest</code>, the server sends back exactly one <code>AppendReply</code>. This specific shape, one request and one reply, is called a <strong>unary RPC</strong> — the simplest of gRPC's four RPC shapes, and the only one this course needs until Lesson 4.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="add-service-to-proto">
+      <div class="todo-item-head">
+        <input type="checkbox" id="add-service-to-proto-cb">
+        <label for="add-service-to-proto-cb">In <code>logline.proto</code>, add an <code>AppendRequest</code> message (just a <code>message</code> string field), an <code>AppendReply</code> message (a single <code>LogEntry entry</code> field), and a <code>service Logline</code> block declaring <code>rpc Append(AppendRequest) returns (AppendReply);</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the additions</summary>
+          <div class="reveal-body">
+            <pre><code>message AppendRequest {
+  string message = 1;
+}
+
+message AppendReply {
+  LogEntry entry = 1;
+}
+
+service Logline {
+  rpc Append(AppendRequest) returns (AppendReply);
+}</code></pre>
+            <p>Add these below <code>LogEntry</code> in the same file — nothing about the file's <code>syntax</code>, <code>package</code>, or <code>go_package</code> lines needs to change.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="regenerate-with-grpc">
+      <div class="todo-item-head">
+        <input type="checkbox" id="regenerate-with-grpc-cb">
+        <label for="regenerate-with-grpc-cb">Regenerate — this time also running the <code>go-grpc</code> plugin you installed in Lesson 1, alongside the plain <code>go</code> one.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>protoc --go_out=gen --go_opt=paths=source_relative \
+  --go-grpc_out=gen --go-grpc_opt=paths=source_relative \
+  --proto_path=proto \
+  proto/logline/v1/logline.proto</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>logline.pb.go</code> gets regenerated (now with <code>AppendRequest</code>/<code>AppendReply</code> types added alongside <code>LogEntry</code>), and a new file appears: <code>gen/logline/v1/logline_grpc.pb.go</code>. Open it and find <code>LoglineClient</code> and <code>LoglineServer</code> — two generated Go interfaces, one for calling <code>Append</code>, one for implementing it.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: implementing the server</h2>
+
+  <p><code>LoglineServer</code> is an interface with one method, <code>Append</code>. A type that implements it, registered with a <code>*grpc.Server</code> listening on a real TCP port, <em>is</em> your server.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-server">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-server-cb">
+        <label for="write-server-cb">Write <code>cmd/server/main.go</code>: a <code>server</code> struct embedding <code>loglinev1.UnimplementedLoglineServer</code>, an <code>Append</code> method that assigns an incrementing ID and the current time, and a <code>main</code> that listens on <code>:50051</code>, creates a <code>grpc.NewServer()</code>, registers your server, and serves.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net"
+	"strconv"
+	"sync"
+	"time"
+
+	"google.golang.org/grpc"
+
+	loglinev1 "logline/gen/logline/v1"
+)
+
+type server struct {
+	loglinev1.UnimplementedLoglineServer
+
+	mu     sync.Mutex
+	nextID int
+}
+
+func (s *server) Append(ctx context.Context, req *loglinev1.AppendRequest) (*loglinev1.AppendReply, error) {
+	s.mu.Lock()
+	s.nextID++
+	id := strconv.Itoa(s.nextID)
+	s.mu.Unlock()
+
+	entry := &loglinev1.LogEntry{
+		Id:            id,
+		Message:       req.GetMessage(),
+		CreatedAtUnix: time.Now().Unix(),
+	}
+	return &loglinev1.AppendReply{Entry: entry}, nil
+}
+
+func main() {
+	lis, err := net.Listen("tcp", ":50051")
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+
+	grpcServer := grpc.NewServer()
+	loglinev1.RegisterLoglineServer(grpcServer, &server{})
+
+	fmt.Println("logline server listening on :50051")
+	if err := grpcServer.Serve(lis); err != nil {
+		log.Fatalf("serve: %v", err)
+	}
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Embedding <code>loglinev1.UnimplementedLoglineServer</code> isn't boilerplate to delete — it's what keeps your server compiling after a future lesson adds a new RPC to the <code>service</code> block. Without it, adding a method to <code>LoglineServer</code>'s interface would break every existing implementation until they added that method too; with it, your <code>server</code> struct automatically satisfies any new method (by inheriting the embedded type's version, which just returns an "unimplemented" error) until you get around to writing a real one. This is the same forward-compatibility idea as protobuf's field numbers from Lesson 1, applied to services instead of messages.</p>
+  </div>
+
+  <h2>New: writing the client</h2>
+
+  <p><code>LoglineClient</code> is the generated <strong>stub</strong> — a concrete type whose <code>Append</code> method actually makes the network call. You get one from a connection.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-client">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-client-cb">
+        <label for="write-client-cb">Write <code>cmd/client/main.go</code>: dial the server with <code>grpc.NewClient</code>, create a <code>LoglineClient</code> stub from the connection, and call <code>Append</code> with a 3-second timeout context.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	loglinev1 "logline/gen/logline/v1"
+)
+
+func main() {
+	conn, err := grpc.NewClient("localhost:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	client := loglinev1.NewLoglineClient(conn)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	reply, err := client.Append(ctx, &loglinev1.AppendRequest{Message: "hello from the client"})
+	if err != nil {
+		log.Fatalf("append: %v", err)
+	}
+
+	entry := reply.GetEntry()
+	fmt.Printf("server assigned id=%s message=%q created_at=%d\n", entry.GetId(), entry.GetMessage(), entry.GetCreatedAtUnix())
+}</code></pre>
+            <p><code>insecure.NewCredentials()</code> means no TLS — fine for this course, run entirely on your own machine, and explicitly out of scope to fix per this course's <code>MISSION.md</code>. A real production service needs real transport security; that's a deployment concern layered on top of everything this course teaches, not a change to the RPC code itself.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-server-and-client">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-server-and-client-cb">
+        <label for="run-server-and-client-cb">Run the server in one terminal. In a second terminal, run the client — twice.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code># terminal 1
+go run ./cmd/server
+
+# terminal 2
+go run ./cmd/client
+go run ./cmd/client</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The server prints <code>logline server listening on :50051</code> and keeps running. Each client run prints a line like <code>server assigned id=1 message="hello from the client" created_at=...</code> — and the second run prints <code>id=2</code>, not <code>id=1</code> again, proving the ID came from the server's own in-memory state (which survived between the two separate client processes), not from anything the client sent.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="run-client-no-server">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-client-no-server-cb">
+        <label for="run-client-no-server-cb">Stop the server (<kbd>Ctrl+C</kbd> in its terminal), then run the client once more with nothing listening.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The client fails with something like <code>rpc error: code = Unavailable desc = connection error: ... connection refused</code> — not a generic Go network error, a structured gRPC error carrying a real status code, <code>codes.Unavailable</code>. This is your first look at gRPC's error model, ahead of Lesson 3's dedicated treatment of it: even a plain network failure comes back through the same <code>status</code>/<code>codes</code> machinery your own RPC methods will use on purpose.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p><code>grpc.NewClient</code> doesn't dial eagerly — creating the connection object never fails just because nothing is listening yet. The actual connection attempt happens lazily, on the first RPC call, which is exactly why the checkpoint above fails at <code>client.Append(...)</code>, not at <code>grpc.NewClient(...)</code>. This matters in practice: a client can be constructed once, early in a program's life, well before the server it talks to is guaranteed to be up.</p>
+  </div>
+
+  <p>You now have two real, separate processes exchanging real protobuf messages over a real TCP connection — the whole rest of this course is variations on exactly this shape. Lesson 3 adds a second RPC, <code>Get</code>, and replaces the placeholder error handling above with the real thing: returning a specific <code>status</code> code on purpose, not just seeing one show up from a connection failure.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why <code>UnimplementedLoglineServer</code> matters for forward compatibility, why <code>grpc.NewClient</code> doesn't fail immediately with no server running, what "unary" is contrasting with, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://grpc.io/docs/what-is-grpc/introduction/">grpc.io, "Introduction to gRPC"</a> for what gRPC adds on top of protobuf; <a href="https://grpc.io/docs/languages/go/basics/">grpc.io, "Basics tutorial (Go)"</a>, whose unary RPC example this lesson's <code>Append</code> closely follows.</p>
+
+  <div class="lesson-nav">
+    <a href="./0001-protobuf-basics.html">← Lesson 1: Protobuf Basics</a>
+    <a href="../index.html">Course contents</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>
