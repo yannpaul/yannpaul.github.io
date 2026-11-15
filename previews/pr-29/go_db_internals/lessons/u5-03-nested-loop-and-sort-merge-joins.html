@@ -1,0 +1,345 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 5 · Lesson 3 · Joins I: Nested Loop and Sort-Merge Joins</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 5 · Lesson 3</p>
+  <h1>Joins I: Nested Loop and Sort-Merge Joins</h1>
+  <p class="subtitle">Compute the I/O cost of naïve, block and index nested loop joins and of a sort-merge join, choose the outer table, and trace a sort-merge join that has to backtrack over duplicate keys.</p>
+
+  <p class="lede">Normalized tables split information across relations, and joins put it back together. Slide 13 calls the join the most common operation, so it has to be optimized carefully. Lecture #12 compares join algorithms by one number, the page I/Os they need, and the differences are enormous: the same join can cost fifty million I/Os or six thousand. This lesson covers the nested loop family and the sort-merge join, which reuses the external merge sort from Lesson 1. Lesson 4 covers hash joins. Project 3 builds the nested loop and index nested loop joins.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 5, Lesson 1: the general external merge sort has B = 50 buffer pages and a 2,000-page file. How many passes does it take, and how many I/Os?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A single pass only sorts the 40 runs individually; they still have to be merged.">1 pass, 4,000 I/Os</li>
+      <li data-option="b" data-explain="Pass 0 makes 40 runs, and 40 ≤ 49, so one merge pass is enough. A third pass would be needed only above B(B − 1) = 2,450 pages.">3 passes, 12,000 I/Os</li>
+      <li data-option="c" data-explain="⌈2,000 / 50⌉ = 40 runs, and one 49-way merge combines them: 1 + ⌈log₄₉ 40⌉ = 2 passes, so 2 × 2,000 × 2 = 8,000 I/Os.">2 passes, 8,000 I/Os</li>
+      <li data-option="d" data-explain="1 + ⌈log₂ 2,000⌉ = 12 passes is the 2-way sort, which uses only 3 of the 50 buffers.">12 passes, 48,000 I/Os</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 0, Lesson 1: R has 100,000 tuples and S has 40,000 tuples. How many tuples are in the product R × S?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The product pairs every R tuple with every S tuple: 100,000 × 40,000 = 4,000,000,000.">4,000,000,000</li>
+      <li data-option="b" data-explain="That is the sum. A product combines each tuple of one input with each tuple of the other.">140,000</li>
+      <li data-option="c" data-explain="Keeping only the pairs that agree on an attribute is the join. The product keeps every pairing.">At most 40,000, one for each S tuple that matches</li>
+      <li data-option="d" data-explain="The product doesn't depend on shared values at all; it is every combination.">It depends on how many id values the two tables share.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 3, Lesson 3: a B+tree has a root, one level of inner nodes and a level of leaves. How many page reads does a search for one key take?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The search reads one node per level on its way down, and the leaf is only the last of them.">1, the leaf that holds the key</li>
+      <li data-option="b" data-explain="Only one child is followed at each level, so the reads don't depend on the fanout.">As many as the root's fanout</li>
+      <li data-option="c" data-explain="A point search doesn't follow sibling pointers; that is a range scan.">2, because the leaf's sibling must also be checked</li>
+      <li data-option="d" data-explain="Each level costs one page read: root, inner node, leaf.">3, one per level</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Joins and how to compare them</h2>
+
+  <p>Slide 5 states the reason for joins: tables in a relational database are normalized to avoid unnecessary repetition of information, and the join operator reconstructs the original tuples without losing any. Lecture #12 focuses on <strong>binary joins</strong> (two tables) computed by <strong>inner equijoin</strong> algorithms, which join tuples whose keys are equal and emit only the matching pairs. The slide adds that these algorithms can be tweaked to support other joins. Joins of more than two tables at once, such as worst-case optimal joins, exist primarily in research.</p>
+
+  <p>A join has two inputs, and the algorithms treat them differently. The <strong>outer table</strong> is the left input of the join in the query plan; the <strong>inner table</strong> is the right one. In general the DBMS wants the smaller table on the outer side, and the optimizer will try to arrange that. Don't confuse "outer table" with an outer join: here it only names a side.</p>
+
+  <h3>What the join emits</h3>
+
+  <p>For a tuple r in R and a tuple s in S that match on the join attributes, the join concatenates r and s into a new tuple. What that tuple contains depends on the processing model, the storage model and the query. Lesson 1's terms come back:</p>
+  <ul>
+    <li><strong>Early materialization</strong> copies the attribute values of both tuples into the output. Later operators never need to go back to the base tables. The notes say this suits row stores, at the cost of more memory.</li>
+    <li><strong>Late materialization</strong> copies only the join keys and the record IDs of the matching tuples. The slide calls it ideal for column stores, because the DBMS doesn't copy data the query doesn't need.</li>
+  </ul>
+  <p>The notes add that real systems often mix the two.</p>
+
+  <h3>The cost model</h3>
+
+  <p>Every cost in this lesson and the next uses the same notation. Table R has M pages and m tuples; table S has N pages and n tuples. The DBMS has B buffer pages. The cost metric is the number of I/Os needed to compute the join. Two things are left out: the cost of writing the result, because it depends on the data and is the same for every algorithm, and computation and network costs, for now.</p>
+
+  <p>Slide 13 rules out the simplest plan. R ⋈ S could be computed as R × S followed by a selection, but the product is huge: four billion pairs for the example tables below. There are many algorithms for reducing a join's cost, and no algorithm works well in all scenarios.</p>
+
+  <p>The lecture's example database has R with M = 1000 pages and m = 100,000 tuples, S with N = 500 pages and n = 40,000 tuples, and 0.1 ms per I/O.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=YIdIaPopfpk&amp;t=660s">#12 Join Algorithms, "Join cost analysis" (11:00)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/12-joins.pdf#page=16">slides 12–14</a>: the M, m, N, n notation, why the output cost is ignored, and the list of algorithms.</p>
+
+  <h2>Naïve nested loop join</h2>
+
+  <p>The <strong>naïve nested loop join</strong>, which HW4 and Project 3 call the simple nested loop join, compares every tuple of the outer table with every tuple of the inner table:</p>
+  <pre><code>foreach tuple r ∈ R:
+  foreach tuple s ∈ S:
+    if r and s match then emit</code></pre>
+  <p>The slide's verdict is "Don't Do This!": for every tuple in R, it scans S once. Reading R costs M, and each of its m tuples triggers a scan of S's N pages:</p>
+  <p>cost = M + (m × N)</p>
+  <p>On the example database that is 1000 + 100,000 × 500 = 50,001,000 I/Os, about 5,000 seconds at 0.1 ms per I/O. With the smaller table S as the outer table it is 500 + 40,000 × 1000 = 40,000,500 I/Os, about 4,000 seconds. The outer table's tuple count is what multiplies, so the choice matters even when both orders are hopeless.</p>
+
+  <h2>Block nested loop join</h2>
+
+  <p>The <strong>block nested loop join</strong> fixes the multiplication. It reads the outer table a block at a time and scans the inner table once per block, comparing every pair of tuples between the two blocks in memory. With one-page blocks that is one scan of S per page of R:</p>
+  <p>cost = M + (M × N)</p>
+  <p>Now the outer table's page count multiplies, so slide 20 says to pick the outer table by the number of pages, not the number of tuples.</p>
+
+  <p>With B buffers the outer block can be bigger. The DBMS uses B − 2 buffers for a block of the outer table, one buffer to scan the inner table, and one for the output. Each scan of S now covers B − 2 pages of R:</p>
+  <p>cost = M + (⌈M / (B − 2)⌉ × N)</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L12-bnlj-p27.png" alt="Pseudocode: foreach B-2 pages pR in R, foreach page pS in S, foreach tuple r in the B-2 pages, foreach tuple s in pS, if r and s match then emit. Below, table R(id, name) with seven rows, bracketed as M pages and m tuples, and table S(id, value, cdate) with five rows, bracketed as N pages and n tuples." loading="lazy">
+    <figcaption>The two outer loops decide the I/O: one scan of S for every B − 2 pages of R. The two inner loops only compare tuples that are already in memory (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/12-joins.pdf#page=27">Lecture #12, slide 21</a>).</figcaption>
+  </figure>
+
+  <p>Slide 22 works three cases on the example database:</p>
+  <ul>
+    <li>If the outer table fits in the B − 2 outer buffers, both tables are read once: M + N = 1000 + 500 = 1,500 I/Os.</li>
+    <li>With B = 102, R as the outer table costs 1000 + ⌈1000 / 100⌉ × 500 = 6,000 I/Os.</li>
+    <li>With B = 102 and S as the outer table: 500 + ⌈500 / 100⌉ × 1000 = 5,500 I/Os.</li>
+  </ul>
+  <p>The ceiling matters. A partial last block still costs a full scan of the inner table, so 1,000 outer pages in blocks of 98 mean ⌈10.2⌉ = 11 scans, not 10.</p>
+
+  <h2>Index nested loop join</h2>
+
+  <p>The basic nested loop joins are slow because each outer tuple or block triggers a sequential scan of the inner table to look for matches. If the inner table has an index on the join key, the DBMS can probe it instead. That is the <strong>index nested loop join</strong>:</p>
+  <pre><code>foreach tuple r ∈ R:
+  foreach tuple s ∈ Index(ri = sj):
+    if r and s match then emit</code></pre>
+  <p>The index is on the inner table; the outer table is scanned sequentially and needs none. The DBMS can use an existing index or build a temporary one for the join. The lecture assumes each index probe costs some constant C per outer tuple:</p>
+  <p>cost = M + (m × C)</p>
+  <p>The lecture leaves C abstract. For a B+tree, the search from Unit 3 gives a feel for it: one page read per level on the way down, before the matching tuple is fetched.</p>
+
+  <p>Slide 25 sums up the nested loop family: pick the smaller table as the outer table when possible, buffer as much of the outer table in memory as possible, and loop over the inner table or use an index.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=YIdIaPopfpk&amp;t=1169s">#12 Join Algorithms, "Nested loop joins" (19:29)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/12-joins.pdf#page=19">slides 15–25</a>: the naïve join and its example costs, blocks and buffers, and the index nested loop join.</p>
+
+  <h2>Sort-merge join</h2>
+
+  <p>The <strong>sort-merge join</strong> has two phases:</p>
+  <ul>
+    <li>Phase 1, sort: sort both tables on the join key, with any appropriate sort algorithm. The external merge sort of Lesson 1 is the usual choice when a table doesn't fit in memory. Slide 26 warns that these phases are distinct from the sort and merge phases inside the external merge sort itself.</li>
+    <li>Phase 2, merge: step through the two sorted tables with one cursor each and emit the matching tuples. Depending on the join type, the cursors may need to <strong>backtrack</strong>.</li>
+  </ul>
+
+  <p>The merge compares the keys under the two cursors. If R's key is larger, the S cursor advances; if S's key is larger, the R cursor advances. If they match, the join emits the pair and advances the S cursor. Backtracking handles duplicates on the outer side. When the R cursor moves to a tuple whose key equals the previous R key, the S cursor goes back to the first S tuple with that key, so the second R tuple meets every match the first one met.</p>
+
+  <p>Slide 28 traces the join of R(id, name) and S(id, value, cdate). After sorting, R's ids are 100, 200, 200, 300, 400, 500, 600, 700, and S's are 100, 100, 200, 400, 500. Andy (100) matches both 100s in S. The first GZA (200) matches S's 200, and the S cursor moves on to 400. Then the R cursor reaches the second GZA, whose key equals the "Last Value" 200, so the S cursor backtracks to 200 and the second GZA gets its match too.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L12-smj-duplicates-p47.png" alt="Sorted R(id, name): 100 Andy, 200 GZA, 200 GZA, 300 ODB, 400 Raekwon, 500 RZA, 600 MethodMan, 700 Ghostface, with a red arrow and box on 300 ODB. Sorted S(id, value, cdate): 100 2222, 100 9999, 200 8888, 400 6666, 500 7777, with a red arrow and box on 400. Between them, Last Value: 200. The query SELECT R.id, S.cdate FROM R JOIN S ON R.id = S.id WHERE S.value > 100, and an output buffer with four rows: 100 Andy 100 2222, 100 Andy 100 9999, 200 GZA 200 8888, and 200 GZA 200 8888 again." loading="lazy">
+    <figcaption>After backtracking for the second GZA, the output holds four rows, and the cursors have moved on to ODB (300) and 400. 300 &lt; 400, so the R cursor advances to Raekwon (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/12-joins.pdf#page=47">Lecture #12, slide 28</a>).</figcaption>
+  </figure>
+
+  <p>The merge finishes with Raekwon matching S's 400 and RZA matching S's 500, six rows in all: the same six a nested loop join produces. ODB, MethodMan and Ghostface have no match in S.</p>
+
+  <h3>The cost of a sort-merge join</h3>
+
+  <p>The sort phase costs whatever external merge sort costs for each table, using Lesson 1's formula. The merge phase reads each sorted table once:</p>
+  <ul>
+    <li>sort cost (R) = 2M × (1 + ⌈log<sub>B−1</sub> ⌈M / B⌉⌉)</li>
+    <li>sort cost (S) = 2N × (1 + ⌈log<sub>B−1</sub> ⌈N / B⌉⌉)</li>
+    <li>merge cost = M + N</li>
+    <li>total = sort + merge</li>
+  </ul>
+  <p>On the example database with B = 100, both tables sort in two passes: 2000 × 2 = 4,000 I/Os for R and 1000 × 2 = 2,000 for S. The merge adds 1,500, for a total of 7,500 I/Os.</p>
+
+  <p>The merge cost M + N assumes few duplicates. The worst case is when every tuple in both tables has the same join value. Then every outer page has to be matched against the entire inner table, and the merge costs M × N, plus the sort. The notes call this very unlikely in real databases: keys are usually mostly unique, so the merge is about M + N.</p>
+
+  <p>Slide 32 names the two cases where sort-merge join is preferable: one or both tables are already sorted on the join key, or the output must be sorted on the join key anyway. An input can arrive sorted from an explicit sort operator or from scanning an index on the join key; the notes mention a clustered index.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=YIdIaPopfpk&amp;t=2100s">#12 Join Algorithms, "Sort-merge join" (35:00)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/12-joins.pdf#page=33">slides 26–32</a>: the two phases, the full trace with backtracking, the cost example and the worst case.</p>
+
+  <h2>What Project 3 builds</h2>
+
+  <p>According to the Fall 2025 writeup and BusTub at d49b823:</p>
+  <ul>
+    <li>BusTub plans every join as a nested loop join by default. Project 3 asks for an inner join and a left join using "the simple nested loop join algorithm from class": for each tuple of the outer table, consider each tuple of the inner table and emit the ones that satisfy the join predicate. The output schema is all columns of the left table followed by all columns of the right one. BusTub's code says left and right where the lecture says outer and inner.</li>
+    <li>An optimizer rule turns a nested loop join into an index nested loop join when the join condition is an equality and the right side has an index on that column. That executor has only one child, the outer table. For each outer tuple it builds a key, looks up the record ID in the inner table's index, and fetches the inner tuple: the slide's <code>Index(ri = sj)</code> loop.</li>
+    <li>BusTub has no sort-merge join. Its other equijoin is the hash join of the next lesson.</li>
+  </ul>
+
+  <h2>Work it out</h2>
+
+  <p>The first three exercises are HW4 Question 1(g)'s true-or-false statements. Decide each one and say why before opening the result.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u5l3-hw4-g1">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u5l3-hw4-g1-cb">
+        <label for="u5l3-hw4-g1-cb">HW4 Q1(g)i, true or false: if neither table fits entirely in memory, I/O costs would be lower if we process both tables on a per-tuple rather than per-block basis.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which join processes the outer table per tuple, and which per block? What multiplies the inner table's page count in each?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Compare M + (m × N) with M + (M × N) or M + (⌈M / (B − 2)⌉ × N). A page holds many tuples, so m is much larger than M.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p><strong>False.</strong> The official solution: a block nested loop join has fewer disk accesses than a simple nested loop join, because it scans the inner table once per outer block instead of once per outer tuple.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u5l3-hw4-g2">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u5l3-hw4-g2-cb">
+        <label for="u5l3-hw4-g2-cb">HW4 Q1(g)ii, true or false: if both tables in a simple nested loop join fit entirely in memory, the order of inner and outer tables does not significantly affect I/O costs.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>If the inner table is already in memory, does the second scan of it read anything from disk?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Slide 22 gives M + N when the outer table fits in memory. Count the reads when both tables fit, once with R as the outer table and once with S.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p><strong>True.</strong> The official solution: if both tables fit entirely in memory, they can be read just once, so the order is not very important. Either way the cost is about M + N.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u5l3-hw4-g3">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u5l3-hw4-g3-cb">
+        <label for="u5l3-hw4-g3-cb">HW4 Q1(g)iii, true or false: an index nested loop join requires an index on only the inner table.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which table does the join scan, and which one does it probe?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Look at the loop: <code>foreach tuple r ∈ R</code> is a sequential scan of the outer table, and <code>Index(ri = sj)</code> is the probe.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p><strong>True.</strong> The official solution: an index nested loop join only requires the inner table to have an index. The outer table is scanned, so it needs none.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u5l3-pages-not-tuples">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u5l3-pages-not-tuples-cb">
+        <label for="u5l3-pages-not-tuples-cb">Table A has 600 pages and 30,000 tuples; table B has 300 pages and 90,000 tuples. With B = 52 buffer pages, compute the block nested loop join cost with each table as the outer table, and name the cheaper one.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which count does the block nested loop join multiply: the outer table's tuples or its pages?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Use M + (⌈M / (B − 2)⌉ × N) with B − 2 = 50 outer buffers, once with A outside and once with B outside.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>A outer: 600 + 12 × 300 = <strong>4,200</strong>. B outer: 300 + 6 × 600 = <strong>3,900</strong>. B is cheaper although it has three times as many tuples, because it has fewer pages.</p></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="callout"><!-- homework-box -->
+    <p class="callout-label">The homework behind these questions</p>
+    <p>The questions marked HW4 come from CMU's Homework #4: <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw4-clean.pdf#page=2">Question 1</a>, with the original figures. Work each one out on paper first, then click the option you got. The quiz tells you at once whether it matches CMU's official answer, and explains why. To compare your working step by step, open the official solutions for <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw4-sols.pdf#page=2">Question 1</a>.</p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <p>These questions use HW4's Question 1 setup. Relations X(a, b), Y(a, c, e) and Z(a, d, f) are joined on attribute a, and no indexes are available.</p>
+  <ul>
+    <li>There are B = 100 pages in the buffer.</li>
+    <li>X spans M = 1,000 pages with 100 tuples per page.</li>
+    <li>Y spans N = 500 pages with 1,000 tuples per page.</li>
+    <li>Z spans O = 3,000 pages with 3,000 tuples per page.</li>
+    <li>The join result of Y and Z spans P = 200 pages.</li>
+  </ul>
+  <p>Pages are read and written one at a time. One buffer block holds the evolving output and one holds the current block of the inner relation. Ignore the cost of writing the final result. HW4's letters replace R and S, so "Y as the outer relation" means Y plays R's role in the formulas.</p>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">HW4 Q1(a): what is the I/O cost of a simple nested loop join with Y as the outer relation and X as the inner relation?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="N + M would be right only if the tables fit in memory, and 1,500 pages don't fit in 100 buffers.">1,500</li>
+      <li data-option="b" data-explain="500 + 500 × 1,000 scans X once per page of Y. That is the block nested loop join with one-page blocks.">500,500</li>
+      <li data-option="c" data-explain="1,000 + 100,000 × 500 is the cost with X as the outer relation.">50,001,000</li>
+      <li data-option="d" data-explain="The simple join scans X once per tuple of Y. Y has 500 × 1,000 = 500,000 tuples, so 500 + 500,000 × 1,000 = 500,000,500. This matches the official solution.">500,000,500</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">HW4 Q1(b) and (c): what does a block nested loop join cost with Y as the outer relation and Z as the inner one, and with Z as the outer relation and Y as the inner one?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="15,500 rounds 500 / 98 down to 5, and 18,000 divides 3,000 by B instead of B − 2. A partial last block still costs a full scan of the inner table.">15,500 with Y outer; 18,000 with Z outer</li>
+      <li data-option="b" data-explain="Y outer: 500 + ⌈500 / 98⌉ × 3,000 = 500 + 6 × 3,000 = 18,500. Z outer: 3,000 + ⌈3,000 / 98⌉ × 500 = 3,000 + 31 × 500 = 18,500. Both match the official solutions; the tie is a coincidence of these numbers.">18,500 with Y outer; 18,500 with Z outer</li>
+      <li data-option="c" data-explain="N + O is the cost only when the outer table fits in the 98 outer buffers. Neither 500 nor 3,000 pages does.">3,500 with Y outer; 3,500 with Z outer</li>
+      <li data-option="d" data-explain="These use one-page blocks and ignore the other 97 buffers: 500 + 500 × 3,000 and 3,000 + 3,000 × 500.">1,500,500 with Y outer; 1,503,000 with Z outer</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <p>The next two questions concern a sort-merge join with Z as the outer relation and X as the inner relation. Lesson 1's quiz computed the sort costs for X and Z.</p>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">HW4 Q1(d)iii and (d)iv: what does the merge phase cost in the worst case, and what does it cost if there are no duplicates in the join attribute?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Worst case, every tuple has the same join value, so each outer page is matched against all of X: O × M = 3,000 × 1,000 = 3,000,000. With unique keys the cursors never backtrack: O + M = 4,000. Both match the official solutions.">3,000,000 in the worst case; 4,000 with no duplicates</li>
+      <li data-option="b" data-explain="This swaps the two cases: O + M is the merge with unique keys, and O × M is the worst case.">4,000 in the worst case; 3,000,000 with no duplicates</li>
+      <li data-option="c" data-explain="300,000 has no derivation from the setup; the worst case multiplies the two page counts.">300,000 in the worst case; 4,000 with no duplicates</li>
+      <li data-option="d" data-explain="3,000 reads only Z. The merge reads both sorted tables once.">3,000,000 in the worst case; 3,000 with no duplicates</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">HW4 Q1(d)v: now join Y and Z first, then join that result with X. Assuming no duplicates in the join attribute, what does the final merge phase cost?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="200 + 500 uses Y's page count, but Y is already inside the 200-page result.">700</li>
+      <li data-option="b" data-explain="200 + 3,000 uses Z's page count, but Z is also inside the result.">3,200</li>
+      <li data-option="c" data-explain="The final merge reads the Y ⋈ Z result once and X once: P + M = 200 + 1,000 = 1,200. This matches the official solution. Sorting the inputs is a separate cost the question doesn't ask about.">1,200</li>
+      <li data-option="d" data-explain="200 × 1,000 is the worst-case merge, which no duplicates rules out.">200,000</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">HW4 Q1(g)vi: which option lists exactly the true statements about joins, according to the official solution?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="More buffers make the outer blocks bigger, so ⌈M / (B − 2)⌉ shrinks and the inner table is scanned fewer times. The official solution says only this statement is true.">For block nested loop joins, increasing the buffer pool could reduce the number of disk I/Os.</li>
+      <li data-option="b" data-explain="The second statement is false: a sort-merge join sorts its own inputs in phase 1. Pre-sorted inputs only make it cheaper.">For block nested loop joins, increasing the buffer pool could reduce the number of disk I/Os; sort-merge join requires both input relations to be pre-sorted.</li>
+      <li data-option="c" data-explain="Both are false. The naïve join rescans the inner table for every outer tuple, and an index nested loop join needs an index on the inner table, not a sort.">Each tuple is scanned exactly once in a naïve nested loop join; index nested loop join requires pre-sorting the inner relation.</li>
+      <li data-option="d" data-explain="Already-sorted inputs are exactly when slide 32 prefers the sort-merge join.">Hash joins are always preferred over sort-merge join when both relations are already sorted on the join key.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why the naïve join multiplies by tuples but the block join by pages, why the block join reserves two buffers, or when the sort-merge join's S cursor has to backtrack. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 Lecture #12 <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/12-joins.pdf">slides</a> 4–32 and <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/12-joins.pdf">notes</a> (sections 1–4); Homework #4 Question 1, parts (a) to (d) and (g), and its <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw4-sols.pdf">official solutions</a>; the Project #3 writeup (NestedLoopJoin and NestedIndexJoin sections); BusTub <code>src/include/execution/plans/</code> at commit d49b823.</p>
+
+  <div class="lesson-nav">
+    <a href="./u5-02-aggregation.html">← Aggregation: Sorting vs. Hashing</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u5-04-hash-joins.html">Next: Joins II: Hash Joins →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

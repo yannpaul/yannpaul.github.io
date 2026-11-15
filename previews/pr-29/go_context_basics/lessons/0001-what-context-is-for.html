@@ -1,0 +1,149 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_context_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1 · What context.Context Is For</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">context.Context in Go · Lesson 1 of 7</p>
+  <h1>What context.Context Is For</h1>
+  <p class="subtitle">A small standalone demo today — not <code>burrow</code> yet. Lesson 2 applies this for real.</p>
+
+  <p class="lede"><a href="../../go_concurrency_basics/lessons/0006-select-and-timeouts.html">Go Concurrency Basics' Lesson 6</a> gave <code>duTop</code> a timeout with a package-level constant and a bare <code>select</code> against <code>time.After</code>. That works, but it's a dead end: nothing about it can be passed into another function, canceled early on purpose, or combined with a second, independent reason to stop. <code>context.Context</code> is the standard library's real answer to all three. Today, before touching <code>burrow</code> at all: the smallest possible demo of what a context actually is and does.</p>
+
+  <h2>Before you start</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="scratch-dir">
+      <div class="todo-item-head">
+        <input type="checkbox" id="scratch-dir-cb">
+        <label for="scratch-dir-cb">Create a throwaway scratch module, separate from <code>burrow</code>, for today's demo.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>mkdir ctxdemo
+cd ctxdemo
+go mod init ctxdemo</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: a context you can cancel, and a goroutine watching for it</h2>
+
+  <p>A <code>context.Context</code> is an interface carrying a cancellation signal through your code. <code>context.WithCancel(parent)</code> returns a new context plus a <code>cancel</code> function; calling <code>cancel</code> closes that context's <code>Done()</code> channel. Anything holding the context — even a completely different goroutine — can watch for that with <code>&lt;-ctx.Done()</code>, which blocks until the moment it happens.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-watch-demo">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-watch-demo-cb">
+        <label for="write-watch-demo-cb">Write a <code>watch(ctx context.Context)</code> function that blocks on <code>&lt;-ctx.Done()</code> and then prints <code>ctx.Err()</code>. In <code>main</code>, create a context with <code>context.WithCancel(context.Background())</code>, start <code>watch</code> as a goroutine, print something, sleep 200ms, then call <code>cancel</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+func watch(ctx context.Context) {
+	<-ctx.Done()
+	fmt.Println("watch: context is done, reason:", ctx.Err())
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go watch(ctx)
+
+	fmt.Println("main: doing some work")
+	time.Sleep(200 * time.Millisecond)
+
+	fmt.Println("main: calling cancel")
+	cancel()
+
+	time.Sleep(50 * time.Millisecond) // let the goroutine print before main exits
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The order is always: <code>main: doing some work</code>, then (after the 200ms sleep) <code>main: calling cancel</code>, then <code>watch: context is done, reason: context canceled</code>. The goroutine was genuinely blocked at <code>&lt;-ctx.Done()</code> the entire time — it only unblocks the instant <code>cancel()</code> actually runs, not before.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p><code>context.Background()</code> is the root of every context tree — no deadline, never canceled on its own, carries no values. Every context you create in this course starts from it (directly, or indirectly through a context that itself started from it). Resist the temptation to call <code>context.Background()</code> partway down a call chain just to "get a context" when you don't have one handy — that silently throws away whatever cancellation or deadline the real caller further up already set up. A context should be threaded down from wherever it was first created, not manufactured fresh partway through.</p>
+  </div>
+
+  <h2>New: calling cancel more than once is safe</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="call-cancel-twice">
+      <div class="todo-item-head">
+        <input type="checkbox" id="call-cancel-twice-cb">
+        <label for="call-cancel-twice-cb">Write a second, tiny program: create a context with <code>WithCancel</code>, call <code>cancel()</code> twice in a row, then print <code>ctx.Err()</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"context"
+	"fmt"
+)
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cancel() // calling a second time is a documented no-op, not an error
+	fmt.Println("still fine:", ctx.Err())
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>No panic, no error — it just prints <code>still fine: context canceled</code> and exits 0. The second <code>cancel()</code> call did nothing, which is exactly the documented behavior, not a lucky accident.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Because a second call to <code>cancel</code> is guaranteed safe, <code>defer cancel()</code> immediately after creating a canceling context is this workspace's standing habit from here on — even in a function where the context might already have been canceled some other way (a timeout elapsing first, say) by the time the deferred call actually runs. Skipping the <code>defer</code> isn't merely untidy: until <code>cancel</code> runs, or the context's parent is itself canceled, the resources behind that context (an internal timer, for a timeout-based one) can't be released. That's a real, specific leak, not a style nitpick.</p>
+  </div>
+
+  <p>That's the whole mechanism: a context carries a cancellation signal, <code>Done()</code> is how you watch for it, <code>Err()</code> is how you learn why, and calling <code>cancel</code> is always safe to do more than once. Lesson 2 replaces <code>duTop</code>'s hand-rolled timeout with exactly this, using <code>context.WithTimeout</code> to cancel automatically instead of waiting for you to call <code>cancel</code> yourself.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why <code>Done()</code>'s channel doesn't carry a value, why calling <code>context.Background()</code> partway down a call chain is a problem even though it compiles fine, what happens if you never call <code>cancel</code> at all, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://pkg.go.dev/context">pkg.go.dev, package <code>context</code></a> for the exact contract of every type and function; The Go Blog, <a href="https://go.dev/blog/context">"Go Concurrency Patterns: Context"</a> for the original announcement and worked examples this lesson's demo is modeled on.</p>
+
+  <div class="lesson-nav">
+    <a href="../index.html">Course contents</a>
+    <a href="./0002-withtimeout-on-dutop.html">Next: WithCancel and WithTimeout on duTop →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

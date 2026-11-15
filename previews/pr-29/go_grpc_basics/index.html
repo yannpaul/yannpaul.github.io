@@ -1,0 +1,37 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_grpc_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gRPC and Protobuf in Go</title>
+<link rel="stylesheet" href="./assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Learning · gRPC and Protobuf in Go</p>
+  <h1>gRPC and Protobuf in Go</h1>
+  <p class="subtitle">Learn Protocol Buffers and gRPC by building <code>logline</code>, a small event-log service, from a schema file to a real client and server talking over the network. Same format as <a href="../go_cli_basics/">Go CLI Basics</a> and <a href="../go_concurrency_basics/">Go Concurrency Basics</a> — a checklist, not a script, with code hidden behind collapsed disclosures until you're stuck.</p>
+
+  <p class="lede">Nine lessons, each a self-contained page. Every lesson (from Lesson 2 on) opens by making you redo everything structural from prior lessons before teaching anything new. Only Lessons 1–2 are written so far; the rest are scoped below and will be built out in future sessions. Unlike the two prior Go workspaces, this one doesn't reuse <code>burrow</code> — a client and server talking over a real connection, generated from a schema file, is different enough to deserve its own small project.</p>
+
+  <h2>Lessons</h2>
+  <ol>
+    <li><a href="./lessons/0001-protobuf-basics.html">Protobuf Basics</a> — what a <code>.proto</code> file is, write <code>logline</code>'s first message, generate real Go code from it with <code>protoc</code>, and read what came out</li>
+    <li><a href="./lessons/0002-your-first-unary-rpc.html">Your First Unary RPC</a> — add a <code>service</code> to the <code>.proto</code> file, generate client/server stubs, implement <code>Append</code>, and run a real client against a real server over a real TCP connection</li>
+    <li><strong>Coming up — More Unary RPCs and Idiomatic Errors</strong> — add <code>Get</code>, then replace a bare Go <code>error</code> with gRPC's <code>status</code>/<code>codes</code> package, the idiomatic way to report "not found" versus "something broke"</li>
+    <li><strong>Coming up — Server Streaming</strong> — <code>List</code> and <code>Tail</code>: a single request, many replies streamed back over one call</li>
+    <li><strong>Coming up — Client Streaming</strong> — <code>BatchAppend</code>: many requests streamed up, a single summary reply</li>
+    <li><strong>Coming up — Bidirectional Streaming</strong> — <code>Sync</code>: both sides streaming to each other over the same call, at once</li>
+    <li><strong>Coming up — Deadlines, Cancellation, and context</strong> — propagate a client's deadline into the server's <code>context.Context</code>, and see what happens on both sides when it's exceeded</li>
+    <li><strong>Coming up — Interceptors</strong> — gRPC's equivalent of HTTP middleware: log or authenticate every RPC in one place instead of repeating code in every method</li>
+    <li><strong>Coming up — Capstone: logline, End to End</strong> — pull every RPC shape together into one complete, defensible service and client</li>
+  </ol>
+
+  <div class="lesson-nav">
+    <a href="../">← All topics</a>
+    <a href="./lessons/0001-protobuf-basics.html">Start: Lesson 1 →</a>
+  </div>
+</main>
+</body>
+</html>

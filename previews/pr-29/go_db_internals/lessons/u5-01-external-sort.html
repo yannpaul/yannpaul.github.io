@@ -1,0 +1,324 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 5 · Lesson 1 · Sorting: External Merge Sort</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 5 · Lesson 1</p>
+  <h1>Sorting: External Merge Sort</h1>
+  <p class="subtitle">Sort data that doesn't fit in memory with external merge sort, count its passes and I/Os for any number of pages and buffers, and recognize when a top-N heap or a B+tree makes the sort unnecessary.</p>
+
+  <p class="lede">Units 1 to 4 built the bottom of the DBMS: pages on disk, the buffer pool that caches them, and the indexes that find tuples quickly. Unit 5 moves up to the operators that execute a query, starting with sorting. A disk-oriented DBMS can't assume that a query's intermediate results fit in memory, so its sort has to spill to disk and still read and write pages sequentially. External merge sort does that, and Project 3 asks you to build one. Its I/O formula is also the sort cost inside the sort-merge join of Lesson 3.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 1, Lesson 1: one of Lecture #03's design goals for a disk-oriented DBMS is to maximize sequential access. Why?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Volatile storage such as DRAM supports fast random access to any byte address. The rule is about non-volatile storage.">Sequential access is faster than random access in DRAM, so it keeps the CPU caches warm.</li>
+      <li data-option="b" data-explain="Non-volatile storage is block-addressable: even one byte means loading its whole block. That is true for sequential and random reads alike.">Non-volatile storage can only be read sequentially, from the start of a file.</li>
+      <li data-option="c" data-explain="Lecture #03 says random access on non-volatile storage is almost always slower than sequential access, so the DBMS tries to keep its reads and writes in contiguous blocks.">Random access on non-volatile storage is almost always slower than sequential access.</li>
+      <li data-option="d" data-explain="The lecture makes no major distinction between SSDs and HDDs here: both are better at sequential access.">Only hard disks penalize random access; on SSDs the order of reads doesn't matter.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 2, Lesson 2: what is sequential flooding under an LRU replacement policy?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Each freshly scanned page counts as the most recently used, so a scan pushes out pages that other queries still need, and most scanned pages are never read again.">A sequential scan fills the buffer pool with pages that are read once, evicting pages other queries still need.</li>
+      <li data-option="b" data-explain="Writing dirty pages back is the flushing path. Sequential flooding is about which pages stay resident.">The buffer pool writes dirty pages back to disk in one long sequential burst.</li>
+      <li data-option="c" data-explain="Prefetching reads pages before they are needed; the problem here is what the scan's own pages push out.">The DBMS prefetches so many pages that the disk queue overflows.</li>
+      <li data-option="d" data-explain="LRU keeps the newest pages. The scan's pages are the newest, and the pages that other queries want are the ones LRU evicts.">LRU evicts the scan's pages too early, so the scan has to reread them.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 3, Lesson 4: a non-clustered B+tree index returns matching tuples whose record IDs point all over the table. How does Lecture #08 avoid reading the same table page again and again?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Reclustering changes the table's storage order permanently. The lecture's fix works per scan, without moving the table.">Rebuild the table in index order before each scan.</li>
+      <li data-option="b" data-explain="Following the leaves in key order is exactly what makes the reads jump between pages.">Follow the leaf pages' sibling pointers instead of the record IDs.</li>
+      <li data-option="c" data-explain="The buffer pool may still evict a page between two visits; the lecture's fix removes the repeated visits instead.">Pin every table page the scan touches until the scan ends.</li>
+      <li data-option="d" data-explain="Collecting the record IDs, sorting them by page ID and then fetching each page once turns the jumps into one visit per page (Lecture #08, slide 48).">Collect the matching record IDs, sort them by page ID, and fetch each page once.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>From access methods to operators</h2>
+
+  <p>Lecture #11 opens the course's next layer. The DBMS compiles a SQL query into a <strong>query plan</strong>: a tree of <strong>operators</strong> (the notes allow a DAG), where data flows from the leaves up to the root and the root's output is the query's result. The slide's example joins R and S on <code>id</code>, filters S on <code>value &gt; 100</code>, and projects two columns. Each operator needs an algorithm, and the next lectures supply them: sorting and aggregation in Lecture #11, joins in Lecture #12.</p>
+
+  <p>Slide 5 adds two rules. A disk-oriented DBMS can't assume that a table fits in memory, and for the same reason it can't assume that a query's results fit in memory either. Operator algorithms that need more memory than they have use the buffer pool to <em>spill</em> to disk. And because random disk access is slow, the lecture prefers algorithms that maximize sequential I/O.</p>
+
+
+  <h2>Why a DBMS sorts</h2>
+
+  <p>Under the relational model a table has no order, so a query that asks for one with <code>ORDER BY</code> needs a sort. Slide 6 lists three uses even when the query asks for no order:</p>
+  <ul>
+    <li>Duplicate elimination (<code>DISTINCT</code>) becomes trivial: after sorting, duplicates sit next to each other.</li>
+    <li>Bulk loading sorted tuples into a B+tree is faster. Unit 3, Lesson 5 showed how to build a tree bottom up from sorted keys.</li>
+    <li>Aggregations (<code>GROUP BY</code>) can collect each group from consecutive tuples. The next lesson does this.</li>
+  </ul>
+  <p>The notes add that joins may use sorting too, which is Lesson 3's sort-merge join.</p>
+
+  <p>If the data fits in memory, the DBMS uses a standard in-memory algorithm. Slide 7 names VergeSort for data that is mostly sorted, and otherwise "your favorite" (QuickSort, TimSort, RadixSort). If the data doesn't fit, the DBMS needs an external sort: one that is aware of the cost of reading and writing disk pages.</p>
+
+  <h2>Runs, keys and values</h2>
+
+  <p>A sorting algorithm works on a <strong>run</strong>: a list of key/value pairs that it sorts with a comparison function. The <em>key</em> is the attribute or attributes being compared. The <em>value</em> has two choices:</p>
+  <ul>
+    <li><strong>Early materialization</strong>: the value is the whole tuple, so the sorted output already holds everything later operators need.</li>
+    <li><strong>Late materialization</strong>: the value is a record ID or offset, so the run is smaller, and the DBMS fetches the tuples later.</li>
+  </ul>
+
+  <figure class="slide">
+    <img src="../assets/slides/L11-materialization-p8.png" alt="Two layouts of a sort run. Early materialization: rows of K1 and K2, each followed by a wide box of tuple data. Late materialization: one packed row of K1, a record ID, K2, a record ID, and so on up to Kn, with an arrow labelling one small box as Record ID / Offset." loading="lazy">
+    <figcaption>Early materialization carries the tuple data next to every key; late materialization packs keys with record IDs, so more entries fit on a page but each tuple must be fetched again afterwards (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/11-sorting.pdf#page=8">Lecture #11, slide 8</a>).</figcaption>
+  </figure>
+
+  <p class="sidenote">The same pair of terms comes back in Lesson 3 for what a join emits. Lecture #13 also has a "materialization model" for passing data between operators, which is a different idea.</p>
+
+
+  <h2>Top-N heap sort</h2>
+
+  <p>Some queries don't need the whole table sorted. If a query has an <code>ORDER BY</code> with a <code>LIMIT</code>, the DBMS only needs the top N elements, and it can find them in a single scan. The slide calls this the ideal case for heap sort when the top N fit in memory: scan the data once and keep an in-memory sorted priority queue of the best N seen so far. The notes add that with <code>WITH TIES</code> the priority queue is extended on demand to keep the ties.</p>
+
+  <p>Slide 10 runs <code>SELECT * FROM enrolled ORDER BY sid ASC FETCH FIRST 4 ROWS WITH TIES</code> over the sids 3, 4, 6, 2, 9, 1, 4, 4, 8. The heap grows to [2, 3, 4, 6]. 9 is larger than everything in the full heap, so it is skipped. 1 pushes 6 out, giving [1, 2, 3, 4]. The next two 4s tie with the fourth value, so the heap keeps them: [1, 2, 3, 4, 4, 4]. 8 is skipped, and the scan is done.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L11-topn-heap-p22.png" alt="The query SELECT star FROM enrolled ORDER BY sid ASC FETCH FIRST 4 ROWS WITH TIES, with the last two lines boxed in red. Below it the original data 3 4 6 2 9 1 4 4 8, a red arrow under the final 8 labelled Skip and done, and the sorted heap 1 2 3 4 4 4 followed by two empty slots." loading="lazy">
+    <figcaption>The final state: six rows for "first 4", because two more 4s tie with the fourth value. 9 and 8 never enter the heap (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/11-sorting.pdf#page=22">Lecture #11, slide 10</a>).</figcaption>
+  </figure>
+
+  <p>Unit 0, Lesson 2 noted that DuckDB rejects the standard's <code>FETCH FIRST n ROWS WITH TIES</code>, so you can't run the slide's query there as written. <code>LIMIT 4</code> without ties would return 1, 2, 3, 4.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=LzyKTpeIgts&amp;t=1036s">#11 Sorting &amp; Aggregation Algorithms, "Top-N heap sort" (17:16)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/11-sorting.pdf#page=10">slides 9–10</a>: the agenda, then the heap build above, one value at a time.</p>
+
+  <h2>External merge sort</h2>
+
+  <p><strong>External merge sort</strong> is the divide-and-conquer sort for data larger than memory. It has two phases:</p>
+  <ul>
+    <li>Phase 1, sorting: sort chunks of data that fit in memory, with any in-memory algorithm, and write each sorted chunk back to a file on disk.</li>
+    <li>Phase 2, merging: combine sorted runs into larger sorted runs, until one run holds everything.</li>
+  </ul>
+  <p>The algorithm is described in <strong>passes</strong>. In each pass the DBMS reads every page of the file and writes every page back, so one pass costs 2N I/Os for a file of N pages.</p>
+
+  <h3>The 2-way version</h3>
+
+  <p>The simplest version merges two runs at a time, which is what the "2" in <strong>2-way external merge sort</strong> means. Let the data span N pages, and let the DBMS have B buffer pages for input and output.</p>
+  <ul>
+    <li>Pass 0 reads one page of the table into memory, sorts it into a one-page run, and writes it back. It repeats until every page is a sorted run.</li>
+    <li>Passes 1, 2, 3, … recursively merge pairs of runs into runs twice as long. A merge reads one page from each of the two input runs, takes the smaller front value each time, and writes the result into a third buffer page. When the output page fills up, it goes to disk and an empty page takes its place.</li>
+  </ul>
+  <p>So the merge needs at least 3 buffer pages: 2 for input and 1 for output. Pass 0 produces N runs, and each later pass halves the number of runs, so</p>
+  <p>passes = 1 + ⌈log<sub>2</sub> N⌉ and total I/O = 2N × passes.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L11-two-way-merge-p33.png" alt="Left: In each pass, the DBMS reads and writes every page in the file. Number of passes = 1 + ceiling of log base 2 of N. Total I/O cost = 2N times number of passes. Right: seven two-key pages 3|4, 6|2, 9|4, 8|7, 5|6, 3|1, 9|1. Pass 0 sorts each page into a 1-page run. Pass 1 merges pairs into 2-page runs, leaving 1|9 alone. Pass 2 makes 4-page runs. Pass 3 produces one 8-page run, 1|1 2|3 3|4 4|5 6|6 7|8 9|9." loading="lazy">
+    <figcaption>Seven pages need 1 + ⌈log<sub>2</sub> 7⌉ = 4 passes, so the sort costs 2 × 7 × 4 = 56 I/Os. The odd run out (1|9 in pass 1) is carried into the next pass unchanged (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/11-sorting.pdf#page=33">Lecture #11, slide 14</a>).</figcaption>
+  </figure>
+
+  <p>Slide 15 points out the weakness. This algorithm needs only three buffer pages, and even when more buffer space is available (B &gt; 3) it doesn't use it effectively, because the worker must block on disk I/O. Its pass count depends only on N.</p>
+
+  <h3>The general version</h3>
+
+  <p><strong>General (K-way) external merge sort</strong> puts all B buffers to work:</p>
+  <ul>
+    <li>Pass 0 reads B pages at a time, sorts them, and writes them back as one run. It produces ⌈N / B⌉ sorted runs of B pages each (the last one may be shorter).</li>
+    <li>Passes 1, 2, 3, … merge B − 1 runs at a time. The notes describe the buffers: B − 1 pages step through the input runs, and one page holds the combined output.</li>
+  </ul>
+  <p>passes = 1 + ⌈log<sub>B−1</sub> ⌈N / B⌉⌉ and total I/O = 2N × passes.</p>
+
+  <p>The two places where B appears are easy to mix up. Pass 0 divides by B, because all B pages hold data being sorted. The merges use base B − 1, because one page is reserved for output.</p>
+
+  <p>Slide 17 works the formula for N = 108 pages and B = 5 buffers:</p>
+  <ul>
+    <li>Pass 0: ⌈108 / 5⌉ = 22 sorted runs of 5 pages each; the last run has only 3.</li>
+    <li>Pass 1: ⌈22 / 4⌉ = 6 sorted runs of 20 pages each; the last has only 8.</li>
+    <li>Pass 2: ⌈6 / 4⌉ = 2 sorted runs, of 80 and 28 pages.</li>
+    <li>Pass 3: one sorted file of 108 pages.</li>
+  </ul>
+  <p>The formula agrees: 1 + ⌈log<sub>4</sub> 22⌉ = 1 + ⌈2.229…⌉ = 4 passes, so the sort costs 2 × 108 × 4 = 864 I/Os. The 2-way version would need 1 + ⌈log<sub>2</sub> 108⌉ = 8 passes for the same file.</p>
+
+  <p>The formula also gives a quick limit. Pass 0 makes runs of B pages, and one merge pass can combine B − 1 of them, so two passes sort any file of up to B(B − 1) pages. With B = 100 that is 9,900 pages; at 9,901 pages a third pass is needed.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=LzyKTpeIgts&amp;t=1457s">#11 Sorting &amp; Aggregation Algorithms, "External merge sort" (24:17)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/11-sorting.pdf#page=23">slides 11–17</a>: the two phases, the 2-way build pass by pass, the general formula and the N = 108 example.</p>
+
+  <h2>Making the sort faster</h2>
+
+  <p>Lecture #11 has one optimization for the time a sort spends waiting on I/O and three for the time it spends comparing keys.</p>
+
+  <p><strong>Double buffering</strong> prefetches the next run in the background into a second buffer while the current run is being processed, so CPU work and I/O overlap. The cost is that it halves the buffers available to the sort, which can add passes. The notes add that it needs multiple threads, since the prefetch must run while the computation for the current run is happening.</p>
+
+  <p>Comparisons are the other cost. Slide 19 lists three ways to make them cheaper:</p>
+  <ul>
+    <li><strong>Code specialization</strong>: instead of passing the sort a comparison function as a pointer, create a hard-coded version of the sort for one key type. The notes give C++ template specialization as an example.</li>
+    <li><strong>Suffix truncation</strong>: for long <code>VARCHAR</code> keys, first compare a binary prefix, and fall back to the slower full comparison only when the prefixes are equal. The name refers to ignoring each key's suffix at first.</li>
+    <li><strong>Key normalization</strong>: transform variable-length attributes into a single encoded, padded string that preserves the sort order, so every comparison is a plain byte comparison.</li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Go's standard library shows both sides of code specialization. <code>slices.SortFunc(s, cmp)</code> calls your comparison function for every comparison, like the function-pointer sort on the slide. <code>slices.Sort(s)</code> accepts only ordered element types such as <code>int</code> or <code>string</code>, and compares them with <code>cmp.Less</code>, which uses the <code>&lt;</code> operator; you pass no function at all. Key normalization has a Go shape too: once keys are encoded as order-preserving byte strings, <code>bytes.Compare</code> sorts them, whatever the original column types were.</p>
+  </div>
+
+
+  <h2>Sorting with a B+tree instead</h2>
+
+  <p>If the table already has a B+tree index on the sort attributes, the DBMS can produce the sorted order by traversing the leaf pages, and the notes add that some DBMSs support prefix key scans for this. Whether that beats external merge sort depends on the index:</p>
+  <ul>
+    <li>With a <strong>clustered</strong> B+tree, the table itself is stored in index order. The DBMS goes to the left-most leaf and retrieves the tuples from every leaf page in turn. Slide 21 calls this always better than external sorting: there is no computational cost, and all disk access is sequential.</li>
+    <li>With an <strong>unclustered</strong> B+tree, the leaves are in key order but the tuples are not, so the DBMS chases each pointer to the page that holds its tuple. In general that is one I/O per data record. Slide 22 calls it almost always a bad idea, except for top-N queries where N is small relative to the table.</li>
+  </ul>
+
+  <figure class="slide">
+    <img src="../assets/slides/L11-unclustered-index-p47.png" alt="A B+tree index drawn as a triangle with a row of leaf entries at its base. Red arrows from the leaf entries cross each other on their way down to four tuple pages numbered 101, 102, 103 and 104." loading="lazy">
+    <figcaption>In an unclustered index, consecutive leaf entries point to different pages, so reading in key order jumps between pages 101 to 104 and may read each one many times (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/11-sorting.pdf#page=47">Lecture #11, slide 22</a>).</figcaption>
+  </figure>
+
+  <p>Unit 3's fix for non-clustered scans, sorting the record IDs by page first, fetches each page once but returns the tuples in page order. A sort needs them in key order, so that fix doesn't help here.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=LzyKTpeIgts&amp;t=2476s">#11 Sorting &amp; Aggregation Algorithms, "Index-based sorting" (41:16)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/11-sorting.pdf#page=45">slides 20–22</a>: the clustered and unclustered cases.</p>
+
+  <h2>What Project 3 builds</h2>
+
+  <p>Project 3 implements a set of query operators: an external merge sort, a hash aggregation, and nested-loop, index nested-loop and hash joins. The sort in this lesson maps onto it as follows, according to BusTub at d49b823 and the Fall 2025 writeup:</p>
+  <ul>
+    <li>BusTub uses a sort plan node for every <code>ORDER BY</code>, except when the sort attributes match the keys of an index. Then the optimizer reads the index in order instead (slide 20's idea). BusTub's indexes are not clustered, so this is slide 22's case, and the rule applies it without weighing the cost.</li>
+    <li>The writeup assumes that the table being sorted does <em>not</em> fit in memory. The sort must store its intermediate runs in temporary pages and merge them recursively. An in-memory sort is allowed only for the tuples on one sort page, and pages from a finished round must be deleted.</li>
+    <li>BusTub's sort executor is a template over the merge's fan-in, but the writeup says it will only test two-way external merge sort this semester. That is the 3-buffer algorithm, so your sort will do 1 + ⌈log<sub>2</sub> N⌉ passes however large the buffer pool is.</li>
+    <li>Each sort entry pairs a sort key with the whole tuple, which is early materialization.</li>
+    <li>BusTub also has a top-N executor, and its optimizer has an unfinished rule, left for students to write, that would turn a sort followed by a limit into it.</li>
+  </ul>
+
+  <h2>Work it out</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u5l1-twoway-vs-general">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u5l1-twoway-vs-general-cb">
+        <label for="u5l1-twoway-vs-general-cb">Sort a 500-page table with B = 100 buffer pages. Count the passes and I/Os for the general sort and for the 2-way sort.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>How many runs does pass 0 produce in each version? How many runs can one merge pass combine?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>General: pass 0 makes ⌈N / B⌉ runs, and each merge pass divides the run count by B − 1, rounding up, until one run is left. 2-way: pass 0 makes N one-page runs, and each pass halves the count. Multiply 2N by the number of passes.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>General: ⌈500 / 100⌉ = 5 runs, one 99-way merge finishes, so <strong>2 passes</strong> and 2 × 500 × 2 = <strong>2,000 I/Os</strong>. 2-way: 1 + ⌈log<sub>2</sub> 500⌉ = 1 + 9 = <strong>10 passes</strong> and 2 × 500 × 10 = <strong>10,000 I/Os</strong>. The extra 97 buffers save 8,000 I/Os.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u5l1-two-pass-limit">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u5l1-two-pass-limit-cb">
+        <label for="u5l1-two-pass-limit-cb">Find the largest file that the general sort handles in two passes with B = 5, and check your answer with the pass formula at that size and one page more.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Two passes means pass 0 and a single merge pass. How many runs can that merge take, and how long is each run?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>One merge combines B − 1 runs of B pages each, so the limit is B(B − 1). Then evaluate 1 + ⌈log<sub>4</sub> ⌈N / 5⌉⌉ at the limit and one above it.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>5 × 4 = <strong>20 pages</strong>. At N = 20, pass 0 makes 4 runs and 1 + ⌈log<sub>4</sub> 4⌉ = 2. At N = 21 it makes 5 runs, and 1 + ⌈log<sub>4</sub> 5⌉ = 3.</p></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="callout"><!-- homework-box -->
+    <p class="callout-label">The homework behind these questions</p>
+    <p>The questions marked HW4 come from CMU's Homework #4: <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw4-clean.pdf#page=2">Question 1</a>, with the original figures. Work each one out on paper first, then click the option you got. The quiz tells you at once whether it matches CMU's official answer, and explains why. To compare your working step by step, open the official solutions for <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw4-sols.pdf#page=2">Question 1</a>.</p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <p>The first two questions come from HW4's Question 1. The buffer has B = 100 pages; table X spans M = 1,000 pages and table Z spans O = 3,000 pages. Before a sort-merge join (Lesson 3) can merge them on attribute a, it sorts each one with external merge sort.</p>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">HW4 Q1(d)i: what is the cost of sorting the tuples in X on attribute a?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="2M counts only pass 0. After it, X is 10 sorted runs, not one sorted file.">2,000</li>
+      <li data-option="b" data-explain="Pass 0 makes ⌈1,000 / 100⌉ = 10 runs, and one 99-way merge combines them: 1 + ⌈log₉₉ 10⌉ = 2 passes. 2M × 2 = 4,000. This matches the official solution.">4,000</li>
+      <li data-option="c" data-explain="That is three passes. A third pass is needed only above B(B − 1) = 9,900 pages.">6,000</li>
+      <li data-option="d" data-explain="M reads the table once and writes nothing back. Every pass reads and writes every page.">1,000</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">HW4 Q1(d)ii: what is the cost of sorting the tuples in Z on attribute a?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="2O is pass 0 alone, which leaves 30 sorted runs.">6,000</li>
+      <li data-option="b" data-explain="That is three passes. Pass 0 makes 30 runs, and 30 ≤ 99, so a single merge pass finishes.">18,000</li>
+      <li data-option="c" data-explain="That is four passes. 3,000 pages is well under the 2-pass limit of 9,900 pages.">24,000</li>
+      <li data-option="d" data-explain="⌈3,000 / 100⌉ = 30 runs, and 1 + ⌈log₉₉ 30⌉ = 2 passes, so 2 × 3,000 × 2 = 12,000. This matches the official solution.">12,000</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">A file of N = 1,000,000 pages is sorted with B = 100 buffer pages by the general external merge sort. How many passes and I/Os does it take?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Pass 0 makes 10,000 runs. The merges take them to 102, then 2, then 1, so 1 + ⌈log₉₉ 10,000⌉ = 1 + 3 = 4 passes, and 2N × 4 = 8,000,000 I/Os.">4 passes, 8,000,000 I/Os</li>
+      <li data-option="b" data-explain="Two merge passes take 10,000 runs only down to 2, so a third merge pass is needed.">3 passes, 6,000,000 I/Os</li>
+      <li data-option="c" data-explain="1 + ⌈log₂ 1,000,000⌉ = 21 is the 2-way sort, which uses only 3 of the 100 buffers.">21 passes, 42,000,000 I/Os</li>
+      <li data-option="d" data-explain="Two passes cover only up to B(B − 1) = 9,900 pages.">2 passes, 4,000,000 I/Os</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Top-N heap sort runs <code>ORDER BY sid ASC FETCH FIRST 3 ROWS WITH TIES</code> over the sids 5, 2, 7, 2, 9, 1, 5, 2, 3. Which rows does it return?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="This ignores WITH TIES. The third value is 2, and the third 2 ties with it, so it stays.">1, 2, 2</li>
+      <li data-option="b" data-explain="3 is larger than the third-best value, 2, so the full heap skips it.">1, 2, 2, 2, 3</li>
+      <li data-option="c" data-explain="After 1 arrives the heap holds 1, 2, 2, and the third 2 ties with the third value, so the heap grows to 1, 2, 2, 2. The second 5 and the final 3 are skipped.">1, 2, 2, 2</li>
+      <li data-option="d" data-explain="5 was in the heap early on, but 1 pushed it out, and the second 5 is worse than the third-best value when it arrives.">1, 2, 2, 2, 5, 5</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A query needs a large table in sorted order, and the table has a B+tree on the sort key. When is traversing the B+tree's leaves better than running external merge sort?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Slide 22: following an unclustered index is almost always a bad idea, with about one I/O per data record.">Always, whether or not the index is clustered.</li>
+      <li data-option="b" data-explain="Slide 21: a clustered traversal is always better, with no computational cost and only sequential I/O. Slide 22 allows the unclustered case only for top-N queries with a small N.">When the index is clustered; an unclustered one pays off only for top-N queries with a small N.</li>
+      <li data-option="c" data-explain="This reverses the two cases: the clustered index is the one whose tuples are stored in key order.">When the index is unclustered, because its leaves are smaller than the table's pages.</li>
+      <li data-option="d" data-explain="B+tree leaves hold their keys in sorted order and are linked to their siblings, which is why a leaf scan returns keys in order.">Never, because a B+tree's leaves aren't sorted across pages.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why pass 0 divides by B but the merges use base B − 1, why the 2-way sort can't use extra buffers, or why WITH TIES can return more than N rows. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 Lecture #11 <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/11-sorting.pdf">slides</a> 3–22 and <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/11-sorting.pdf">notes</a> (sections 1–2); Homework #4 Question 1(d) and its <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw4-sols.pdf">official solutions</a>; the Project #3 writeup (external merge sort and optimizer sections); BusTub <code>src/include/execution/executors/external_merge_sort_executor.h</code> and <code>src/include/execution/execution_common.h</code> at commit d49b823; the Go 1.24 source of <code>slices</code> and the documentation for <code>bytes</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u4-10-p2-stretch-leaderboard.html">← P2 Stretch: Leaderboard Benchmark</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u5-02-aggregation.html">Next: Aggregation: Sorting vs. Hashing →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

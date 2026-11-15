@@ -1,0 +1,462 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 6 · Lesson 4 · P3.3 Index Scan and the SeqScan→IndexScan Rule</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 6 · Lesson 4</p>
+  <h1>P3.3 Index Scan and the SeqScan→IndexScan Rule</h1>
+  <p class="subtitle">Write <code>IndexScanExecutor</code>, which reads a table through your B+tree by point lookups or in key order, and the optimizer rule <code>SeqScanAsIndexScan</code>, which turns a sequential scan with an equality predicate on an indexed column into an index scan, without leaving a leaf latched.</p>
+
+  <p class="lede">So far every query reads the whole table. This stage is the first where your Project 2 tree answers SQL: <code>WHERE v1 = 2</code> becomes one lookup in the index instead of a scan of every page, and <code>ORDER BY v1</code> walks the leaves in key order. It takes two pieces: the executor does the reading, and an optimizer rule decides when to use it. The rule is the first plan rewrite you write yourself, after the pre-built ones you have been reading in EXPLAIN output since Lesson 1.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 4, Lesson 8: a goroutine stops an index scan after the first entry and forgets <code>Close</code>. The same goroutine then calls <code>tree.Remove</code> on a key in that first leaf. What happens?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Go has no destructors, and nothing drops a guard except Drop.">The garbage collector drops the iterator's guard, and <code>Remove</code> proceeds.</li>
+      <li data-option="b" data-explain="Latches don't upgrade: a read latch never becomes a write latch.">Remove upgrades the iterator's read latch to a write latch and proceeds.</li>
+      <li data-option="c" data-explain="The iterator still holds a read latch on the leaf, and Remove needs a write latch on it. The goroutine waits for itself and hangs.">Remove waits forever for a write latch that the goroutine itself holds in read mode.</li>
+      <li data-option="d" data-explain="Guards don't detect their owner; WritePage just waits for the latch.">Remove panics with a message that the leaf is already latched.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Unit 5, Lesson 5: a table of 100 students has an index on <code>age</code> and an index on <code>dept</code>. The query has <code>WHERE age &lt; 30 AND dept = 'CS' AND country = 'US'</code>; 99 students are under 30 and 2 are in CS. Which index should the DBMS use?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The age index would fetch 99 of the 100 tuples, barely better than a sequential scan.">The age index, because range predicates suit a B+tree best.</li>
+      <li data-option="b" data-explain="The dept index finds 2 tuples; the other two predicates are then checked on those 2.">The dept index, then check the age and country predicates on the 2 tuples it returns.</li>
+      <li data-option="c" data-explain="There is no index on country, and nothing says one is needed.">Neither: only an index on country would help.</li>
+      <li data-option="d" data-explain="Either index alone already narrows the work; with 99 under 30, the dept index alone does nearly all of it. (A multi-index scan is possible, but the slide's point is the choice of one index.)">Both, always, intersecting their record IDs.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 5, Lesson 7: the Project 3 writeup says most optimizer rules build plans "bottom-up". What does that mean for a rule's code?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is System R's bottom-up plan search, a different idea; BusTub's rules don't enumerate join orders.">It enumerates join orders from single tables upward, as System R does.</li>
+      <li data-option="b" data-explain="Rules rewrite the plan tree, not the order in which executors run.">It reorders the executors so that the leaves run first.</li>
+      <li data-option="c" data-explain="A rule visits every node of the tree, inner nodes included.">It only ever looks at the leaves of the plan tree.</li>
+      <li data-option="d" data-explain="Before matching its pattern at a node, the rule applies itself to that node's children, so the whole tree below is already rewritten.">Before checking whether a node matches, it applies itself recursively to the node's children.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>What stage 5 covers</h2>
+
+  <p>An <code>IndexScanPlanNode</code> has four fields: <code>TableOID</code>, <code>IndexOID</code>, <code>FilterPredicate</code> (nil if none) and <code>PredKeys</code>, a list of constant expressions. Its output schema is the table's. The writeup asks the executor to support two kinds of query:</p>
+  <ul>
+    <li><strong>Point lookups</strong>, <code>SELECT … FROM t WHERE &lt;index column&gt; = &lt;value&gt;</code>, including "several point lookups on the same index". The plan has <code>PredKeys</code>: look each key up in the index and return the matching tuple. Your rule creates these plans.</li>
+    <li><strong>Ordered scans</strong>, <code>SELECT … FROM t ORDER BY &lt;index column&gt;</code>, ascending only. The plan has no <code>PredKeys</code>: walk the whole index in key order. The pre-built rule <code>OrderByAsIndexScan</code> creates these plans when a Sort sits directly on a SeqScan and its keys are an index's columns.</li>
+  </ul>
+
+  <p>Here is what both look like once the stage is done, on CMU's <code>p3.05</code> table with indexes <code>t1v1</code> (OID 0) and <code>t1v2</code> (OID 1):</p>
+
+<pre><code>bustub&gt; EXPLAIN (o) SELECT * FROM t1 ORDER BY v2;
+=== OPTIMIZER ===
+IndexScan { index_oid=1 }
+
+bustub&gt; SELECT * FROM t1 ORDER BY v2;
++-------+-------+-------+
+| t1.v1 | t1.v2 | t1.v3 |
++-------+-------+-------+
+| 5     | 10    | 445   |
+| 4     | 20    | 445   |
+| 3     | 30    | 645   |
+| 2     | 40    | 721   |
+| 1     | 50    | 645   |
++-------+-------+-------+
+bustub&gt; EXPLAIN (o) SELECT * FROM t1 WHERE 4 = v1 OR v1 = 7;
+=== OPTIMIZER ===
+IndexScan { index_oid=0, filter=((4=#0.0)or(#0.0=7)) }
+
+bustub&gt; SELECT * FROM t1 WHERE 4 = v1 OR v1 = 7;
++-------+-------+-------+
+| t1.v1 | t1.v2 | t1.v3 |
++-------+-------+-------+
+| 4     | 20    | 445   |
++-------+-------+-------+</code></pre>
+
+  <p>The plan text prints the filter but not the <code>PredKeys</code>; for the second query they are the constants 4 and 7. There is no row with <code>v1 = 7</code>, so that lookup finds nothing. The writeup limits the project to indexes on "a single, unique integer column": no NULL keys, no duplicate keys.</p>
+
+  <p>Stage 5 also runs your Project 2 tree for real, through every INSERT, UPDATE and DELETE of <code>p3.05</code>. If a failure shows frames inside <code>btree</code>, or an <code>.slt</code> record times out, run <code>go test -race ./btree/</code> before you look at your executor: it may be a Project 2 bug that the Project 2 tests didn't reach.</p>
+
+  <h2>The index adapter</h2>
+
+  <p>The catalog's <code>GetIndexByOID(plan.IndexOID)</code> returns an <code>*catalog.IndexInfo</code> whose <code>Index</code> field is an <code>index.Index</code> interface. The writeup says the object is always a <code>BPlusTreeIndexForTwoIntegerColumn</code> and that you can cast it; in Go that cast is a type assertion, <code>info.Index.(*index.BPlusTreeIndexForTwoIntegerColumn)</code>, with the <code>ok</code> form so that a wrong type becomes an error. The adapter is pre-built and wraps your tree:</p>
+
+  <table>
+    <tr><th>Method</th><th>Does</th></tr>
+    <tr><td><code>ScanKey(key table.Tuple) []common.RID</code></td><td>the RID stored under the key, as a slice of zero or one (your <code>GetValue</code>)</td></tr>
+    <tr><td><code>BeginIterator() *btree.IndexIterator</code></td><td>an iterator at the smallest key (your <code>Begin</code>)</td></tr>
+    <tr><td><code>BeginIteratorAt(key btree.GenericKey)</code></td><td>an iterator at the first key ≥ <code>key</code> (your <code>BeginAt</code>)</td></tr>
+    <tr><td><code>Key(key table.Tuple) btree.GenericKey</code></td><td>the tree's key bytes for a key tuple</td></tr>
+    <tr><td><code>KeySchema()</code>, <code>KeyAttrs()</code></td><td>the key's columns, and which table columns they come from</td></tr>
+  </table>
+
+  <p>A tree key is 8 bytes (<code>index.TwoIntegerSizeBTree</code>): the key tuple's bytes, one or two little-endian INTEGERs, padded with zeros. <code>GenericComparator</code> compares the INTEGER columns as signed int32s, so negative keys come first, and <code>p3.05</code> relies on that with keys −10 and −20. Your iterator's <code>Entry()</code> returns the key and the RID; <code>IsEnd</code>, <code>Next</code> and <code>Close</code> are the methods you wrote in Unit 4, Lesson 8.</p>
+
+  <p>To look a key up, you need it as a key tuple. Each of the plan's <code>PredKeys</code> is a constant expression, so it evaluates without a tuple: <code>keyExpr.Evaluate(nil, types.NewSchema(nil))</code> returns its <code>types.Value</code>, as the Values executor does with its rows. <code>table.NewTuple([]types.Value{v}, info.KeySchema)</code> then lays the value out in the key's schema, and <code>ScanKey</code> takes it from there.</p>
+
+  <p>The index holds RIDs, not tuples. For each RID, fetch the tuple with <code>tableInfo.Table.GetTuple(rid)</code>, which returns its meta and a copy that carries the RID. Skip it if its meta says deleted, as the writeup asks ("do not emit tuples that are deleted"), and skip it if a <code>FilterPredicate</code> is present and isn't true for it, with NULL as false, exactly as in your sequential scan. <code>TestIndexScanSkipsDeleted</code> marks tuples deleted in the heap without touching the index, so the meta check is the only thing that hides them.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L08-index-scan-page-sorting-p144.png" alt="Text on the left: Retrieving tuples in the order they appear in a non-clustered index is inefficient due to redundant reads. A better approach is to find all the tuples that the query needs and then sort them based on their page ID. The DBMS retrieves each page once. On the right, a Scan Direction arrow runs over an index whose leaf entries point with many crossing arrows to table pages 101, 102, 103 and 104. Below, an unsorted list of page IDs in index order, such as 102, 103, 104, 104, 102, turns into a sorted list 101, 101, 102, 102, 102, and so on, with one marker per distinct page." loading="lazy">
+    <figcaption>BusTub's indexes are non-clustered, so each RID an index scan returns can be on any heap page, and the scan fetches one page per tuple. The slide's fix, sorting the RIDs by page first, would break an ordered scan's key order, so BusTub's executor doesn't do it; the buffer pool absorbs the repeated reads (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/08-indexes1.pdf#page=144">Lecture #08, slide 48</a>).</figcaption>
+  </figure>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=E-UUd6cB57w&amp;t=3064s">#13 Query Execution I, "Index scan strategies" (51:04)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/13-queryexecution1.pdf#page=55">slides 27–28</a>: what decides which index a query uses, and the students example from the warm-up.</p>
+
+  <h2>A repeated key returns one row</h2>
+
+  <p><code>WHERE v1 = 2 OR v1 = 2</code> is a legal query, and the rule turns it into point lookups with <code>PredKeys</code> 2 and 2. Looking each key up and returning what you find gives the row twice; SQL's answer is one row. The writeup's hint is to "think about how to handle queries of the form <code>WHERE v1 = 1 OR v1 = 1</code>", pointing at the aggregation's hash keys. The simplest fix is to remember which RIDs you have already collected, in a <code>map[common.RID]bool</code> (a <code>common.RID</code> is a comparable struct, so it works as a map key), and skip repeats. CMU's <code>.slt</code> files never repeat a key, so only the unit test checks this:</p>
+
+<pre><code>--- FAIL: TestIndexScanRepeatedKey (0.00s)
+    index_scan_executor_test.go:65: rows with a = 3 or a = 3:
+         got  ["3, 30" "3, 30"]
+         want ["3, 30"]</code></pre>
+
+  <p>Point lookups may come back in any order; the tests compare them as sets, and the <code>.slt</code> records use <code>rowsort</code>. An ordered scan must return rows in key order.</p>
+
+  <h2>Pins, latches and closing the iterator</h2>
+
+  <p>Your Project 2 iterator holds a read guard on its current leaf: a pin, and a read latch. If the index scan keeps that iterator open between its <code>Next</code> calls, the leaf stays latched while the executors above it run. The executor above can be an insert into the same table, which writes into the same index:</p>
+
+<pre><code>bustub&gt; EXPLAIN (o) INSERT INTO t1 SELECT v1 + 1000, v2 FROM (SELECT * FROM t1 ORDER BY v1);
+=== OPTIMIZER ===
+Insert { table_oid=32 }
+  Projection { exprs=["(#0.0+1000)", "#0.1"] }
+    IndexScan { index_oid=0 }</code></pre>
+
+  <p>The insert gets a batch, then calls <code>InsertEntry</code>, which needs a write latch on the leaf where the new key goes. With 100 small keys there is only one leaf, and the scan's iterator holds it in read mode. Everything runs on one goroutine, so the insert waits for itself, the situation of the warm-up's first question. Here it is as an <code>.slt</code> file run against an index scan that keeps its iterator open (the timeout lowered to 10 seconds with <code>-slt.timeout=10s</code>):</p>
+
+<pre><code>--- FAIL: TestSQLLogicFile (10.03s)
+    stages_test.go:98: lazy.slt:12: did not finish within 10s (a deadlock or an endless loop?); the rest of the file is skipped
+        --- SQL
+        insert into t1 select v1 + 1000, v2 from (select * from t1 order by v1);</code></pre>
+
+  <p>Even without the latch, an open iterator would see the keys 1000 and up that the insert adds ahead of it, which is the Halloween problem from Lesson 3 in index form. Both go away if the executor reads the index completely in <code>Init</code>: collect every RID in order, close the iterator (<code>defer it.Close()</code> right after creating it), and serve batches from the slice of RIDs in <code>Next</code>. The heap's iterator in Lesson 2 needed no such care, because it holds no guard between calls. <code>TestIndexScanReleasesIterator</code> checks the result: after the scan returns false, no page is pinned, and an <code>InsertEntry</code> into the index finishes within its time limit. Point lookups through <code>ScanKey</code> hold nothing after they return.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>In BusTub the iterator's destructor releases the leaf when the iterator goes out of scope, so a C++ executor that stores an iterator member releases it whenever the member is replaced or the executor is destroyed. Go has neither destructors nor a guarantee about when an unreachable iterator is collected, so every iterator you open needs a <code>Close</code> on every path: at the end of the scan, on a re-<code>Init</code> in the middle of a scan, and when a parent stops early (a LIMIT, in stage 10). Collecting the RIDs in <code>Init</code> with a <code>defer it.Close()</code> covers all three with one line.</p>
+  </div>
+
+  <h2>The rule: SeqScanAsIndexScan</h2>
+
+  <p>By the time your rule runs, <code>MergeFilterScan</code> has moved the WHERE clause into the SeqScan's <code>FilterPredicate</code>; both rule lists call <code>OptimizeSeqScanAsIndexScan</code> last, right after it. The rule looks at that predicate, and if it selects rows by equality on a column with an index, it replaces the scan. The writeup lists the shapes it must handle:</p>
+  <ul>
+    <li>one equality on the indexed column: <code>v1 = 1</code>;</li>
+    <li>the same, flipped: <code>1 = v1</code>;</li>
+    <li>several point lookups on the same index, joined by OR: <code>v1 = 1 OR v1 = 4</code>, in any nesting and any mix of sides.</li>
+  </ul>
+  <p>Everything else stays a SeqScan. The writeup names <code>v1 = 1 AND v2 = 2</code> ("you do not need to split the predicates"), and the rule tests add ranges (<code>&gt;</code>, <code>&gt;=</code>, <code>&lt;</code>, <code>&lt;=</code>, <code>!=</code>), a column compared with a column (<code>v1 = v2</code>), an OR that mixes an equality with a range (<code>v1 = 1 OR v1 &gt; 4</code>), an OR across two columns (<code>v1 = 1 OR v2 = 4</code>, even when both columns have indexes), a column without an index, and a scan without a predicate. From the shell, with indexes on both <code>v1</code> and <code>v2</code>:</p>
+
+<pre><code>bustub&gt; EXPLAIN (o) SELECT * FROM t1 WHERE v1 = 5 AND v2 = 10;
+=== OPTIMIZER ===
+SeqScan { table=t1, filter=((#0.0=5)and(#0.1=10)) }
+
+bustub&gt; EXPLAIN (o) SELECT * FROM t1 WHERE v1 = 8 OR v2 = 30;
+=== OPTIMIZER ===
+SeqScan { table=t1, filter=((#0.0=8)or(#0.1=30)) }
+
+bustub&gt; EXPLAIN (o) SELECT * FROM t1 WHERE v1 &gt; 3;
+=== OPTIMIZER ===
+SeqScan { table=t1, filter=(#0.0&gt;3) }</code></pre>
+
+  <p>When the predicate matches, the rule needs the column's index. The pre-built helper <code>o.MatchIndex(scan.TableName, colIdx)</code> returns the OID of an index whose only key column is table column <code>colIdx</code>, with its name and an <code>ok</code> flag. The new node is <code>plans.NewIndexScanPlanNode(scan.OutputSchema(), scan.TableOID, indexOID, scan.FilterPredicate, keys)</code>: the scan's schema, the original predicate kept as the filter, and the constant expressions as <code>PredKeys</code>, in any order and duplicates allowed (the executor removes repeated rows).</p>
+
+  <p>The predicate is an expression tree, and three node types matter. An <code>*expressions.LogicExpression</code> has a <code>LogicType</code> (<code>expressions.And</code> or <code>expressions.Or</code>) and two children. An <code>*expressions.ComparisonExpression</code> has a <code>CompType</code> (<code>expressions.Equal</code>, <code>expressions.LessThan</code>, …) and two children, read with <code>ChildAt(0)</code> and <code>ChildAt(1)</code>. The leaves are <code>*expressions.ColumnValueExpression</code> (<code>ColIdx()</code> is the column) and <code>*expressions.ConstantValueExpression</code>. A type switch over these, recursing into OR nodes, covers every shape; any node it doesn't expect means "leave the scan alone".</p>
+
+  <h3>How rules recurse</h3>
+
+  <p>A rule receives the root of the plan. The SeqScan can be anywhere below it: under a Projection (<code>SELECT v3 FROM t1 WHERE v2 = 40</code>), under an Update or a Delete (which is how <code>p3.05</code>'s <code>update … where v1 = 2</code> gets an index), or as either child of a join. So every rule starts the same way, as the pre-built ones in <code>optimizer/</code> do: apply itself to the children, rebuild the node over the results, and only then look at the node. The package doc in <code>optimizer/doc.go</code> points to two unexported helpers in <code>optimizer_internal.go</code>. <code>optimizeChildren(plan, rule)</code> does the first step: it applies <code>rule</code> to each child and returns <code>plan.CloneWithChildren</code> of the results. <code>withOutputSchema(plan, schema)</code> copies a node with another output schema; this rule doesn't need it, since the IndexScan keeps the scan's schema, but the leaderboard's column pruning will. <code>merge_filter_scan.go</code> is the closest example: about twenty lines, and your rule has the same skeleton.</p>
+
+<pre><code>bustub&gt; EXPLAIN (o) SELECT v3 FROM t1 WHERE v2 = 40;
+=== OPTIMIZER ===
+Projection { exprs=["#0.2"] }
+  IndexScan { index_oid=1, filter=(#0.1=40) }
+
+bustub&gt; EXPLAIN (o) UPDATE t1 SET v3 = 0 WHERE v1 = 3;
+=== OPTIMIZER ===
+Update { table_oid=32, target_exprs=["#0.0", "#0.1", "0"] }
+  IndexScan { index_oid=0, filter=(#0.0=3) }</code></pre>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=b53huOGcsZ8&amp;t=2339s">#15 Query Planning &amp; Optimization I, "Search algorithms and types" (38:59)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/15-optimization1.pdf#page=36">slides 24–33</a>: heuristic rewrites, access paths and sargable predicates; <code>v1 = 1</code> is a sargable predicate, <code>v1 = 1 OR v2 = 4</code> on one index is not.</p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Table <code>t1(v1, v2, v3)</code> has single-column indexes on <code>v1</code> and on <code>v2</code>. Which WHERE clause does a correct <code>SeqScanAsIndexScan</code> turn into an IndexScan?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="An AND stays a SeqScan; the writeup says you don't need to split predicates.">v1 = 5 AND v2 = 10</li>
+      <li data-option="b" data-explain="The equalities are on two columns. One index can't answer both, so the rule leaves it, even though each column has an index.">v1 = 8 OR v2 = 30</li>
+      <li data-option="c" data-explain="A range is not a point lookup; the rule only handles equalities.">v1 &gt; 3</li>
+      <li data-option="d" data-explain="Two equalities on v1, one flipped, joined by OR: point lookups with keys 4 and 7 on t1v1.">4 = v1 OR v1 = 7</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">The plan is <code>IndexScan { index_oid=0, filter=((#0.0=2)or(#0.0=2)) }</code>, so <code>PredKeys</code> holds 2 twice, and one row has <code>v1 = 2</code>. What must the executor return?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is what a lookup per key gives without deduplication; TestIndexScanRepeatedKey rejects it.">The row twice, once per key.</li>
+      <li data-option="b" data-explain="SQL's answer to v1 = 2 OR v1 = 2 is the row once. Remembering the RIDs already collected skips the second hit.">The row once.</li>
+      <li data-option="c" data-explain="A repeated key is a valid query, not an error.">An error, because the plan has duplicate keys.</li>
+      <li data-option="d" data-explain="Two equal lookups find the same row; they don't cancel out.">No rows, because the duplicates cancel.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Your rule checks only whether the node it is given is a SeqScan, and never looks at children. What does <code>SELECT v3 FROM t1 WHERE v2 = 40</code> get?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The rule is called on the root, which is the Projection, so it never sees the scan below.">An IndexScan under the Projection, as with a recursive rule.</li>
+      <li data-option="b" data-explain="Nothing removes the Projection: it selects one column, so MergeProjection keeps it.">An IndexScan alone, because the Projection is merged away.</li>
+      <li data-option="c" data-explain="The root is a Projection, not a SeqScan, so the rule returns the plan unchanged. TestIndexScanRuleUnderOtherNodes catches this.">The SeqScan under the Projection stays a SeqScan.</li>
+      <li data-option="d" data-explain="Not rewriting a plan is not an error; the query still runs, just through the SeqScan.">An optimizer error, because the plan isn't the expected shape.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">An index scan opens its iterator in <code>Init</code> and reads entries from it lazily in <code>Next</code>. It runs under <code>INSERT INTO t1 SELECT v1 + 1000, v2 FROM (SELECT * FROM t1 ORDER BY v1)</code>, and t1's 100 keys fit in one leaf. What happens?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The iterator read-latches the only leaf; the insert's InsertEntry needs a write latch on it, on the same goroutine, and waits forever. The runner reports that the record did not finish.">The insert waits for a write latch on the leaf that the scan holds in read mode, and the statement never finishes.</li>
+      <li data-option="b" data-explain="Nothing upgrades a read latch, and the insert doesn't know the scan holds it.">The insert upgrades the scan's latch and inserts 100 rows.</li>
+      <li data-option="c" data-explain="With lazy reading the new keys would be ahead of the iterator, so even without the latch problem it would not stop at 100 rows.">It inserts exactly 100 rows, as the reference does.</li>
+      <li data-option="d" data-explain="The buffer pool doesn't detect this; a guard simply waits for the latch.">The buffer pool reports a deadlock and the statement fails with an error.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">An index on <code>a</code> holds the keys 7, −10, 300, 0 and −20, inserted in that order. In what order does an ordered index scan return them?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="An ordered scan follows the leaves, not the insertion order.">7, −10, 300, 0, −20</li>
+      <li data-option="b" data-explain="That would be an unsigned comparison of the bytes; GenericComparator compares INTEGERs as signed int32s.">0, 7, 300, −20, −10</li>
+      <li data-option="c" data-explain="The comparator compares signed integers, so negative keys come first: the leaves hold −20, −10, 0, 7, 300.">−20, −10, 0, 7, 300</li>
+      <li data-option="d" data-explain="The writeup asks for ascending order only; OrderByAsIndexScan doesn't rewrite DESC.">300, 7, 0, −10, −20</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Build it: index scan executor (stage P3.3a)</h2>
+
+  <p>You edit <code>execution/index_scan_executor.go</code>. Run commands from <code>go_db_internals/intro_to_db</code>. The rules, in plain words:</p>
+  <ul>
+    <li>With <code>PredKeys</code>, look each key up with <code>ScanKey</code> and return each matching tuple once, even if a key repeats. Without them, return every tuple in key order, through the index's iterator.</li>
+    <li>Skip deleted tuples, and tuples for which a <code>FilterPredicate</code> isn't true (NULL counts as false).</li>
+    <li>Close every iterator you open; no leaf may stay latched or pinned after the scan, and <code>Init</code> may be called again in the middle of a scan.</li>
+    <li>The batch contract from Lesson 1: clear, up to <code>batchSize</code>, true for every non-empty batch, then false for good.</li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u6-04-init">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-04-init-cb">
+        <label for="u6-04-init-cb">Add the fields and start Init: look up the table and the index, get the B+tree adapter with a type assertion, and reset the scan's state.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which of the plan's two OIDs gives the heap and which gives the tree? What does <code>Next</code> work from: an iterator, or something you prepared in <code>Init</code>? What must a second <code>Init</code> clear?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Keep the <code>*catalog.TableInfo</code>, the <code>*index.BPlusTreeIndexForTwoIntegerColumn</code>, a slice of RIDs to fetch and a position in it. In <code>Init</code>, look up the table with <code>GetTableByOID</code> and the index with <code>GetIndexByOID</code> (errors if either is nil), assert the index's type (an error if it isn't a B+tree), truncate the RID slice and set the position to 0.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>tree, ok := idxInfo.Index.(*index.BPlusTreeIndexForTwoIntegerColumn)
+if !ok {
+	return common.NewException("index " + idxInfo.Name + " is not a B+tree index")
+}</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-04-point">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-04-point-cb">
+        <label for="u6-04-point-cb">For point lookups, turn each PredKey into a key tuple, look it up with ScanKey, and collect each RID found only once.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>A PredKey is an expression: what do you evaluate it on, given it has no column references? Which schema lays out a key tuple? What does <code>ScanKey</code> return for a key that isn't in the tree? How do you notice that a RID is already in your list?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>If <code>len(e.plan.PredKeys) &gt; 0</code>: make a set of RIDs. For each key expression, evaluate it with a nil tuple and an empty schema, build a one-value tuple with the index's <code>KeySchema</code>, and append each RID from <code>ScanKey</code> that isn't in the set yet (then add it). That finishes <code>Init</code> for a point lookup.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>v := keyExpr.Evaluate(nil, types.NewSchema(nil))
+key := table.NewTuple([]types.Value{v}, idxInfo.KeySchema)
+for _, rid := range tree.ScanKey(key) { /* skip RIDs already seen */ }</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-04-ordered">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-04-ordered-cb">
+        <label for="u6-04-ordered-cb">For an ordered scan, walk the index from its first key to the end, collect the RIDs in key order, and close the iterator before Init returns.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>What does your iterator hold while it is open, and which executors may run between two of your <code>Next</code> calls? What would happen to an INSERT into the same index above you? Which Go statement guarantees the <code>Close</code> on every return path?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Get an iterator with <code>BeginIterator()</code> and defer its <code>Close</code> at once. Loop until <code>IsEnd</code>, taking the RID from <code>Entry()</code> and calling <code>Next</code>. When <code>Init</code> returns, the RIDs are in key order in your slice and no leaf is latched.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>it := tree.BeginIterator()
+defer it.Close()
+for ; !it.IsEnd(); it.Next() { /* append the RID from it.Entry() */ }</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-04-next">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-04-next-cb">
+        <label for="u6-04-next-cb">Write Next: fetch the tuple for each collected RID, skip deleted tuples and those the filter rejects, and fill batches by the contract.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>This is your sequential scan's <code>Next</code> with a different source of positions. What replaces the table iterator? Where can the tuple for a RID come from, and what tells you it was deleted?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Clear the slices. While the batch has room and the position is inside the RID slice, take the next RID, advance, get <code>(meta, tuple)</code> from the heap's <code>GetTuple</code>, skip deleted tuples, apply the filter like your scan does, and append the tuple and RID. Return whether the batch is non-empty.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>rid := e.rids[e.pos]
+e.pos++
+meta, t := e.tableInfo.Table.GetTuple(rid)</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: the executor alone</span>
+          <p>Run <code>go test -race -run '^TestIndexScan' ./execution/</code>. It runs the seven executor tests, <code>PointLookup</code>, <code>SeveralKeysOneMissing</code>, <code>RepeatedKey</code>, <code>OrderedNegativeKeys</code> (8 keys, then 1,500 over several leaves), <code>SkipsDeleted</code>, <code>ReInit</code> and <code>ReleasesIterator</code>, which build plans by hand, so they don't need the rule. Success prints <code>ok  	intro_to_db/execution</code>. On the starter each one stops at <code>TODO(P3): IndexScanExecutor.Init not implemented</code>.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>Build it: the SeqScanAsIndexScan rule (stage P3.3b)</h2>
+
+  <p>You edit <code>optimizer/seqscan_as_indexscan.go</code>; its starter body returns the plan unchanged. The rules, in plain words:</p>
+  <ul>
+    <li>Rewrite bottom-up: optimize the children first, then look at the node.</li>
+    <li>Rewrite a SeqScan whose predicate is <code>column = constant</code>, <code>constant = column</code>, or an OR tree of those on one column, when <code>MatchIndex</code> finds a single-column index on that column. Leave every other plan as it is.</li>
+    <li>The IndexScan gets the scan's output schema and table, the index's OID, the scan's original predicate as its filter, and the constants as <code>PredKeys</code>.</li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u6-04-match">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-04-match-cb">
+        <label for="u6-04-match-cb">Write a helper that recognises the three predicate shapes and returns the column and the list of constants, or reports that the predicate doesn't qualify.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which node types can appear in a qualifying predicate, and at which positions? How do you handle <code>1 = v1</code> without writing the equality case twice? An OR of three equalities is two OR nodes; how does recursion keep that simple? Where do you notice that two equalities name different columns?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Recurse with a type switch. A <code>LogicExpression</code> qualifies only if it is an OR and both children qualify. A <code>ComparisonExpression</code> qualifies only if it is <code>Equal</code> and one child is a <code>ColumnValueExpression</code> and the other a <code>ConstantValueExpression</code>, in either order; record the column the first time and require the same column after that, and append the constant. Anything else fails, which covers AND, ranges, <code>v1 = v2</code> and arithmetic.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>case *expressions.LogicExpression:
+	return e.LogicType == expressions.Or &amp;&amp;
+		match(e.ChildAt(0), &amp;col, &amp;keys) &amp;&amp; match(e.ChildAt(1), &amp;col, &amp;keys)</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-04-rule">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-04-rule-cb">
+        <label for="u6-04-rule-cb">Write the rule: rebuild the node over its optimized children, and replace a matching SeqScan with an IndexScan when the column has an index.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which pre-built rule has almost the same skeleton? What do you return when the node isn't a SeqScan, has no predicate, doesn't match, or has no index on the column? Which schema and which predicate does the new node keep?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Start with <code>optimized := optimizeChildren(plan, o.OptimizeSeqScanAsIndexScan)</code>. If <code>optimized</code> is not a <code>*plans.SeqScanPlanNode</code> or its <code>FilterPredicate</code> is nil, return it. Run your helper; if it fails, return <code>optimized</code>. Call <code>o.MatchIndex(scan.TableName, col)</code>; if nothing is found, return <code>optimized</code>. Otherwise return a new IndexScan node.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>return plans.NewIndexScanPlanNode(scan.OutputSchema(), scan.TableOID, indexOID,
+	scan.FilterPredicate, keys)</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: the rule alone</span>
+          <p>Run <code>go test -race -run '^TestIndexScanRule' ./optimizer/</code>. It runs the nine rule tests: <code>Equality</code>, <code>FlippedEquality</code>, <code>OrOfEqualities</code>, <code>AndStaysSeqScan</code>, <code>WithoutIndexStaysSeqScan</code>, <code>RangeStaysSeqScan</code>, <code>OrAcrossColumnsStaysSeqScan</code>, <code>UnderOtherNodes</code> (Projection, Update, and a join's right child) and <code>WithStarterRules</code> (both rule lists through <code>Optimize</code>). The tests about what stays a SeqScan first check <code>v1 = 1</code>, so on the starter they fail with that message too:</p>
+<pre><code>--- FAIL: TestIndexScanRuleEquality (0.00s)
+    index_scan_rule_test.go:55: WHERE v1 = 1: the rule returned
+        SeqScan { table=t1, filter=(#0.0=1) }
+        want an IndexScan of t1v1
+--- FAIL: TestIndexScanRuleAndStaysSeqScan (0.00s)
+    index_scan_rule_test.go:85: the rule does not turn WHERE v1 = 1 into an IndexScan yet; this test checks the predicates it must leave alone, which only means something once it does</code></pre>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage P3.3</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestIndexScan' -timeout 300s ./...</code></pre>
+    <p>It runs the seven executor tests in <code>execution</code>, the nine rule tests in <code>optimizer</code>, and <code>TestIndexScanSQL</code> in <code>sqllogictest</code>, with two subtests: CMU's <code>p3.05-index-scan-btree.slt</code> (ordered scans on two indexes, point lookups, and inserts, updates and deletes that must keep both indexes right, under <code>set force_optimizer_starter_rule=yes</code>) and <code>p3.06-empty-table.slt</code> (an index on an empty table, under the custom rules). Records marked <code>+ensure:index_scan</code> also check that <code>explain (o)</code> shows an IndexScan. Success prints <code>ok</code> for <code>intro_to_db/execution</code>, <code>intro_to_db/optimizer</code> and <code>intro_to_db/sqllogictest</code>, and <code>[no tests to run]</code> or <code>[no test files]</code> for every other package.</p>
+    <p>With stages 1 to 4 done and nothing of stage 5 written yet, the SQL files fail like this, the first on the rule and the second on the executor:</p>
+<pre><code>--- FAIL: TestIndexScanSQL (0.00s)
+    --- FAIL: TestIndexScanSQL/p3.06-empty-table (0.04s)
+        stages_test.go:33: p3.06-empty-table.slt:60: IndexScan not found; failed to process extra options
+            --- SQL
+            select * from t1 where v1 = 1;
+    --- FAIL: TestIndexScanSQL/p3.05-index-scan-btree (0.04s)
+        stages_test.go:33: p3.05-index-scan-btree.slt:29: unexpected error: internal error (panic): TODO(P3): IndexScanExecutor.Init not implemented
+                    at execution.(*IndexScanExecutor).Init (index_scan_executor.go:43)
+                    at execution.(*ExecutionEngine).Execute (execution_engine.go:45)
+            --- SQL
+            select * from t1 order by v1;</code></pre>
+    <p>A <code>p3.05</code> record that times out, or a wrong order after the updates and deletes, can be your Lesson 3 index upkeep or your Project 2 tree: run <code>go test -race ./btree/</code> and the stage 2 to 4 checkpoints again. One file at a time: <code>go test -race -run '^TestIndexScanSQL$/p3.05' -v ./sqllogictest/ -slt.verbose</code>.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why the rule leaves <code>v1 = 1 OR v2 = 4</code> alone when both columns have indexes, why the executor collects RIDs in <code>Init</code> instead of keeping the iterator, how a rule reaches a SeqScan below a Projection or an Update, or whether a failure in <code>p3.05</code> is in this stage or in your B+tree. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: the CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/project3/">Project #3 writeup</a> (Task #1: IndexScan, Optimizing SeqScan to IndexScan; Optimizer Rule Implementation Guide); Lecture #13 slides 27–28, Lecture #08 slide 48, Lecture #15 slides 24–33; BusTub at commit d49b823: <code>src/include/execution/executors/index_scan_executor.h</code>, <code>src/execution/index_scan_executor.cpp</code>, <code>src/include/execution/plans/index_scan_plan.h</code>, <code>src/include/storage/index/b_plus_tree_index.h</code>, <code>src/include/storage/index/generic_key.h</code>, <code>src/optimizer/seqscan_as_indexscan.cpp</code>, <code>merge_filter_scan.cpp</code>, <code>order_by_index_scan.cpp</code>, <code>test/sql/p3.05-index-scan-btree.slt</code> and <code>p3.06-empty-table.slt</code>; this course's <code>execution/index_scan_executor.go</code>, <code>optimizer/seqscan_as_indexscan.go</code>, <code>optimizer/doc.go</code>, <code>optimizer/optimizer_internal.go</code>, <code>storage/index/b_plus_tree_index.go</code> and the stage 5 tests.</p>
+
+  <div class="lesson-nav">
+    <a href="./u6-03-p3-insert-update-delete.html">← P3.2 Insert, Update, and Delete</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u6-05-p3-aggregation.html">Next: P3.4 Aggregation →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

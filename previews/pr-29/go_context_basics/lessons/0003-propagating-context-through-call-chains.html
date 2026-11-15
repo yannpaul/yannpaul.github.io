@@ -1,0 +1,219 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_context_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 3 · Propagating Context Through Call Chains</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">context.Context in Go · Lesson 3 of 7</p>
+  <h1>Propagating Context Through Call Chains</h1>
+  <p class="subtitle">Rebuild Lesson 2's <code>context.WithTimeout</code>-guarded <code>duTop</code> from memory first. Then see what happens once more than one context exists at once, and give <code>burrow</code>'s whole command tree a real one.</p>
+
+  <p class="lede">Every context so far has been a single one, created and used within one function. Real programs derive context after context — a per-request context wrapping a program-lifetime one, a per-attempt context wrapping a per-request one — and none of that would be useful if canceling the outer one didn't reliably reach every context derived from it. Today: prove that it does, then wire a real context tree into <code>burrow</code> itself, from <code>main</code> down into an individual command.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–2</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-lesson2-dutop">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-lesson2-dutop-cb">
+        <label for="repeat-lesson2-dutop-cb">Confirm your <code>duTop(ctx, root, n)</code> from Lesson 2 still respects a <code>context.WithTimeout</code> passed in from its caller.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>A normal fixture completes well under your configured timeout; a fixture with a deliberately slow entry still fails with an error containing <code>context deadline exceeded</code>.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: canceling a parent cancels every child</h2>
+
+  <p>Every <code>WithCancel</code>/<code>WithTimeout</code>/<code>WithDeadline</code> call takes an existing context as its first argument — the <strong>parent</strong> — and returns a new one derived from it, a <strong>child</strong>. That parent/child relationship isn't just naming: canceling a parent automatically cancels every context ever derived from it, with no extra code, no matter how many layers deep. Canceling a child, on the other hand, affects only that child (and anything derived from <em>it</em>) — the parent is untouched.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="scratch-parent-cancels-child">
+      <div class="todo-item-head">
+        <input type="checkbox" id="scratch-parent-cancels-child-cb">
+        <label for="scratch-parent-cancels-child-cb">In a throwaway scratch file: create a parent context with <code>context.WithCancel</code>, then a child from it with a second <code>context.WithCancel</code>. Start a goroutine watching each one's <code>Done()</code>, printing which one finished and <code>ctx.Err()</code>. Cancel only the parent.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+func watch(name string, ctx context.Context) {
+	<-ctx.Done()
+	fmt.Printf("%s: done, err=%v\n", name, ctx.Err())
+}
+
+func main() {
+	parent, cancelParent := context.WithCancel(context.Background())
+	child, cancelChild := context.WithCancel(parent)
+	defer cancelChild()
+
+	go watch("parent", parent)
+	go watch("child", child)
+
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("main: canceling parent")
+	cancelParent()
+
+	time.Sleep(100 * time.Millisecond)
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Both <code>child: done, err=context canceled</code> and <code>parent: done, err=context canceled</code> print, even though only <code>cancelParent</code> was ever called — canceling the parent reached the child automatically.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="scratch-child-cancel-doesnt-reach-parent">
+      <div class="todo-item-head">
+        <input type="checkbox" id="scratch-child-cancel-doesnt-reach-parent-cb">
+        <label for="scratch-child-cancel-doesnt-reach-parent-cb">Now do the reverse: cancel only the child, then check the parent's <code>Err()</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>parent, cancelParent := context.WithCancel(context.Background())
+defer cancelParent()
+child, cancelChild := context.WithCancel(parent)
+
+cancelChild()
+time.Sleep(50 * time.Millisecond)
+
+fmt.Println("parent err:", parent.Err()) // nil — still active
+fmt.Println("child err:", child.Err())   // context canceled</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>parent.Err()</code> prints <code>&lt;nil&gt;</code> — it's still fully active — while <code>child.Err()</code> prints <code>context canceled</code>. Cancellation only ever flows downward, parent to child, never back up.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>This also means a child's own timeout doesn't protect it from its parent. A <code>context.WithTimeout(parent, 10*time.Second)</code> child still ends the instant its parent is canceled, however much of its own 10 seconds was left. A context's actual lifetime is always the <em>shorter</em> of its own deadline and whatever happens to its ancestors — never longer. Design with that in mind: a child's timeout is a ceiling on how long <em>it personally</em> is willing to wait, not a guarantee of how long it gets to run.</p>
+  </div>
+
+  <h2>New: a real context tree in burrow</h2>
+
+  <p><code>burrow</code>'s Cobra commands already run inside a context tree, whether you've used it or not — <code>cobra.Command</code> has a <code>Context()</code> method, and <code>rootCmd.ExecuteContext(ctx)</code> is how you supply the root of that tree from <code>main</code>. Every command's <code>RunE</code> can retrieve it with <code>cmd.Context()</code> and derive its own child from there, instead of starting fresh from <code>context.Background()</code>.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="wire-execute-context">
+      <div class="todo-item-head">
+        <input type="checkbox" id="wire-execute-context-cb">
+        <label for="wire-execute-context-cb">In <code>main</code>, create a root context with <code>context.WithCancel(context.Background())</code>, <code>defer cancel()</code>, and call <code>rootCmd.ExecuteContext(ctx)</code> instead of plain <code>rootCmd.Execute()</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the change</summary>
+          <div class="reveal-body">
+            <pre><code>ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+if err := rootCmd.ExecuteContext(ctx); err != nil {
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(1)
+}</code></pre>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="derive-timeout-from-cmd-context">
+      <div class="todo-item-head">
+        <input type="checkbox" id="derive-timeout-from-cmd-context-cb">
+        <label for="derive-timeout-from-cmd-context-cb">In <code>du top</code>'s <code>RunE</code>, replace <code>context.WithTimeout(context.Background(), ...)</code> from Lesson 2 with <code>context.WithTimeout(cmd.Context(), ...)</code> — deriving from the command's own context instead of a fresh background one.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the change</summary>
+          <div class="reveal-body">
+            <pre><code>RunE: func(cmd *cobra.Command, args []string) error {
+	ctx, cancel := context.WithTimeout(cmd.Context(), 500*time.Millisecond)
+	defer cancel()
+	return duTop(ctx, path, n)
+},</code></pre>
+            <p>Nothing about <code>duTop</code> itself changes — it still just takes whatever <code>ctx</code> it's handed. Only where that <code>ctx</code> ultimately traces back to changed.</p>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>burrow du top --path scratch --n 10</code> behaves identically to before — same output, same timeout behavior. This step doesn't change anything observable yet; it's setting up the tree Lesson 4 actually uses.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="verify-root-cancel-reaches-command">
+      <div class="todo-item-head">
+        <input type="checkbox" id="verify-root-cancel-reaches-command-cb">
+        <label for="verify-root-cancel-reaches-command-cb">Temporarily prove the tree is real: in <code>main</code>, start a goroutine that sleeps 300ms and then calls the root's <code>cancel()</code> — simulating something external canceling the whole program — while <code>du top</code>'s own timeout is set much longer (10 seconds). Run it against a fixture with a simulated slow entry.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the temporary code</summary>
+          <div class="reveal-body">
+            <pre><code>ctx, cancel := context.WithCancel(context.Background())
+
+go func() {
+	time.Sleep(300 * time.Millisecond)
+	cancel() // simulates something external canceling the whole program
+}()
+
+if err := rootCmd.ExecuteContext(ctx); err != nil {
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(1)
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The command fails at around 300ms, with an error containing <code>context canceled</code> — not <code>context deadline exceeded</code>, and nowhere near its own 10-second timeout. The root's cancellation reached all the way down into <code>duTop</code>'s <code>ctx.Done()</code>, through <code>cmd.Context()</code>, exactly as the scratch demo predicted. Remove the temporary goroutine and restore a real timeout afterward.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>That temporary goroutine was a stand-in for something real: a process-level signal telling the whole program to stop. Lesson 4 replaces it with exactly that — a real Ctrl+C, wired to the same root <code>cancel()</code> through <code>os/signal.NotifyContext</code>, so pressing it during a long <code>du top</code> stops the command cleanly instead of the whole process being killed out from under it.</p>
+  </div>
+
+  <p><code>burrow</code> now has a genuine context tree: a root tied to the whole program's run, with each command deriving its own timeout from it rather than from a disconnected <code>context.Background()</code>. Lesson 4 gives that root a real reason to cancel early.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why a child's timeout can't outlive its parent, what <code>cmd.Context()</code> actually returns before <code>ExecuteContext</code> is called with one, why deriving from <code>cmd.Context()</code> matters versus just using <code>context.Background()</code> in every command, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary source for this lesson: <a href="https://pkg.go.dev/context">pkg.go.dev, package <code>context</code></a> for the exact parent/child cancellation guarantee; <a href="https://pkg.go.dev/github.com/spf13/cobra#Command.ExecuteContext">pkg.go.dev, <code>cobra.Command.ExecuteContext</code></a> for how Cobra threads a context into every command's <code>RunE</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="./0002-withtimeout-on-dutop.html">← Lesson 2: WithCancel and WithTimeout on duTop</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0004-cancellation-on-interrupt.html">Next: Cancellation on Interrupt →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

@@ -1,0 +1,549 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 6 · Lesson 1 · P3.0 The SQL Pipeline: Postgres Parser, Binder, Planner, EXPLAIN</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 6 · Lesson 1</p>
+  <h1>P3.0 The SQL Pipeline: Postgres Parser, Binder, Planner, EXPLAIN</h1>
+  <p class="subtitle">Pull Project 3's code and build its cgo parser, follow a SQL statement from text to rows through the binder, planner, optimizer and executors, read BusTub's EXPLAIN output, and run the three kinds of tests you will use for the rest of the project.</p>
+
+  <p class="lede">Unit 5 described query execution and optimization on paper. Project 3 makes you write the executors, the operators that turn a plan into rows, plus two optimizer rules. Everything around them is already built: a SQL front end above, and your own Project 1 buffer pool and Project 2 B+tree below. In this stage you write no code: you get the project building, take the pipeline apart in the shell, and learn to read plans and test failures. Its checkpoint passes on the starter by design.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 5, Lesson 5: BusTub's execution engine runs <code>while (executor-&gt;Next(&amp;tuples, &amp;rids, BUSTUB_BATCH_SIZE))</code> and appends each batch to the result. A scan has 7 matching tuples left when the engine calls it, and the batch size is 20. What must its <code>Next</code> do?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The loop ignores the tuples of a call that returns false, so those 7 rows would never reach the result.">Return false with the 7 tuples in the batch, since the table is now exhausted.</li>
+      <li data-option="b" data-explain="Nothing will ever produce 13 more tuples, so the scan would wait forever. A partly filled batch is fine.">Keep scanning until it has 20 tuples, so that every batch is full.</li>
+      <li data-option="c" data-explain="A non-empty batch always comes back with true, even when it is the last one and only partly full. The following call has nothing left and returns false with an empty batch.">Return true with the 7 tuples, then return false with an empty batch on the next call.</li>
+      <li data-option="d" data-explain="The batch model returns up to batch_size tuples per call; one tuple per call is the iterator model, and it would still need the same rule for the end.">Return the 7 tuples one per call, each with true.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 5, Lesson 7: BusTub's planner turns <code>FROM t1, t2 WHERE t1.a = t2.b</code> into a Filter over a nested loop join. Why must <code>MergeFilterNLJ</code> run before <code>NLJAsHashJoin</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Before the merge, the join's predicate is the constant true and the equality sits in the Filter above it. NLJAsHashJoin looks for equalities in the join's own predicate, so it has nothing to work with until MergeFilterNLJ moves them there.">Until the filter merges into the join, the join's predicate is just true, so there is no equality to hash on.</li>
+      <li data-option="b" data-explain="Rule order doesn't change any table's size, and BusTub's optimizer keeps no statistics.">MergeFilterNLJ computes the table sizes that NLJAsHashJoin needs to pick a build side.</li>
+      <li data-option="c" data-explain="A hash join can sit under a filter like any other node; the order matters because of where the equality is.">A hash join can't have a Filter above it, so the filter has to disappear first.</li>
+      <li data-option="d" data-explain="Both rules work bottom-up and apply themselves to the children first; neither depends on the other's traversal order.">NLJAsHashJoin only visits the root node, so the join must be pulled up first.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 5, Lesson 8: how does BusTub's optimizer learn how many rows a table has?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="BusTub keeps no histograms; Lesson 8's statistics have no BusTub counterpart.">From an equi-depth histogram kept in the catalog.</li>
+      <li data-option="b" data-explain="Nothing in BusTub samples a table during optimization.">By sampling a few pages of the table when the query is planned.</li>
+      <li data-option="c" data-explain="The catalog records each table's schema and heap, not a row count.">From a row count the catalog updates on every insert and delete.</li>
+      <li data-option="d" data-explain="EstimatedCardinality reads suffixes such as _1m or _100k in the table's name, with a comment that BusTub doesn't support statistics yet. Any other table has no estimate.">From a suffix in the table's name, such as <code>_1m</code>; other tables have no estimate.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Before you pull: Projects 1 and 2 must pass</h2>
+
+  <p>Project 3 runs on your earlier projects. Every table is a chain of pages in your buffer pool, and every index is your B+tree. A bug left in either one surfaces here as a query that returns wrong rows, or as an <code>.slt</code> file that stops with a timeout, far from the code that caused it. So finish them first. From <code>go_db_internals/intro_to_db</code>:</p>
+
+<pre><code>go test -race ./bufferpool/ ./btree/
+git add -A &amp;&amp; git commit -m "P1 and P2 pass"</code></pre>
+
+  <p>Both packages must print <code>ok</code>. The B+tree package takes the longest, about 40 seconds under <code>-race</code>. Commit before pulling, so that the merge starts from a clean working tree.</p>
+
+  <p>Then pull Project 3 into your branch with the command from <a href="./u0-00-setup.html">Lesson 0</a>, run from your sparse checkout:</p>
+
+<pre><code>git pull --no-rebase origin main
+ls     # README.md  binder  btree  bufferpool  bustub  catalog  cmd  common  concurrency
+       # execution  go.mod  go.sum  optimizer  planner  sqllogictest  storage  types</code></pre>
+
+  <p>Your sparse checkout already covers all of <code>intro_to_db</code>, so the new packages appear without any change to it. The pull adds new files only, with one exception: <code>go.mod</code> gains a <code>require</code> line for <code>github.com/pganalyze/pg_query_go/v6</code> (plus an indirect one for protobuf), and <code>go.sum</code> appears for the first time. You never edited <code>go.mod</code>, so the merge is clean. Your <code>bufferpool</code> and <code>btree</code> files are untouched.</p>
+
+  <h2>cgo and the first build</h2>
+
+  <p>The SQL parser is not written in Go. The <code>binder</code> package calls <a href="https://github.com/pganalyze/pg_query_go">pg_query_go</a>, which wraps <code>libpg_query</code>: PostgreSQL's own parser, extracted from the PostgreSQL source as a C library. Go compiles and links that C code through <strong>cgo</strong>, the part of the Go toolchain that lets Go packages call C. Two things must be in place:</p>
+  <ul>
+    <li><code>go env CGO_ENABLED</code> prints <code>1</code>. That is the default on a Mac. If yours prints <code>0</code>, run <code>go env -w CGO_ENABLED=1</code>.</li>
+    <li>A C compiler. The Xcode Command Line Tools from Lesson 0 provide <code>clang</code>; <code>xcode-select -p</code> prints their path if they are installed.</li>
+  </ul>
+
+  <p>Without cgo, the build stops in the binder, and every package that imports it fails too:</p>
+
+<pre><code># intro_to_db/binder
+binder/binder.go:38:26: undefined: pg_query.Parse
+binder/binder.go:55:23: undefined: pg_query.Scan</code></pre>
+
+  <p>The first build downloads the pg_query_go module and compiles the C parser, which takes about a minute. Go caches the result, so later builds are fast. Run one warm-up build now, so that the minute doesn't land in the middle of a test run:</p>
+
+<pre><code>time go build ./...</code></pre>
+
+  <p>The first test run with <code>-race</code> compiles the parser once more for the race-enabled build, which takes about 40 seconds; after that it is cached too. Only <code>binder</code> and the packages that import it (<code>planner</code>, <code>bustub</code>, <code>sqllogictest</code>, <code>cmd/shell</code>) need cgo. The packages you edit, <code>execution</code> and <code>optimizer</code>, don't import the binder.</p>
+
+  <h2>From SQL text to rows</h2>
+
+  <p>Lecture #15 draws the path from a SQL string to a plan as four steps. BusTub follows it with one extra stage between the binder and the optimizer, a planner, and without the statistics and cost model, which BusTub doesn't have (Unit 5, Lesson 8).</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L15-optimizer-architecture-p5.png" alt="A flow diagram. Application sends (1) SQL Query to the Parser, which emits (2) Abstract Syntax Tree to the Binder, which emits (3) Logical Plan to the Optimizer, which emits (4) Physical Plan to an execution gear. A System Catalog sends Name→Internal ID to the Binder, Schema Info to the Optimizer, and Statistics to a Cost Model, which sends Estimates to the Optimizer." loading="lazy">
+    <figcaption>In this course's code, the parser and the binder are both in package <code>binder</code>, the logical plan comes out of <code>planner</code>, the optimizer is <code>optimizer</code>, and the gear is <code>execution</code>. The catalog arrow into the binder is real (<code>catalog</code>); the statistics and cost model have no counterpart (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/15-optimization1.pdf#page=5">Lecture #15, slide 5</a>).</figcaption>
+  </figure>
+
+  <p>One statement, such as <code>SELECT colA FROM __mock_table_1 WHERE colA &gt; 97;</code>, passes through these packages in order:</p>
+
+  <table>
+    <tr><th>Step</th><th>Package</th><th>What it produces</th><th>BusTub source</th></tr>
+    <tr><td>Parse</td><td><code>binder</code> (<code>Binder.ParseAndSave</code>)</td><td>PostgreSQL's parse tree, from <code>pg_query.Parse</code></td><td><code>binder/binder.cpp</code>, <code>transformer.cpp</code></td></tr>
+    <tr><td>Bind</td><td><code>binder</code> (<code>Binder.BindStatement</code>)</td><td>a bound statement: names resolved against the catalog, <code>*</code> expanded into columns, expressions typed</td><td><code>binder/bind_*.cpp</code></td></tr>
+    <tr><td>Plan</td><td><code>planner</code></td><td>a tree of plan nodes (<code>execution/plans</code>), one per operator, each with an output schema</td><td><code>planner/*.cpp</code></td></tr>
+    <tr><td>Optimize</td><td><code>optimizer</code></td><td>the same tree rewritten by a list of rules</td><td><code>optimizer/*.cpp</code></td></tr>
+    <tr><td>Execute</td><td><code>execution</code></td><td>a tree of executors built by <code>CreateExecutor</code>, run by <code>ExecutionEngine.Execute</code></td><td><code>execution/*.cpp</code>, <code>executor_factory.cpp</code></td></tr>
+  </table>
+
+  <p>The <strong>parser</strong> checks grammar only: it knows nothing about tables. BusTub parses with DuckDB's fork of <code>libpg_query</code>, so both versions accept a PostgreSQL grammar, and this course's binder translates PostgreSQL 17's parse tree node by node into the same bound statements BusTub builds. The grammars differ in one place that the tests hit. DuckDB accepts a trailing comma before <code>FROM</code>, as in <code>select colC, colA, colB, from temp_2</code>, and two of CMU's test records rely on it; PostgreSQL reports a syntax error. So <code>ParseAndSave</code> first runs PostgreSQL's tokenizer and deletes any comma token that directly precedes a <code>FROM</code> token, then parses. Commas inside string literals are not tokens of their own, so they are left alone.</p>
+
+  <p>The <strong>binder</strong> turns names into catalog references. It checks that <code>__mock_table_1</code> exists, that it has a column <code>colA</code>, and what type each expression has; <code>SELECT nosuch FROM __mock_table_1</code> fails here with <code>column nosuch not found</code>. The <strong>planner</strong> then turns the bound statement into a plan: a Projection over a Filter over a scan. The optimizer rewrites that plan with rules (Unit 5, Lesson 7). Finally the execution engine builds one executor per plan node and pulls batches of tuples from the root.</p>
+
+  <p>Two more packages hold the rest together. <code>bustub</code> is the database instance (BusTub's <code>BusTubInstance</code>): its <code>ExecuteSQL</code> runs each statement in its own transaction, sends SELECT, INSERT, UPDATE and DELETE down the pipeline above, and handles <code>CREATE TABLE</code>, <code>CREATE INDEX</code>, <code>EXPLAIN</code>, <code>SET</code> and the backslash commands itself. Below the executors sit <code>catalog</code> (tables and indexes by name and OID), <code>storage/table</code> (the table heap: tuples in a linked list of pages), <code>storage/index</code> (an adapter that makes your B+tree an index), and <code>types</code> (values, columns and schemas). The shell <code>cmd/shell</code> and the test runner <code>sqllogictest</code> are both thin wrappers around an instance.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=b53huOGcsZ8&amp;t=0s">#15 Query Planning &amp; Optimization I, "Query optimization basics" (0:00)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/15-optimization1.pdf#page=2">slides 2–14</a>: after the administrivia, slide 5's overview of parser, binder and optimizer, then the motivating example of why the plan matters.</p>
+
+  <h2>A session in the shell</h2>
+
+  <p>The shell is BusTub's <code>bustub-shell</code>, ported. Start it from <code>go_db_internals/intro_to_db</code> with <code>go run ./cmd/shell</code>. End every SQL statement with <code>;</code>; backslash commands need none. Ctrl-D quits. The session below is real output from the starter, with the Project 1 and 2 solutions in place.</p>
+
+<pre><code>$ go run ./cmd/shell
+Welcome to the BusTub shell! Type \help to learn more.
+
+bustub&gt; \dt
++-----+----------------------------------+------------------------------------------------------------------------------------+
+| oid | name                             | cols                                                                               |
++-----+----------------------------------+------------------------------------------------------------------------------------+
+| 0   | __mock_table_1                   | (colA:INTEGER, colB:INTEGER)                                                       |
+| 1   | __mock_table_2                   | (colC:VARCHAR(128), colD:VARCHAR(128))                                             |
+| 2   | __mock_table_3                   | (colE:INTEGER, colF:VARCHAR(128))                                                  |
+...
+| 26  | __mock_t11                       | (x:INTEGER, y:INTEGER)                                                             |
+| 27  | empty_table                      | (colA:INTEGER)                                                                     |
+| 28  | test_simple_seq_1                | (col1:INTEGER)                                                                     |
+| 29  | test_simple_seq_2                | (col1:INTEGER, col2:INTEGER)                                                       |
+| 30  | test_1                           | (colA:INTEGER, colB:INTEGER, colC:INTEGER, colD:INTEGER)                           |
+| 31  | test_2                           | (colA:INTEGER, colB:INTEGER, colC:INTEGER)                                         |
++-----+----------------------------------+------------------------------------------------------------------------------------+
+bustub&gt; SELECT * FROM __mock_table_1 WHERE colA &gt; 97;
++---------------------+---------------------+
+| __mock_table_1.colA | __mock_table_1.colB |
++---------------------+---------------------+
+| 98                  | 9800                |
+| 99                  | 9900                |
++---------------------+---------------------+</code></pre>
+
+  <p>The tables come in two kinds. The 27 whose names start with <code>__mock</code> are <strong>mock tables</strong>: a <code>MockScan</code> executor computes their rows from a formula each time they are read, so they need no storage, and you can't insert into them. <code>__mock_table_1</code> has 100 rows, (<em>i</em>, 100 &times; <em>i</em>) for <em>i</em> from 0 to 99. The other five are real tables in your buffer pool, which the shell creates and fills at startup (BusTub's <code>TableGenerator</code>). If the buffer pool were still a Project 1 stub, the shell would print "BufferPoolManager is not implemented, only mock tables are supported." and skip them. Queries on mock tables already work, because MockScan, Filter, Projection and Values are pre-built executors.</p>
+
+  <p><code>EXPLAIN</code> prints what each stage of the pipeline made of a query:</p>
+
+<pre><code>bustub&gt; EXPLAIN SELECT colA, colB FROM __mock_table_1 WHERE colA &gt; 97;
+=== BINDER ===
+BoundSelect {
+  table=BoundBaseTableRef { table=__mock_table_1, oid=0 },
+  columns=["__mock_table_1.colA", "__mock_table_1.colB"],
+  groupBy=[],
+  having=,
+  where=(__mock_table_1.colA&gt;97),
+  limit=,
+  offset=,
+  order_by=[],
+  is_distinct=false,
+  ctes=,
+}
+=== PLANNER ===
+Projection { exprs=["#0.0", "#0.1"] } | (__mock_table_1.colA:INTEGER, __mock_table_1.colB:INTEGER)
+  Filter { predicate=(#0.0&gt;97) } | (__mock_table_1.colA:INTEGER, __mock_table_1.colB:INTEGER)
+    MockScan { table=__mock_table_1 } | (__mock_table_1.colA:INTEGER, __mock_table_1.colB:INTEGER)
+=== OPTIMIZER ===
+Filter { predicate=(#0.0&gt;97) } | (__mock_table_1.colA:INTEGER, __mock_table_1.colB:INTEGER)
+  MockScan { table=__mock_table_1 } | (__mock_table_1.colA:INTEGER, __mock_table_1.colB:INTEGER)</code></pre>
+
+  <p>The planner's Projection only passes both columns through in their original order, so the optimizer's <code>MergeProjection</code> rule removed it. Options in parentheses pick the sections: <code>b</code> (binder), <code>p</code> (planner), <code>o</code> (optimizer) and <code>s</code> (schemas). Plain <code>EXPLAIN</code> turns all four on, and <code>EXPLAIN (o)</code>, the one you'll use most, prints only the optimized plan without schemas. Here is the writeup's join example:</p>
+
+<pre><code>bustub&gt; EXPLAIN (o) SELECT colA, MAX(colB) FROM (SELECT * FROM __mock_table_1, __mock_table_3 WHERE colA = colE) GROUP BY colA;
+=== OPTIMIZER ===
+Agg { types=["max"], aggregates=["#0.1"], group_by=["#0.0"] }
+  NestedLoopJoin { type=Inner, predicate=(#0.0=#1.0) }
+    MockScan { table=__mock_table_1 }
+    MockScan { table=__mock_table_3 }</code></pre>
+
+  <p>Now a real table, with an index:</p>
+
+<pre><code>bustub&gt; EXPLAIN (o,s) SELECT * FROM test_simple_seq_2 WHERE col1 = 3;
+=== OPTIMIZER ===
+SeqScan { table=test_simple_seq_2, filter=(#0.0=3) } | (test_simple_seq_2.col1:INTEGER, test_simple_seq_2.col2:INTEGER)
+
+bustub&gt; CREATE TABLE t1(v1 INT, v2 VARCHAR(100));
+Table created with id = 32
+bustub&gt; CREATE INDEX t1v1 ON t1(v1);
+Index created with id = 0 with type = BPlusTree
+bustub&gt; set force_optimizer_starter_rule=yes;
+bustub&gt; EXPLAIN (o,s) SELECT * FROM t1 WHERE v1 = 1;
+=== OPTIMIZER ===
+SeqScan { table=t1, filter=(#0.0=1) } | (t1.v1:INTEGER, t1.v2:VARCHAR(100))
+
+bustub&gt; EXPLAIN (o,s) SELECT * FROM t1 ORDER BY v1;
+=== OPTIMIZER ===
+IndexScan { index_oid=0 } | (t1.v1:INTEGER, t1.v2:VARCHAR(100))
+
+bustub&gt; INSERT INTO t1 VALUES (1, 'a'), (2, 'b');
+internal error (panic): TODO(P3): InsertExecutor.Init not implemented
+    at execution.(*InsertExecutor).Init (insert_executor.go:42)
+    at execution.(*ExecutionEngine).Execute (execution_engine.go:45)
+bustub&gt; SELECT 1 + 2;
++-------------+
+| __unnamed#0 |
++-------------+
+| 3           |
++-------------+</code></pre>
+
+  <p>A few things to notice in that run:</p>
+  <ul>
+    <li>On a real table the scan is a <code>SeqScan</code>, and the WHERE clause has moved into it as <code>filter=</code>. The pre-built rule <code>MergeFilterScan</code> folds a Filter into the SeqScan below it, so your sequential scan has to evaluate that predicate itself (Lesson 2). It doesn't merge into a MockScan, which is why the mock query kept its Filter.</li>
+    <li><code>CREATE TABLE</code> and <code>CREATE INDEX</code> work on the starter: they only need the catalog, your buffer pool and your B+tree. Inserting needs the insert executor, which is stage 2.</li>
+    <li>The optimizer has two rule lists. By default it uses the "custom" list in <code>optimizer_custom_rules.go</code>; <code>set force_optimizer_starter_rule=yes</code> switches to the starter list, as some of CMU's test files do. <code>ORDER BY v1</code> already becomes an <code>IndexScan</code>, because <code>OrderByAsIndexScan</code> is pre-built. <code>WHERE v1 = 1</code> stays a <code>SeqScan</code> until you write <code>SeqScanAsIndexScan</code> in stage 5; its starter version returns the plan unchanged.</li>
+    <li>The INSERT reached a stub that panics. The instance recovers every panic and reports it as <code>internal error (panic)</code> with the frames of this module's code, and the shell carries on. Inside a test, the same panic fails only the test that hit it.</li>
+  </ul>
+
+  <h2>Reading plan text</h2>
+
+  <p>Each line of a plan is one plan node, and a node's children are the lines indented under it. Data flows upward: the most indented scans produce tuples, and the root's output is the query's result. With schemas on, <code>| (…)</code> after a node is its output schema, the columns of every tuple it produces. The writeup is strict about it: "your executor implementations must produce tuples with schema exactly as specified in the plan node".</p>
+
+  <p>An expression such as <code>#0.1</code> is a <strong>column value expression</strong>: the number before the dot is the tuple index, and the number after it is the column index in that tuple. In a node with one child, the tuple index is always 0, so <code>#0.1</code> is the child's second column; in the Agg above, <code>aggregates=["#0.1"]</code> is the max of the join's second column. A join evaluates its predicate on a pair of tuples, so there <code>#0.0</code> is column 0 of the left child's tuple and <code>#1.0</code> is column 0 of the right child's. <code>(#0.0=#1.0)</code> is <code>colA = colE</code>. Constants print as themselves: <code>(#0.0&gt;97)</code> is <code>colA &gt; 97</code>.</p>
+
+  <div class="callout">
+    <p class="callout-label">Quoted lists</p>
+    <p>This port prints plans exactly as BusTub at d49b823 does, and BusTub's formatting library quotes the elements of a list: <code>Projection { exprs=["#0.0", "#0.1"] }</code>. The writeup's examples were written with an older version and show <code>exprs=[#0.0, #0.1]</code> for the same plan.</p>
+  </div>
+
+  <h2>Executors work in batches</h2>
+
+  <p>Unit 5, Lesson 5 placed BusTub among the processing models: the vectorized model, pulled from the root, with whole row tuples in each batch. In Go the interface is <code>execution.Executor</code>:</p>
+
+<pre><code>type Executor interface {
+	Init() error
+	Next(tuples *[]table.Tuple, rids *[]common.RID, batchSize int) (bool, error)
+	OutputSchema() *types.Schema
+	ExecutorContext() *ExecutorContext
+}</code></pre>
+
+  <p>BusTub's <code>Next(std::vector&lt;Tuple&gt; *tuple_batch, std::vector&lt;RID&gt; *rid_batch, size_t batch_size)</code> becomes a method that fills two slices through pointers. <code>ExecutionEngine.Execute</code> calls <code>Init</code> on the root, then <code>Next</code> with <code>common.BatchSize</code>, which is 20, until it returns false. Every executor you write follows the same contract, and the unit tests check it on every call:</p>
+  <ul>
+    <li>Clear both slices first (<code>*tuples = (*tuples)[:0]</code>), then append up to <code>batchSize</code> tuples, each with its RID. Tuples that don't come from a table carry the zero <code>common.RID{}</code>.</li>
+    <li>Return true for every non-empty batch, including a last batch that is only partly full. Return false with an empty batch once the executor is exhausted, and keep returning false after that.</li>
+    <li><code>Init</code> may be called again after the executor ran, and must then start over: a nested loop join re-initializes its right child once per left tuple. Pipeline breakers, such as aggregation, do their build phase in <code>Init</code>.</li>
+    <li>Return errors; don't panic. Where BusTub throws an exception, Go returns an error, usually a <code>*common.Exception</code> from <code>common.NewException</code>.</li>
+  </ul>
+
+  <p>An executor pulls from its children the same way, batch by batch. When a child's batch holds more tuples than fit in the output batch, the executor has to keep the rest for its next call. The pre-built <code>FilterExecutor</code> (<code>execution/filter_executor.go</code>) shows how: it stores the child's last batch and an offset into it. Read it before you start Lesson 2.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=E-UUd6cB57w&amp;t=1657s">#13 Query Execution I, "Vectorized model" (27:37)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/13-queryexecution1.pdf#page=29">slides 15–17</a>: the batch version of <code>Next()</code>, if Unit 5, Lesson 5 is a while back.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>BusTub's executors throw C++ exceptions, and an exception from deep inside an executor tree unwinds to the instance. Go code returns errors instead, so <code>Init</code> returns <code>error</code> and <code>Next</code> returns <code>(bool, error)</code>, and a parent passes a child's error straight up: <code>if err != nil { return false, err }</code>. Panics are for bugs. The instance recovers them so that one bad statement doesn't kill the shell, but they are reported as internal errors, never as query errors. Project 4 adds one more kind: an error for which <code>common.IsExecutionException</code> is true fails the statement quietly, as a write-write conflict should.</p>
+  </div>
+
+  <h2>The files you'll edit</h2>
+
+  <p>Project 3 is split into 11 stages, plus this orientation stage and two stretch stages. Each stage has one test-name prefix, and you edit only the files listed for it. Every file is in <code>intro_to_db</code>:</p>
+
+  <table>
+    <tr><th>Lesson</th><th>Stage</th><th>Files</th><th>Prefix</th></tr>
+    <tr><td>P3.0 (this one)</td><td>0</td><td>none</td><td><code>TestPipeline</code></td></tr>
+    <tr><td>P3.1 Sequential Scan</td><td>1</td><td><code>execution/seq_scan_executor.go</code></td><td><code>TestSeqScan</code></td></tr>
+    <tr><td rowspan="3">P3.2 Insert, Update, and Delete</td><td>2</td><td><code>execution/insert_executor.go</code></td><td><code>TestInsert</code></td></tr>
+    <tr><td>3</td><td><code>execution/delete_executor.go</code></td><td><code>TestDelete</code></td></tr>
+    <tr><td>4</td><td><code>execution/update_executor.go</code></td><td><code>TestUpdate</code></td></tr>
+    <tr><td>P3.3 Index Scan</td><td>5</td><td><code>execution/index_scan_executor.go</code>, <code>optimizer/seqscan_as_indexscan.go</code></td><td><code>TestIndexScan</code></td></tr>
+    <tr><td>P3.4 Aggregation</td><td>6</td><td><code>execution/aggregation_executor.go</code></td><td><code>TestAggregation</code></td></tr>
+    <tr><td rowspan="2">P3.5 Nested loop and nested index joins</td><td>7</td><td><code>execution/nested_loop_join_executor.go</code></td><td><code>TestNestedLoopJoin</code></td></tr>
+    <tr><td>8</td><td><code>execution/nested_index_join_executor.go</code></td><td><code>TestNestedIndexJoin</code></td></tr>
+    <tr><td>P3.6 Hash join</td><td>9</td><td><code>execution/hash_join_executor.go</code>, <code>optimizer/nlj_as_hash_join.go</code></td><td><code>TestHashJoin</code></td></tr>
+    <tr><td>P3.7 External merge sort and Limit</td><td>10</td><td><code>execution/execution_common.go</code>, <code>intermediate_result_page.go</code>, <code>external_merge_sort_executor.go</code>, <code>limit_executor.go</code></td><td><code>TestSort</code></td></tr>
+    <tr><td>P3.8 Window functions</td><td>11</td><td><code>execution/window_function_executor.go</code></td><td><code>TestWindow</code></td></tr>
+    <tr><td>Stretch: TopN</td><td>S1</td><td><code>execution/topn_executor.go</code>, <code>optimizer/sort_limit_as_topn.go</code></td><td><code>TestTopN</code></td></tr>
+    <tr><td>Stretch: leaderboard</td><td>S2</td><td><code>optimizer/optimizer_custom_rules.go</code>, <code>column_pruning.go</code>, <code>execution/topn_per_group_executor.go</code>, your own files</td><td>benchmarks</td></tr>
+  </table>
+
+  <p>Each executor file already has its struct, its constructor and <code>OutputSchema</code>; you add fields and write <code>Init</code> and <code>Next</code>, whose doc comments are the spec. Stages build on each other: the delete tests read their input through your sequential scan, and stage 5 runs your B+tree.</p>
+
+  <div class="callout bad">
+    <p class="callout-label">Two files to leave alone</p>
+    <p><code>concurrency/transaction_manager.go</code> and <code>concurrency/watermark.go</code> are Project 4 files. They ship now, as BusTub's do, because every statement in Project 3 already runs in a transaction, and their starter bodies do everything Project 3 needs. Don't edit them in this project: Project 4 starts from them as they are.</p>
+  </div>
+
+  <h2>How the tests are organised</h2>
+
+  <p>Every stage's checkpoint is one command, run from <code>go_db_internals/intro_to_db</code>, that collects three kinds of tests by their shared prefix:</p>
+  <ul>
+    <li>Executor unit tests in <code>execution/*_test.go</code> call your executor directly, on small tables in a small buffer pool, and check the batch contract on every <code>Next</code> call: cleared slices, 1 to <code>batchSize</code> tuples, one RID per tuple, false with an empty batch at the end. Every call has a time limit, so an executor that never releases a page latch fails its test instead of hanging.</li>
+    <li>Rule tests in <code>optimizer/*_rule_test.go</code> (stages 5, 9 and S1) hand your rule a plan and check what it returns.</li>
+    <li>SQL logic tests: CMU's own test files, <code>sqllogictest/testdata/p3.*.slt</code>, copied byte for byte from BusTub. A Go port of BusTub's <code>bustub-sqllogictest</code> runs them, one fresh in-memory instance per file. Each stage's <code>Test&lt;Prefix&gt;SQL</code> runs that stage's files as subtests named after them. The writeup says CMU provides all of its test cases and has no hidden ones, so these files are the whole SQL test suite.</li>
+  </ul>
+
+  <p>An <code>.slt</code> file is a list of records separated by blank lines; <code>#</code> starts a comment. <code>statement ok</code> runs SQL and expects no error. <code>query</code> runs SQL and compares its output, columns separated by spaces, with the lines after <code>----</code>; <code>query rowsort</code> sorts both sides first, for queries whose row order isn't fixed. Options that start with <code>+</code> run extra checks before the query: <code>+ensure:index_scan</code>, for example, runs <code>explain (o)</code> on it and fails unless the plan contains an <code>IndexScan</code>. This is stage 0's whole file, <code>p3.00-primer.slt</code>:</p>
+
+<pre><code>query rowsort
+select github_id, office_hour from __mock_table_tas_2025_fall;
+----
+17zhangw Tuesday
+quantumish Monday
+...</code></pre>
+
+  <p>You need three commands. The checkpoint for a stage:</p>
+<pre><code>go test -race -run '^TestSeqScan' -timeout 300s ./...</code></pre>
+  <p>One <code>.slt</code> file of a stage, with every record and its result logged (<code>-v</code> shows the log of a passing test too):</p>
+<pre><code>go test -race -run '^TestSeqScanSQL$/p3.01' -v ./sqllogictest/ -slt.verbose</code></pre>
+  <p>Any <code>.slt</code> file of your own, by path:</p>
+<pre><code>go test -race -run '^TestSQLLogicFile$' ./sqllogictest/ -args -slt=$PWD/my.slt</code></pre>
+
+  <p>The last one is how you test queries the provided files don't cover. Here is a file with a deliberate mistake in its second record, and what the runner prints:</p>
+
+<pre><code># colA of __mock_table_1 runs from 0 to 99, colB is 100 times colA
+query rowsort
+select colA, colB from __mock_table_1 where colA &gt; 97;
+----
+98 9800
+99 9900
+
+query
+select colA + 1 from __mock_table_1 where colA = 5;
+----
+7</code></pre>
+
+<pre><code>--- FAIL: TestSQLLogicFile (0.03s)
+    stages_test.go:98: my.slt:8: wrong result (with sort_mode=NoSort)
+        --- expected (1 rows)
+        7
+        --- actual (1 rows)
+        6
+        --- explain (o)
+        === OPTIMIZER ===
+        Projection { exprs=["(#0.0+1)"] }
+          Filter { predicate=(#0.0=5) }
+            MockScan { table=__mock_table_1 }
+        --- SQL
+        select colA + 1 from __mock_table_1 where colA = 5;
+FAIL
+FAIL	intro_to_db/sqllogictest	0.041s</code></pre>
+
+  <p>Every mismatch has this shape: the file and the line of the record, the expected and actual rows (sorted for <code>rowsort</code>), the optimized plan, and the SQL. The plan tells you which of your executors ran. A record that runs longer than 60 seconds fails with a timeout message and skips the rest of its file.</p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">The optimized plan for a join over two mock tables reads <code>NestedLoopJoin { type=Inner, predicate=(#0.0=#1.0) }</code>, with <code>MockScan { table=__mock_table_1 }</code> and <code>MockScan { table=__mock_table_3 }</code> as its children, in that order. <code>__mock_table_3</code> has the columns (colE, colF). What is <code>#1.0</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The first number is the tuple index, not a column. #0.1 would be colB, the left tuple's second column.">colB, the second column of <code>__mock_table_1</code>.</li>
+      <li data-option="b" data-explain="In a join the tuple index picks the side: 1 is the right child's tuple, and column 0 of __mock_table_3 is colE. The predicate is colA = colE.">colE, column 0 of the right child's tuple.</li>
+      <li data-option="c" data-explain="Tuple index 1 is the right child, __mock_table_3, and its column 0 is colE; colF is #1.1.">colF, column 1 of <code>__mock_table_3</code>.</li>
+      <li data-option="d" data-explain="Constants print as their value, as in (#0.0&gt;97). #1.0 is a column value expression.">The constant 1.0, compared with column 0.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">An executor has 45 tuples to produce, and its parent calls <code>Next</code> with <code>batchSize</code> 20 until it returns false. Which sequence of results follows the contract?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The last 5 tuples would be lost: whoever calls Next ignores the batch of a call that returns false.">(true, 20), (true, 20), (false, 5)</li>
+      <li data-option="b" data-explain="A batch may not exceed batchSize, and the drain helper in the unit tests rejects any call that returns more than batchSize tuples.">(true, 20), (true, 25), (false, 0)</li>
+      <li data-option="c" data-explain="Returning false once is not enough: after the end, every further call must also return false with an empty batch. Here the fourth call returns true again with an empty batch, which breaks two rules.">(true, 20), (true, 20), (true, 5), (true, 0)</li>
+      <li data-option="d" data-explain="Each non-empty batch comes back with true, including the partial last one; then the executor returns false with an empty batch, and keeps doing so.">(true, 20), (true, 20), (true, 5), (false, 0)</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">On the starter, with an index <code>t1v1</code> on <code>t1(v1)</code> and <code>force_optimizer_starter_rule=yes</code>, <code>EXPLAIN (o)</code> of <code>SELECT * FROM t1 ORDER BY v1</code> shows an <code>IndexScan</code>, but <code>SELECT * FROM t1 WHERE v1 = 1</code> shows <code>SeqScan { table=t1, filter=(#0.0=1) }</code>. Why the difference?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="OrderByAsIndexScan ships working, so ORDER BY v1 already uses the index. SeqScanAsIndexScan is your stage 5 rule, and its starter version returns its input unchanged.">The ORDER BY rule is pre-built, while the rule for point lookups is a stub that returns the plan unchanged.</li>
+      <li data-option="b" data-explain="t1 has the index t1v1 on v1, and the ORDER BY query uses it. The optimizer doesn't decide by table size.">The table is empty, so the optimizer decides a sequential scan is cheaper for the WHERE query.</li>
+      <li data-option="c" data-explain="The starter rule list includes SeqScanAsIndexScan. Its body is what makes the difference: it's still the stub.">The starter rule list has no rule for WHERE clauses at all.</li>
+      <li data-option="d" data-explain="The binder resolves v1 in both queries. The difference is in the optimizer, not the binder.">The binder can't resolve <code>v1</code> inside a WHERE clause until the index is used.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">The planner produced <code>Projection { exprs=["#0.0", "#0.1"] }</code> over <code>Filter { predicate=(#0.0=3) }</code> over <code>SeqScan { table=test_simple_seq_2 }</code>. <code>EXPLAIN (o)</code> shows a single node, <code>SeqScan { table=test_simple_seq_2, filter=(#0.0=3) }</code>. Which pre-built rules produced it?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The point-lookup rule would make an IndexScan, and test_simple_seq_2 has no index. The filter's move into the scan is MergeFilterScan's work.">SeqScanAsIndexScan alone, which absorbed both nodes into the scan.</li>
+      <li data-option="b" data-explain="EliminateTrueFilter removes a Filter whose predicate is the constant true. (#0.0=3) is not true, and the predicate survives inside the scan.">EliminateTrueFilter removed the Filter, and MergeProjection removed the Projection.</li>
+      <li data-option="c" data-explain="The Projection passed both columns through in order, so MergeProjection removed it; MergeFilterScan then folded the Filter's predicate into the SeqScan below it.">MergeProjection removed the identity Projection, and MergeFilterScan moved the predicate into the SeqScan.</li>
+      <li data-option="d" data-explain="The executors never see the planner's tree, only the optimized one; plan rewriting happens entirely in the optimizer.">None: the SeqScan executor removes the nodes above it when it runs.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Your Mac's Go reports <code>CGO_ENABLED=0</code>. What happens when you run <code>go build ./...</code> after the pull?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Go doesn't fall back to another parser; pg_query_go's Parse exists only in its cgo build, so the name is undefined.">It builds, using a pure-Go fallback parser in pg_query_go.</li>
+      <li data-option="b" data-explain="pg_query.Parse and pg_query.Scan are undefined without cgo, so binder fails, and with it every package that imports binder. execution and optimizer don't import it and still build.">The binder fails with <code>undefined: pg_query.Parse</code>, and so does every package that imports it.</li>
+      <li data-option="c" data-explain="The executors and rules don't depend on the parser at all; only binder and its importers fail.">Every package fails, including <code>execution</code> and <code>optimizer</code>.</li>
+      <li data-option="d" data-explain="Without cgo the parser's Go wrappers don't exist, so the failure is at compile time, not when a query runs.">It builds, and the first SQL statement panics at run time.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Build it: orientation (stage P3.0)</h2>
+
+  <p>This stage has no code to write. The tasks get the project building and walk you through the pipeline once in the shell; the last one leaves you with a file for your own test queries. Run every command from <code>go_db_internals/intro_to_db</code>.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u6-01-p1p2">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-01-p1p2-cb">
+        <label for="u6-01-p1p2-cb">Run the Project 1 and Project 2 tests under the race detector, and commit your work once both pass.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which Project 3 symptoms would a leftover buffer pool bug cause? A page guard that is never dropped, for example, pins a frame forever; what happens to a scan over a table bigger than the pool?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Run both packages' full suites with <code>-race</code>, rather than the last stage's checkpoint alone. If anything fails, go back to that project's lessons before pulling. Then commit, so the pull merges into a clean tree.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>go test -race ./bufferpool/ ./btree/
+git status   # nothing left uncommitted before the pull</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-01-pull">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-01-pull-cb">
+        <label for="u6-01-pull-cb">Pull Project 3's code, check that cgo is enabled, and run one warm-up build.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which files should the pull change, and which should it only add? If the merge reports a conflict, which file could it be in, given that the course only adds files?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Pull with <code>--no-rebase</code>, as in Lesson 0. Check <code>go env CGO_ENABLED</code> and <code>xcode-select -p</code>. Then build everything once and let the C parser compile. If the build complains about a missing module, you are probably offline: the first build downloads pg_query_go.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>git pull --no-rebase origin main
+go env CGO_ENABLED      # 1
+time go build ./...     # about a minute the first time</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-01-shell">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-01-shell-cb">
+        <label for="u6-01-shell-cb">In the shell, list the tables, query a mock table, and compare the planner's plan with the optimizer's for a query with a WHERE clause.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which nodes does the planner create for <code>SELECT colB FROM __mock_table_1 WHERE colA = 5</code>, and which of them can a rule remove? Is this Projection an identity?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Run <code>\dt</code>, then the query, then <code>EXPLAIN</code> of it, and read the three sections. Then try the same WHERE clause on <code>test_simple_seq_2</code>, a real table, with <code>EXPLAIN (o,s)</code>, and see where the predicate went.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>EXPLAIN SELECT colB FROM __mock_table_1 WHERE colA = 5;
+EXPLAIN (o,s) SELECT col2 FROM test_simple_seq_2 WHERE col1 = 5;</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-01-index-plans">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-01-index-plans-cb">
+        <label for="u6-01-index-plans-cb">Create a table with an index, and use EXPLAIN (o,s) under both rule lists to see which plans already use the index and which wait for stage 5.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which pre-built rule uses an index for <code>ORDER BY</code>? Which rule would use it for <code>WHERE v1 = 1</code>, and what does its starter version return?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Create <code>t1(v1 INT, v2 INT)</code> and an index on <code>v1</code>. Explain an ORDER BY query and a point lookup, then <code>set force_optimizer_starter_rule=yes</code> and explain them again; <code>show force_optimizer_starter_rule;</code> prints the current value. Write down the plans: after stage 5 the point lookup should change.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>CREATE TABLE t1(v1 INT, v2 INT);
+CREATE INDEX t1v1 ON t1(v1);
+EXPLAIN (o,s) SELECT * FROM t1 WHERE v1 = 1;</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-01-own-slt">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-01-own-slt-cb">
+        <label for="u6-01-own-slt-cb">Write a small .slt file of your own over a mock table and run it with TestSQLLogicFile, once passing and once with a wrong expected row.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which records need <code>rowsort</code>? How are the columns of a result row separated in the expected lines?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Keep the file outside the module, for example next to it, and pass an absolute path. Use a query whose answer you can work out from the mock table's formula, run it, then change one expected value and read the failure message: line, expected, actual, plan.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>go test -race -run '^TestSQLLogicFile$' ./sqllogictest/ -args -slt=$PWD/../my.slt</code></pre></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage P3.0</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestPipeline' -timeout 300s ./...</code></pre>
+    <p>It runs eight tests in <code>bustub</code> that compare the shell's output with BusTub's: <code>TestPipelineExplain</code> (the full EXPLAIN text of a mock-table query), <code>ExplainOptions</code>, <code>SelectConstant</code>, <code>MockTable</code>, <code>DDL</code>, <code>CatalogCommands</code>, <code>SessionVariables</code> and <code>QueryErrors</code>, each with the <code>TestPipeline</code> prefix. It also runs <code>TestPipelineSQL</code> in <code>sqllogictest</code>, with <code>p3.00-primer.slt</code> as its one subtest. This stage passes on the starter by design: it uses only pre-built executors. Success prints <code>ok</code> for <code>intro_to_db/bustub</code> and <code>intro_to_db/sqllogictest</code>; every other package shows <code>ok … [no tests to run]</code> or <code>[no test files]</code>. The first run takes longer while the race-enabled parser compiles.</p>
+    <p>If it fails, look at the build. With cgo off, for example:</p>
+<pre><code># intro_to_db/binder
+binder/binder.go:38:26: undefined: pg_query.Parse
+binder/binder.go:55:23: undefined: pg_query.Scan
+FAIL	intro_to_db/binder [build failed]
+FAIL	intro_to_db/bustub [build failed]</code></pre>
+    <p>From the next lesson on, the same command with another prefix is each stage's checkpoint, and it fails until you write that stage's code.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, the pull reports a merge conflict, <code>go build</code> fails in <code>binder</code> even with cgo on, you're not sure what <code>#1.0</code> refers to in a plan you're reading, or why <code>WHERE v1 = 1</code> doesn't use your index yet. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: the CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/project3/">Project #3 writeup</a> (Background, Inspecting SQL Query Plans, Query Plan Syntax, Project Specification, Testing); Lecture #15 slide 5 and Lecture #13 slides 15–17; BusTub at commit d49b823: <code>src/binder/</code>, <code>src/planner/</code>, <code>src/optimizer/optimizer.cpp</code> and <code>optimizer_custom_rules.cpp</code>, <code>src/include/execution/executors/abstract_executor.h</code>, <code>src/include/execution/execution_engine.h</code>, <code>src/common/bustub_instance.cpp</code>, <code>tools/shell/shell.cpp</code>, <code>tools/sqllogictest/</code> and <code>test/sql/p3.00-primer.slt</code>; this course's <code>binder/binder.go</code>, <code>execution/doc.go</code>, <code>execution/executor.go</code>, <code>optimizer/doc.go</code>, <code>bustub/pipeline_test.go</code> and <code>sqllogictest/stages_test.go</code>; <a href="https://github.com/pganalyze/pg_query_go">pg_query_go</a>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u5-08-statistics-and-cardinality.html">← Query Optimization II: Statistics and Cardinality Estimation</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u6-02-p3-seq-scan.html">Next: P3.1 Sequential Scan →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

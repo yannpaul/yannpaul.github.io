@@ -1,0 +1,368 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 4 · Lesson 3 · P2.3 Insertion and Leaf Splits</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 4 · Lesson 3</p>
+  <h1>P2.3 Insertion and Leaf Splits</h1>
+  <p class="subtitle">Implement <code>Insert</code> up to the first internal split: the first insertion, sorted insertion into a leaf, duplicate rejection, and the leaf split that copies a separator into the parent or into a new root, using the split timing and split point the tests expect; then debug trees with <code>cmd/btree_printer</code>.</p>
+
+  <p class="lede">Until now the tests built every tree by hand. From this stage on, the tree builds itself. Unit 3 traced inserts on paper with the lecture's rules; the Project 2 writeup and this course's tests fix a few details the lecture leaves open, above all when a leaf splits and how many entries each half keeps. This lesson states those conventions, then has you write every part of an insertion except one: an internal page that is already full. That case is the next lesson's.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Lesson 1: a tree has <code>LeafMaxSize</code> = 6 and <code>InternalMaxSize</code> = 4. What do its leaf and internal pages return from <code>MinSize</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Leaves round down: 6 / 2 = 3, not 2.">2 for leaves and 2 for internal pages.</li>
+      <li data-option="b" data-explain="Internal pages round up: (4 + 1) / 2 = 2 in integer division, which is 4 / 2 rounded up, not 3.">3 for leaves and 3 for internal pages.</li>
+      <li data-option="c" data-explain="Leaf: 6 / 2 = 3. Internal: (4 + 1) / 2 = 2. With even max sizes the two roundings agree.">3 for leaves and 2 for internal pages.</li>
+      <li data-option="d" data-explain="That swaps the two page types' max sizes.">2 for leaves and 3 for internal pages.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 3, Lesson 8: under latch crabbing, when is a node safe for an insert, so that the latches on its ancestors can be released?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="If one more entry fits, even one pushed up from a split below, the node won't split, so nothing above it changes.">When it isn't full: one more entry, even one pushed up from below, fits.</li>
+      <li data-option="b" data-explain="That is the condition for a delete: losing one entry can't make the node underflow.">When it is more than half full.</li>
+      <li data-option="c" data-explain="A leaf can be unsafe too, when it is full; the insert then splits it and changes the parent.">Always, if it is a leaf, because inserts only change leaves.</li>
+      <li data-option="d" data-explain="The root is the node most likely to be held up; it is safe or not by the same rule as any other node.">Only when it is the root.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 2, Lesson 7: every frame of a buffer pool is pinned, and code calls <code>bpm.NewPage()</code>. What happens?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="NewPage needs no frame, so a full pool doesn't stop it.">It panics, because no frame can hold the new page.</li>
+      <li data-option="b" data-explain="The buffer pool never waits for a frame, and NewPage doesn't need one anyway.">It blocks until a guard is dropped.</li>
+      <li data-option="c" data-explain="NewPage touches no frame and does no I/O, so it has nothing to evict.">It evicts a pinned frame to make room.</li>
+      <li data-option="d" data-explain="NewPage only hands out the next ID from an atomic counter; the disk managers allocate space lazily. Only the fetch that follows needs a frame.">It succeeds: it only hands out the next page ID.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>What stage 3 covers</h2>
+
+  <p>All of stage 3 is <code>BPlusTree.Insert</code> in <code>btree/b_plus_tree.go</code>, plus helpers in the two page files. <code>Insert(key, value)</code> returns <code>true</code> when it adds the key and <code>false</code> when the key is already in the tree; keys are unique, and a duplicate insertion changes nothing. The stage-3 tests exercise:</p>
+  <ul>
+    <li>the first insertion into an empty tree, which creates a root leaf and records it in the header page;</li>
+    <li>insertion into a leaf that has room, keeping its entries sorted;</li>
+    <li>duplicates, in the root leaf and in leaves further down;</li>
+    <li>leaf splits, including the very first one, where the root leaf splits and a new internal root appears.</li>
+  </ul>
+  <p>They keep every internal page below its max size, so the separator from a leaf split always fits in the parent. Splitting a full internal page is stage 4.</p>
+
+  <h2>When a leaf splits, and where</h2>
+
+  <p>The writeup recommends, without requiring it, a split rule: "split a leaf node when the number of values reaches max_size after insertion, and split an internal node when number of values reaches max_size before insertion." It gives the reason: with this rule an insertion "will never cause a page data overflow". It also says CMU's tests don't check which rule you follow. This course's tests do, because about twenty of them compare the exact shape of a tree. The doc comment on <code>BPlusTree.Insert</code> states the rules, and Unit 3 promised them here:</p>
+  <ul>
+    <li><strong>Split timing.</strong> Insert the entry first. If the leaf now holds <code>LeafMaxSize</code> entries, split it. A leaf at rest therefore holds at most <code>LeafMaxSize − 1</code> entries: a tree with <code>LeafMaxSize</code> = 4 has leaves of at most 3 keys, the lecture's "nodes hold at most 3 keys".</li>
+    <li><strong>Split point.</strong> With <em>n</em> = <code>LeafMaxSize</code> entries, the left page keeps the first <em>n</em>/2, rounded down. A new right page takes the rest and follows the left page in the leaf chain.</li>
+    <li><strong>Separator.</strong> The right page's first key is copied up into the parent; it stays in the leaf too, as in the lecture.</li>
+    <li><strong>New root.</strong> When the leaf that splits is the root, a new internal root with two children is created, and the header page records it.</li>
+  </ul>
+
+  <p>The split point differs from the one Unit 3 used for HW3. There, a leaf of 5 keys kept 3 on the left; here the left page keeps 2. Inserting 1 to 5 into a tree with <code>LeafMaxSize</code> = 5 gives <code>(3) / (|1,2) (|3,4,5)</code>, not a split at 4. (Trees are written as the tests write them: level by level, separated by " / ", internal pages as their keys, leaves as <code>(tombstones|keys)</code>.) Odd max sizes make the rule visible:</p>
+
+  <table>
+    <tr><th><code>LeafMaxSize</code></th><th>Keys inserted</th><th>Tree after the last insertion</th></tr>
+    <tr><td>3</td><td>1, 2, 3</td><td><code>(2) / (|1) (|2,3)</code></td></tr>
+    <tr><td>4</td><td>1, 2, 3</td><td><code>(|1,2,3)</code>, no split yet</td></tr>
+    <tr><td>4</td><td>1, 2, 3, 4</td><td><code>(3) / (|1,2) (|3,4)</code></td></tr>
+    <tr><td>5</td><td>1, 2, 3, 4, 5</td><td><code>(3) / (|1,2) (|3,4,5)</code></td></tr>
+  </table>
+
+  <p>The rule also keeps every insertion inside the page. A tree created with <code>Options{}</code> gets the largest leaves a page allows: <code>LeafMaxSize</code> equals the slot count, 510 for 8-byte keys. The 510th entry goes into the last slot, and the leaf splits at once. A lazy rule that waits for a 511th entry would write it past the end of the key array, into the RID array. <code>TestBPlusTreeInsertDefaultLeafSize</code> inserts 2000 keys into such a tree to catch exactly that.</p>
+
+  <h2>One insertion, step by step</h2>
+
+  <p>An insertion may change the root, so it takes the header page's <em>write</em> guard first. In this stage, keep it simple: hold the header's write guard and a write guard on every page of the path for the whole insertion. That is correct but serializes all writers, much like the global latch the writeup forbids. The doc comment on <code>BPlusTree</code> allows a simpler correct scheme for stages 2 to 8; stage 9 replaces it with latch crabbing (releasing safe ancestors early) and an optimistic first pass.</p>
+
+  <ol>
+    <li><strong>Header.</strong> Write-guard the header page and read the root ID. If the tree is empty, allocate a page with <code>t.bpm.NewPage()</code>, write-guard it, <code>Init</code> it as a leaf with <code>t.leafMaxSize</code>, put the entry at index 0, record its ID with <code>SetRootPageID</code>, and return <code>true</code>.</li>
+    <li><strong>Descend.</strong> From the root, write-guard each page and push its guard onto the path; in internal pages, pick the child with your stage-2 helper. Stop at the leaf.</li>
+    <li><strong>Duplicate check.</strong> Run the leaf's lower-bound search. If the key is there, return <code>false</code> having changed nothing.</li>
+    <li><strong>Insert.</strong> Shift the entries from the lower-bound index one slot to the right and write the new key and RID there. If the leaf now holds fewer than <code>LeafMaxSize</code> entries, you are done.</li>
+    <li><strong>Split.</strong> Allocate and <code>Init</code> a new leaf, move the entries from index <code>Size()/2</code> on into it, and link it into the chain after the left leaf.</li>
+    <li><strong>Separator.</strong> Insert the right leaf's first key and page ID into the parent, right after the left leaf's pointer. If the left leaf was the root, create a new internal root instead.</li>
+  </ol>
+
+  <p>The pre-built <code>Context</code> struct holds this state, and the writeup's tips are in its doc comment. <code>ctx.HeaderPage</code> is the header's write guard (a <code>*bufferpool.WritePageGuard</code>, <code>nil</code> when not held), <code>ctx.RootPageID</code> records the root, and <code>ctx.WriteSet</code> is the path of write guards from the root down. The writeup's tip: a node's parent is at the back of the write set, so when the leaf is <code>WriteSet[len−1]</code>, its parent is <code>WriteSet[len−2]</code>. If a page splits and nothing is above it in the write set, it must be the root, and <code>ctx.HeaderPage</code> must still be held. <code>ctx.Release()</code> drops everything the context still holds, header first, then the path from the top down, which is the release order the writeup asks for. Call it with <code>defer</code> right after <code>NewContext()</code>, the Go stand-in for BusTub's destructor.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L10-crabbing-insert-split-p92.png" alt="The lecture's tree with nodes A to I. Thread T1 is inserting 25. It holds write latches on the inner node C, holding 23, and on the leaf F, holding 23 and 31. A callout on F says: we need to split F, so we need to hold the latch on its parent node." loading="lazy">
+    <figcaption>Splitting F adds an entry to its parent C, so C's write latch must still be held when the split happens. In the Go code, F's guard is at the back of the write set and C's is just before it (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/10-indexconcurrency.pdf#page=92">Lecture #10, slide 27</a>).</figcaption>
+  </figure>
+
+  <p>Pages created during a split get guards of their own: <code>NewPage</code> returns an ID, and <code>t.bpm.WritePage(id, bufferpool.AccessUnknown)</code> guards it. Drop those guards when the split is done (a <code>defer</code> in the helper that creates the page works well). A new page is invisible to other goroutines until its parent points to it, and the parent is write-guarded.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=u7ii_Lvm9rM&amp;t=2231s">#08 B+Trees, "B+ tree insertion operations" (37:11)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/08-indexes1.pdf#page=67">slides 20–31</a>: the lecture's insert algorithm and its leaf split; remember that its split point differs from this course's.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Making room for an entry means moving the tail of both arrays one slot to the right, inside the same page. Go's built-in <code>copy</code> handles overlapping source and destination correctly, like C's <code>memmove</code>, so one <code>copy</code> per array moves a whole run of keys or RIDs at once, with no loop and no temporary buffer. The same call moves the upper half of a page into a new page during a split. Compute every range with <code>keyOffset</code> and <code>valueOffset</code>, so that it stays right for any key size and tombstone buffer.</p>
+  </div>
+
+  <h2>Debugging with cmd/btree_printer</h2>
+
+  <p>The writeup's "Tree Visualization" tool is ported as <code>cmd/btree_printer</code>. It runs on your buffer pool and your tree, so it works as soon as <code>Insert</code> does. It asks for the leaf and internal max sizes, then reads commands: <code>i k</code> inserts key <em>k</em>, <code>f file</code> inserts every integer in a file, <code>p</code> prints the tree, <code>g tree.dot</code> writes it in Graphviz format, <code>q</code> quits, and <code>?</code> lists the rest. Its <code>-tombs</code> flag sets the tombstone buffer, 2 by default as in BusTub; use <code>-tombs 0</code> until stage 7, to match the tests. From <code>go_db_internals/intro_to_db</code>:</p>
+
+<pre><code>$ go run ./cmd/btree_printer -tombs 0
+...
+&gt; 4 4
+&gt; i 1
+&gt; i 2
+&gt; i 3
+&gt; i 4
+&gt; p
+        (3)
+  (|1,2)    (|3,4)
+
+Internal Page: 3
+Contents: 1, 3: 2
+
+Leaf Page: 1	Next: 2
+Contents: 1, 2
+Tombstoned keys:
+
+Leaf Page: 2	Next: -1
+Contents: 3, 4
+Tombstoned keys:</code></pre>
+
+  <p>The <code>p</code> command prints two views. The first is <code>DrawBPlusTree</code>, the same picture a failing shape test prints. The second is <code>Print</code>, a depth-first dump with page IDs: <code>Contents: 1, 3: 2</code> means child page 1, then key 3 with child page 2, and each leaf shows its next page, so a broken chain is easy to spot. The page IDs show the order of events: the header is page 0, the root leaf page 1, the right half of its split page 2, and the new root page 3. For a picture, <code>g tree.dot</code> followed by <code>dot -Tpng -O tree.dot</code>, or the online viewer the writeup links, draws internal pages in pink and leaves in green. Lecture #10's hint to start with tiny pages applies here as small max sizes: 3 or 4 makes a split happen every few keys.</p>
+
+  <p>Inside a test you are debugging, the same helpers are available: <code>t.Log(tree.DrawBPlusTree())</code>, or <code>tree.Print(os.Stderr)</code>. They take read guards top-down and keep a parent's guard while visiting its children, so call them only when no other goroutine is changing the tree.</p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A tree has <code>LeafMaxSize</code> = 5. A leaf holds 13, 14, 15 and 17, and its parent has room. Key 16 is inserted. What happens?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is the lecture's split point from Unit 3, with the larger half on the left. This course's left page keeps 5 / 2 = 2 entries.">The leaf splits into (13, 14, 15) and (16, 17), and 16 is copied up.</li>
+      <li data-option="b" data-explain="The leaf reaches 5 entries, its max size, so it splits. The left page keeps 5 / 2 = 2 entries, the right page takes 15, 16 and 17, and its first key, 15, goes up as the separator.">The leaf splits into (13, 14) and (15, 16, 17), and 15 is copied up.</li>
+      <li data-option="c" data-explain="A leaf splits when it reaches LeafMaxSize entries, not when it would exceed it. Five entries in a leaf of max size 5 means a split now.">The leaf takes 16 as its fifth entry and splits on the next insertion.</li>
+      <li data-option="d" data-explain="Copying up keeps the separator in the leaf; only internal splits move a key out of both halves.">The leaf splits into (13, 14) and (16, 17), and 15 moves up into the parent.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Keys 10, 20, 30, 40 and 50 are inserted in that order into an empty tree with <code>LeafMaxSize</code> = 4. What is the tree afterwards?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A leaf of max size 4 can't hold 4 entries at rest: it splits as soon as the fourth arrives.">(|10,20,30,40) with 50 waiting in a second leaf, under the root (50).</li>
+      <li data-option="b" data-explain="After 40 the leaf splits 2/2, so 30 is the first key of the right leaf and the separator. 50 then joins the right leaf, which still has room.">(40) / (|10,20,30) (|40,50)</li>
+      <li data-option="c" data-explain="Only one split happens. After it, the right leaf holds 30 and 40, and 50 makes three entries, still below the max.">(30,50) / (|10,20) (|30,40) (|50)</li>
+      <li data-option="d" data-explain="40 brings the root leaf to 4 entries: it splits into (10,20) and (30,40), and a new root holds 30. Then 50 fits in (30,40,50), which has 3 entries, below the max of 4.">(30) / (|10,20) (|30,40,50)</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">A tree uses <code>Options{}</code>, so <code>LeafMaxSize</code> is 510, the leaf's slot count. Why does the "split when the leaf reaches the max after an insertion" rule matter here?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The arrays have exactly 510 slots. Splitting at 510 entries never needs more; waiting for a 511th entry would write it past the key array into the RID array, which TestBPlusTreeInsertDefaultLeafSize detects as wrong RIDs.">A leaf never needs a 511th slot, which the page's arrays don't have.</li>
+      <li data-option="b" data-explain="The split timing doesn't change the leaf's min size; MinSize depends only on MaxSize.">It keeps the leaf's <code>MinSize</code> at 255 instead of 256.</li>
+      <li data-option="c" data-explain="The number of leaves changes by at most one; the reason is the size of the arrays, not the tree's height.">It makes the tree one level shorter.</li>
+      <li data-option="d" data-explain="Both rules write the leaf the same number of times; the difference is whether a 511th entry is ever stored.">It avoids one write guard per insertion.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">An <code>Insert</code> splits the root leaf and creates a new internal root correctly, but never calls <code>SetRootPageID</code>. What do later operations see?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="NewPage doesn't record anything in the header page; only SetRootPageID does.">Nothing wrong: <code>NewPage</code> updates the header page automatically.</li>
+      <li data-option="b" data-explain="The header still holds a valid page ID, the old root leaf, so the tree doesn't look empty.">An empty tree, because the header page holds <code>common.InvalidPageID</code>.</li>
+      <li data-option="c" data-explain="The header still names the old root, which is now only the left leaf. Searches never reach the right half, and inserting one of its keys again succeeds as if it were new.">The old root leaf, now only the left half, so keys in the right half are invisible.</li>
+      <li data-option="d" data-explain="The guards are all dropped correctly; the problem is a stale root ID, not a latch.">A deadlock on the header page.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Leaf L points to M as its next page. L splits, and its upper half moves into a new leaf R. What must the next-page pointers be afterwards?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="R holds keys between L's and M's, so the chain must read L, R, M. R takes over L's old next pointer before L is pointed at R.">L points to R, and R points to M.</li>
+      <li data-option="b" data-explain="Then a scan from L skips R and the keys that moved into it.">L still points to M, and R points to M.</li>
+      <li data-option="c" data-explain="R holds the larger keys, so it comes after L in the chain.">R points to L, and L still points to M.</li>
+      <li data-option="d" data-explain="R would be the end of the chain, and M and everything after it would be unreachable by a scan.">L points to R, and R's next page is <code>common.InvalidPageID</code>.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Build it: insertion and leaf splits (stage P2.3)</h2>
+
+  <p>You edit <code>btree/b_plus_tree.go</code> (<code>Insert</code> and any helpers) and add helpers to <code>btree/b_plus_tree_leaf_page.go</code> and <code>btree/b_plus_tree_internal_page.go</code>. Run commands from <code>go_db_internals/intro_to_db</code>. The rules, in plain words:</p>
+  <ul>
+    <li>Call <code>t.checkKey("Insert", key)</code> first. Return <code>false</code> for a key that is already in the tree, without changing anything; otherwise insert it and return <code>true</code>.</li>
+    <li>Take the header page's write guard before reading the root, and keep it while the root can still change. Use write guards on the path, and drop every guard you take, including those of new pages.</li>
+    <li>New leaves are initialized with <code>t.leafMaxSize</code>, new internal pages with <code>t.internalMaxSize</code>.</li>
+    <li>Split a leaf when it reaches <code>LeafMaxSize</code> entries after the insertion. The left page keeps <code>Size()/2</code> entries, rounded down; the right page follows it in the leaf chain, and its first key goes into the parent.</li>
+    <li>When the root splits, create a new internal root with two children and record it in the header page.</li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u4-03-leaf-insert-at">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-03-leaf-insert-at-cb">
+        <label for="u4-03-leaf-insert-at-cb">Add a leaf-page helper that inserts a key and RID at a given index, shifting the later entries one slot to the right.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which byte ranges move, in which array, and by how many bytes? Does the order of moving and writing matter? Which header field changes? And in stage 7, a tombstone records an entry's index: what happens to it when its entry shifts right?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Let <em>n</em> be <code>Size()</code>. Move the keys at indexes <em>index</em> to <em>n</em> − 1 to <em>index</em> + 1 to <em>n</em> with one <code>copy</code> on the key array's byte range, and do the same on the RID array. Then write the new key with your key setter and the RID with <code>SetValueAt</code>, and <code>ChangeSizeBy(1)</code>. The caller guarantees a free slot. Leave a note for stage 7: tombstone indexes at or after <em>index</em> will have to grow by one.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>// keys [index, n) move one slot right; copy is a memmove, so the overlap is fine
+copy(p.data[p.keyOffset(index+1):p.keyOffset(n+1)], p.data[p.keyOffset(index):p.keyOffset(n)])</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-03-first-insert">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-03-first-insert-cb">
+        <label for="u4-03-first-insert-cb">Start Insert: take the header page's write guard in a Context, and if the tree is empty, create a root leaf holding the entry and record it in the header page.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Why a write guard on the header, even when the tree turns out not to be empty? Two goroutines insert into an empty tree at the same time: what keeps them from creating two roots? What must happen to the new page's guard and to the header guard before <code>Insert</code> returns?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Create a <code>Context</code> with <code>NewContext()</code> and defer its <code>Release</code>. Store the header's write guard in <code>ctx.HeaderPage</code> and the root ID from <code>AsBPlusTreeHeaderPage(ctx.HeaderPage.DataMut())</code> in <code>ctx.RootPageID</code>. If the root is <code>common.InvalidPageID</code>: get an ID from <code>t.bpm.NewPage()</code>, write-guard it, <code>Init(t.leafMaxSize)</code> it through <code>t.leafPage(guard.DataMut())</code>, insert the entry at index 0 with your helper, drop the guard, set the header's root ID, and return <code>true</code>. The deferred <code>Release</code> drops the header guard.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>ctx := NewContext()
+defer ctx.Release()
+ctx.HeaderPage = t.bpm.WritePage(t.headerPageID, bufferpool.AccessUnknown)</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-03-insert-leaf">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-03-insert-leaf-cb">
+        <label for="u4-03-insert-leaf-cb">Descend from the root with write guards collected in the write set, reject a duplicate key, and insert the entry into the leaf in sorted position.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>The descent is the stage-2 walk with two changes. Which guard type, and what happens to each parent's guard now? Which index does the lower-bound search give you when the key is absent, and why is it exactly the insertion position?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Starting at <code>ctx.RootPageID</code>, write-guard each page and append the guard to <code>ctx.WriteSet</code>, keeping all of them. In an internal page, choose the child with your stage-2 helper. At the leaf, which is the last guard in the write set, run the lower-bound search on <code>t.leafPage(guard.DataMut())</code>. If the key matched, return <code>false</code>; the deferred <code>Release</code> drops the whole path. Otherwise insert at the returned index and return <code>true</code> when the leaf still holds fewer than <code>t.leafMaxSize</code> entries. Leave a placeholder for the split.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>guard := t.bpm.WritePage(pageID, bufferpool.AccessUnknown)
+ctx.WriteSet = append(ctx.WriteSet, guard) // Release drops it later</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: insertion without splits</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreeInsert(IntoEmptyTree|Basic|KeepsLeafSorted)$' ./btree/</code>. It runs <code>TestBPlusTreeInsertIntoEmptyTree</code>, BusTub's <code>BasicInsertTest</code> (<code>TestBPlusTreeInsertBasic</code>) and <code>TestBPlusTreeInsertKeepsLeafSorted</code> (12 shuffled keys in one leaf of max size 16), none of which needs a split. Success prints <code>ok  	intro_to_db/btree</code>. A header page that isn't updated fails with <code>RootPageID() = -1, header page root = -1: the header page must record the new root</code>.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-03-split-leaf">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-03-split-leaf-cb">
+        <label for="u4-03-split-leaf-cb">When the leaf reaches LeafMaxSize entries, move its upper half into a new leaf and link the new leaf into the chain right after it.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which entries stay: the first <code>Size()/2</code>, or the last? What does the new page need before entries go into it? Which two next-page pointers change, and in which order must you read and write them so that nothing is lost? What does the parent need from the split?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Allocate a page, write-guard it, defer its <code>Drop</code>, and <code>Init(t.leafMaxSize)</code> it. Let <em>mid</em> = <code>Size()/2</code>. Copy the keys and the RIDs at indexes <em>mid</em> to <code>Size() − 1</code> into the new page starting at index 0 (one <code>copy</code> per array), then set the new page's size to <code>Size() − mid</code> and the old page's to <em>mid</em>. A leaf-page helper that moves a range of entries into another leaf is worth writing now; stages 5 and 6 move entries between leaves too. Then give the right page the left page's old next pointer and point the left page at the right page. Hand the right page's <code>KeyAt(0)</code> and page ID to the parent step.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>mid := left.Size() / 2 // left keeps [0, mid); the new right leaf gets [mid, Size())
+right.SetNextPageID(left.NextPageID())
+left.SetNextPageID(rightID)</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-03-separator">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-03-separator-cb">
+        <label for="u4-03-separator-cb">Put the separator into the parent right after the left leaf's pointer, or, when the root leaf split, create a new internal root and record it in the header page.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>How do you tell that the leaf that split was the root? Where in the write set is the parent, and at which index does the new pointer go? For a new root: which child goes in slot 0, which key and child in slot 1, and what is its size? In stage 4 the same step runs one level higher with an internal page on the left, so which inputs does it really need?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Write a helper that takes the context, the position in the write set of the page that split, the separator key and the new right page's ID. If that position is 0, the page that split was the root: check that <code>ctx.HeaderPage</code> is held, allocate an internal page, <code>Init(t.internalMaxSize)</code>, point child 0 at the old root and child 1 at the right page with the separator as key 1, set the size to 2, and record the new root in the header page. Otherwise the parent is the guard just before it in the write set: find the left page's index with <code>ValueIndex</code> and insert (separator, right page ID) at that index + 1, with an internal-page insert-at helper that shifts both arrays as the leaf one does. In this stage the parent always has room.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>root.SetValueAt(0, leftID)
+root.SetKeyAt(1, separator)
+root.SetValueAt(1, rightID)
+root.SetSize(2)</code></pre></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage P2.3</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestBPlusTreeInsert' ./btree/</code></pre>
+    <p>It runs the ten stage-3 tests: BusTub's <code>BasicInsertTest</code> as <code>TestBPlusTreeInsertBasic</code>, and nine extra tests: <code>IntoEmptyTree</code>, <code>Duplicate</code>, <code>KeepsLeafSorted</code>, <code>RootLeafSplit</code> (exact shapes for leaf max sizes 3, 4 and 5), <code>LeafSplitsUnderRoot</code> (keys 1 to 20, ascending and descending), <code>LookupAfterEachInsert</code>, <code>DefaultLeafSize</code>, <code>KeySize16</code> and <code>ReleasesLatches</code>, each with the <code>TestBPlusTreeInsert</code> prefix. Success prints <code>ok  	intro_to_db/btree</code> and the time, a second or two.</p>
+    <p>Shape failures print the tree you built next to the one expected, then your tree drawn by <code>DrawBPlusTree</code>:</p>
+<pre><code>--- FAIL: TestBPlusTreeInsertRootLeafSplit (0.00s)
+    b_plus_tree_insert_extra_test.go:102: tree shape:
+         got: (3) / (|1,2) (|3)
+        want: (2) / (|1) (|2,3)</code></pre>
+    <p>That one keeps the larger half on the left. Other typical failures:</p>
+    <ul>
+      <li>A lazy split, waiting for an entry beyond the max: <code>got: (|1,2,3,4)</code>, <code>want: (3) / (|1,2) (|3,4)</code>, and in <code>DefaultLeafSize</code> wrong RIDs such as <code>GetValue(1050) = (page_id: 2000 slot_num: 0, true)</code>, from the 511th entry overwriting the RID array.</li>
+      <li>A broken chain: <code>invalid tree: the leaf chain (next page ids from the leftmost leaf) visits [1], but the leaves in key order are [1 2]</code>.</li>
+      <li>A new root not recorded: <code>after the root split: RootPageID() = 1 (old root 1), header page root = 1: the header page must record the new root</code>.</li>
+      <li>A guard never dropped: <code>page 5 has pin count 1 after the operations returned, want 0: a page guard was not dropped</code>, or a test that runs into its 10-second bound.</li>
+    </ul>
+    <p>Run with a time limit after the regex while you iterate, <code>go test -race -run '^TestBPlusTreeInsert' -timeout 120s ./btree/</code>, so that a loop that never ends is stopped and every goroutine's stack is printed.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why a leaf of max size 4 never rests with 4 entries, why this course's split keeps the smaller half on the left when HW3's kept the larger, or what the parent's index in the write set has to do with the writeup's "look at the back of write_set_". Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: the CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/project2/">Project #2 writeup</a> (Task #2, Requirements and Hints, Tree Visualization); BusTub <code>src/include/storage/index/b_plus_tree.h</code> (<code>Context</code>), <code>src/storage/index/b_plus_tree.cpp</code> and <code>tools/b_plus_tree_printer/b_plus_tree_printer.cpp</code> at commit d49b823; Lecture #08 slides 20–31 and Lecture #10 slides 27 and 44; this course's <code>btree/b_plus_tree.go</code>, <code>btree/b_plus_tree_debug.go</code>, <code>cmd/btree_printer</code>, <code>btree/b_plus_tree_insert_test.go</code> and <code>btree/b_plus_tree_insert_extra_test.go</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u4-02-p2-search.html">← P2.2 Point Search</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u4-04-p2-internal-splits.html">Next: P2.4 Internal Splits and New Roots →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

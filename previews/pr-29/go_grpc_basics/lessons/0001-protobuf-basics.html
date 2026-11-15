@@ -1,0 +1,255 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_grpc_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1 · Protobuf Basics</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">gRPC and Protobuf in Go · Lesson 1 of 9</p>
+  <h1>Protobuf Basics</h1>
+  <p class="subtitle">Set up <code>logline</code> — the small service this whole course builds — and write its very first piece: one message, in one schema file, turned into real Go code.</p>
+
+  <p class="lede">Every message this course's client and server ever exchange starts life as a declaration in a <code>.proto</code> file, not as a Go struct you hand-write. That's the core idea of Protocol Buffers: describe a message's shape once, in a small language-neutral schema, and let a compiler generate the actual Go (or Python, or Java, or anything else) code to read and write it. Today: install that compiler, write <code>logline</code>'s first message, generate real code from it, and read what came out.</p>
+
+  <h2>Before you start: set up the tools and the project</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="install-protoc">
+      <div class="todo-item-head">
+        <input type="checkbox" id="install-protoc-cb">
+        <label for="install-protoc-cb">Install <code>protoc</code>, the Protocol Buffers compiler, and confirm it's on your <code>PATH</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code># Debian/Ubuntu
+sudo apt-get install -y protobuf-compiler
+
+# macOS
+brew install protobuf
+
+# either way, confirm it's installed
+protoc --version</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>protoc --version</code> prints something like <code>libprotoc 3.21.12</code> — the exact version doesn't matter much, but it needs to run at all before anything else in this course works.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="install-go-plugins">
+      <div class="todo-item-head">
+        <input type="checkbox" id="install-go-plugins-cb">
+        <label for="install-go-plugins-cb">Install the two Go plugins <code>protoc</code> needs to actually produce Go code: <code>protoc-gen-go</code> and <code>protoc-gen-go-grpc</code>. Confirm your Go bin directory is on <code>PATH</code>, since that's where <code>go install</code> puts them and where <code>protoc</code> looks for them.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+# make sure this directory is on your PATH (add to your shell rc if not)
+echo $(go env GOPATH)/bin</code></pre>
+            <p>If a later <code>protoc</code> command in this course fails with something like <code>protoc-gen-go: program not found or is not executable</code>, this is almost always the cause — the plugin binary exists, but the shell running <code>protoc</code> can't find it on <code>PATH</code>.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="create-logline-project">
+      <div class="todo-item-head">
+        <input type="checkbox" id="create-logline-project-cb">
+        <label for="create-logline-project-cb">Create the <code>logline</code> project — a real Go module you'll keep extending for the rest of this course, not a throwaway scratch directory. Give it a <code>proto/logline/v1/</code> directory for schema files and a <code>gen/</code> directory for what <code>protoc</code> produces.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the commands</summary>
+          <div class="reveal-body">
+            <pre><code>mkdir -p logline/proto/logline/v1 logline/gen
+cd logline
+go mod init logline</code></pre>
+            <p>The <code>v1</code> directory is a deliberate convention, not decoration — it's how a real protobuf schema leaves room for a future breaking change (a <code>v2</code> package) to live alongside the original without colliding. This course only ever needs <code>v1</code>, but the layout is worth having from day one.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: writing your first message</h2>
+
+  <p>A <code>.proto</code> file's <code>message</code> block declares a data shape: a name, and a list of typed, numbered fields. That's it — no behavior, no methods, just a description of what a piece of data looks like on the wire and in generated code.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-first-proto">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-first-proto-cb">
+        <label for="write-first-proto-cb">Create <code>proto/logline/v1/logline.proto</code>. Declare <code>syntax = "proto3"</code>, a <code>package logline.v1</code>, a <code>go_package</code> option pointing at where the generated Go code should live, and one message, <code>LogEntry</code>, with an <code>id</code> (string), a <code>message</code> (string), and a <code>created_at_unix</code> (int64).</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the file</summary>
+          <div class="reveal-body">
+            <pre><code>syntax = "proto3";
+
+package logline.v1;
+
+option go_package = "logline/gen/logline/v1;loglinev1";
+
+message LogEntry {
+  string id = 1;
+  string message = 2;
+  int64 created_at_unix = 3;
+}</code></pre>
+            <p>The numbers after each field (<code>= 1</code>, <code>= 2</code>, <code>= 3</code>) aren't cosmetic — they're what's actually written to the wire, not the field names. This matters enough to get its own idiom callout below.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>A protobuf message on the wire is a sequence of <code>(field number, value)</code> pairs — the field <em>name</em> <code>id</code> never leaves your source code. That's what makes protobuf tolerant of schema evolution: a service can add a new field with a new number and old clients that don't know about it just ignore it, while a service reading an old message just doesn't see fields that haven't been sent. What it can't tolerate is reusing a number for a different field, or renumbering an existing one — either one makes old and new code disagree about what a given number means, silently corrupting data instead of failing loudly. Treat field numbers as permanent once anything depends on them.</p>
+  </div>
+
+  <h2>New: generating real code from it</h2>
+
+  <p><code>protoc</code> itself doesn't know how to produce Go — that's what the <code>protoc-gen-go</code> plugin you installed above is for. You tell <code>protoc</code> where to find your <code>.proto</code> files, where to write output, and which plugin(s) to run.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="run-protoc">
+      <div class="todo-item-head">
+        <input type="checkbox" id="run-protoc-cb">
+        <label for="run-protoc-cb">From the <code>logline</code> directory, run <code>protoc</code> against your <code>.proto</code> file, targeting the <code>gen/</code> directory.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the command</summary>
+          <div class="reveal-body">
+            <pre><code>protoc --go_out=gen --go_opt=paths=source_relative \
+  --proto_path=proto \
+  proto/logline/v1/logline.proto</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>A new file appears at <code>gen/logline/v1/logline.pb.go</code> — real, compilable Go source, not a stub or a template. <code>--proto_path=proto</code> tells <code>protoc</code> where import paths inside your <code>.proto</code> files should resolve from; <code>paths=source_relative</code> tells the Go plugin to mirror your <code>.proto</code>'s own directory layout under <code>gen/</code>, rather than flattening everything or using the full <code>go_package</code> path.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="read-generated-file">
+      <div class="todo-item-head">
+        <input type="checkbox" id="read-generated-file-cb">
+        <label for="read-generated-file-cb">Open <code>logline.pb.go</code> and read it. Find the <code>LogEntry</code> struct, its field tags, and the generated getter methods (<code>GetId</code>, <code>GetMessage</code>, <code>GetCreatedAtUnix</code>).</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>The file's very first lines say <code>Code generated by protoc-gen-go. DO NOT EDIT.</code> — meant literally. <code>LogEntry</code> is a real Go struct with exported fields (<code>Id string</code>, <code>Message string</code>, <code>CreatedAtUnix int64</code>) you could technically set directly, plus a getter per field. Every field also carries a struct tag like <code>protobuf:"bytes,1,opt,name=id,proto3"</code> — that <code>1</code> is the same field number from your <code>.proto</code> file, now baked into the Go code that reads and writes it on the wire.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: using the generated type</h2>
+
+  <p>The generated struct is a normal Go type once it exists — construct it with a literal, pass it around, read its fields. The one genuinely new piece is <code>proto.Marshal</code>/<code>proto.Unmarshal</code>, from the <code>google.golang.org/protobuf/proto</code> package: turning a message into its binary wire form and back, exactly what a real client and server will do to send messages to each other starting next lesson.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="write-inspect-program">
+      <div class="todo-item-head">
+        <input type="checkbox" id="write-inspect-program-cb">
+        <label for="write-inspect-program-cb">Write a small <code>cmd/inspect/main.go</code>: construct a <code>LogEntry</code>, print two fields using their generated getters, marshal it with <code>proto.Marshal</code>, print the byte count, then unmarshal those bytes into a fresh <code>LogEntry</code> and print its fields too.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"fmt"
+	"time"
+
+	"google.golang.org/protobuf/proto"
+
+	loglinev1 "logline/gen/logline/v1"
+)
+
+func main() {
+	entry := &loglinev1.LogEntry{
+		Id:            "1",
+		Message:       "hello, protobuf",
+		CreatedAtUnix: time.Now().Unix(),
+	}
+
+	fmt.Println("field access:", entry.GetId(), entry.GetMessage())
+
+	data, err := proto.Marshal(entry)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("marshaled to %d bytes\n", len(data))
+
+	decoded := &loglinev1.LogEntry{}
+	if err := proto.Unmarshal(data, decoded); err != nil {
+		panic(err)
+	}
+	fmt.Println("round-tripped:", decoded.GetId(), decoded.GetMessage(), decoded.GetCreatedAtUnix())
+}</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go mod tidy</code> pulls in <code>google.golang.org/protobuf</code>, then <code>go run ./cmd/inspect</code> prints your field values, a small byte count (a couple dozen bytes for this message), and then the exact same field values again after the round trip through <code>Marshal</code>/<code>Unmarshal</code> — proof the binary encoding actually preserves your data, not just that the code compiles.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="check-nil-getter">
+      <div class="todo-item-head">
+        <input type="checkbox" id="check-nil-getter-cb">
+        <label for="check-nil-getter-cb">Add one more line: declare a <code>nil</code> <code>*LogEntry</code> and call <code>.GetMessage()</code> on it directly.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the line</summary>
+          <div class="reveal-body">
+            <pre><code>var nilEntry *loglinev1.LogEntry
+fmt.Println("nil message GetMessage():", nilEntry.GetMessage() == "")</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Prints <code>true</code> — no panic, even though <code>nilEntry</code> is a nil pointer. Every generated getter is written to check for a nil receiver and return the field's zero value instead of dereferencing it.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Prefer a generated getter (<code>entry.GetMessage()</code>) over direct field access (<code>entry.Message</code>) once a message might have come from somewhere else — deserialized from a network call, say, or a field of another message that itself might be unset. Direct field access is perfectly fine on a value you just constructed yourself, like the literal above, but it panics on a nil pointer where the getter would just hand back an empty string. This becomes more than a style preference once nested messages show up: a field that's itself a message type, unset, reads as nil, and chaining getters (<code>reply.GetEntry().GetMessage()</code>) stays completely safe through any number of unset levels, where chaining direct field access would panic at the first one.</p>
+  </div>
+
+  <p>You now have a real message, generated Go code that reads and writes it, and a working program that proves the round trip. Nothing has talked to a network yet — <code>proto.Marshal</code>/<code>Unmarshal</code> just turn a message into bytes and back, entirely locally. Lesson 2 is where those bytes actually travel somewhere: a real client, a real server, and gRPC as the thing connecting them.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why field numbers matter more than field names, what exactly <code>paths=source_relative</code> changes about the generated output's location, why a getter is safer than direct field access, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources for this lesson: <a href="https://protobuf.dev/overview/">protobuf.dev, "Protocol Buffers Overview"</a> for why a schema-first binary format exists at all; <a href="https://protobuf.dev/programming-guides/proto3/">protobuf.dev, "Language Guide (proto3)"</a> for exact <code>.proto</code> syntax; <a href="https://protobuf.dev/reference/go/go-generated/">protobuf.dev, "Go Generated Code"</a> for what <code>protoc-gen-go</code> actually produces and why.</p>
+
+  <div class="lesson-nav">
+    <a href="../index.html">Course contents</a>
+    <a href="./0002-your-first-unary-rpc.html">Next: Your First Unary RPC →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

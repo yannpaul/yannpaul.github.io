@@ -1,0 +1,239 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_concurrency_basics/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 6 · select and Timeouts</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Go Concurrency Basics · Lesson 6 of 9</p>
+  <h1><code>select</code> and Timeouts</h1>
+  <p class="subtitle">Rebuild Lesson 5's buffered <code>duTop</code> from memory first. Then give it something none of the last five lessons have: a way to give up.</p>
+
+  <p class="lede">Every version of <code>duTop</code> so far trusts every goroutine to eventually send a result. If one subdirectory sits on a slow network mount, or a disk is failing, or anything else makes one <code>sizeOf</code> call take forever, <code>duTop</code> just waits forever too — it has no way to notice. <code>select</code> lets you wait on more than one channel at once, and <code>time.After</code> turns "waited too long" into a channel you can wait on right alongside your real results.</p>
+
+  <div class="repeat-banner">Warm-up — repeat from Lessons 1–5</div>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="repeat-lesson5-dutop">
+      <div class="todo-item-head">
+        <input type="checkbox" id="repeat-lesson5-dutop-cb">
+        <label for="repeat-lesson5-dutop-cb">Confirm your buffered, channel-based <code>duTop</code> from Lesson 5 still produces correct, race-free output.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run -race . du top --path scratch --n 10</code> prints your known-good sorted lines, no warnings — your baseline before adding a timeout.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: waiting on two channels at once</h2>
+
+  <p><code>select</code> looks like a <code>switch</code>, but each <code>case</code> is a channel operation, not a value. It blocks until <em>one</em> of its cases is ready, then runs that case's body — and if two are ready at the same instant, it picks one at random. <code>time.After(d)</code> returns a channel that receives exactly one value, once, after duration <code>d</code> has passed. Putting the two together — a <code>case</code> for your real channel, a <code>case</code> for <code>time.After</code>'s channel — gives you "whichever happens first."</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="scratch-select-timeout">
+      <div class="todo-item-head">
+        <input type="checkbox" id="scratch-select-timeout-cb">
+        <label for="scratch-select-timeout-cb">In a throwaway scratch file: make an unbuffered <code>chan string</code>. Start a goroutine that sleeps 2 seconds, then sends <code>"done"</code>. In <code>main</code>, <code>select</code> between receiving from that channel and <code>time.After(500 * time.Millisecond)</code>, printing which case fired.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the code</summary>
+          <div class="reveal-body">
+            <pre><code>package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	ch := make(chan string)
+
+	go func() {
+		time.Sleep(2 * time.Second)
+		ch <- "done"
+	}()
+
+	select {
+	case msg := <-ch:
+		fmt.Println("received:", msg)
+	case <-time.After(500 * time.Millisecond):
+		fmt.Println("timed out waiting")
+	}
+}</code></pre>
+            <p>The goroutine keeps running and eventually sends "done" — but nothing is left to receive it, since <code>main</code> already moved on after the timeout case fired. That's fine for this scratch demo; <code>duTop</code>'s real version below avoids leaving a send stranded by making sure every goroutine's target channel is buffered.</p>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Prints <code>timed out waiting</code> after about 500ms — not <code>received: done</code>, and not a 2-second wait. <code>select</code> took whichever case was ready first, and <code>time.After</code>'s 500ms channel won.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="scratch-select-no-timeout">
+      <div class="todo-item-head">
+        <input type="checkbox" id="scratch-select-no-timeout-cb">
+        <label for="scratch-select-no-timeout-cb">Change the goroutine's sleep to 100ms — shorter than the timeout — and run it again.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p>Now it prints <code>received: done</code> after about 100ms. Same <code>select</code>, same two cases — which one fires depends purely on which channel actually has something ready first.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <h2>New: a timeout for <code>duTop</code></h2>
+
+  <p>Applying this to <code>duTop</code> means putting the <code>select</code> inside the collection loop, so each individual receive can time out — not just the whole function once at the end. The deadline channel from <code>time.After</code> needs to be created once, outside the loop; call <code>time.After</code> fresh on every iteration and you'd reset the clock every time you receive a result, which defeats the point.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="add-du-timeout-const">
+      <div class="todo-item-head">
+        <input type="checkbox" id="add-du-timeout-const-cb">
+        <label for="add-du-timeout-const-cb">Add a package-level constant for how long <code>du top</code> is willing to wait in total, something like half a second for testing.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the constant</summary>
+          <div class="reveal-body">
+            <pre><code>const duTimeout = 500 * time.Millisecond</code></pre>
+            <p>A constant, not a flag — this lesson is about the mechanism, not about wiring up another command-line option. Nothing stops you from making it configurable later.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="rewrite-dutop-select">
+      <div class="todo-item-head">
+        <input type="checkbox" id="rewrite-dutop-select-cb">
+        <label for="rewrite-dutop-select-cb">In <code>duTop</code>, create <code>deadline := time.After(duTimeout)</code> once, right after launching the goroutines. Replace the plain <code>r := &lt;-results</code> receive with a <code>select</code> that also has a <code>case &lt;-deadline</code>, returning an error naming how many entries never came back.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the function</summary>
+          <div class="reveal-body">
+            <pre><code>const duTimeout = 500 * time.Millisecond
+
+func duTop(root string, n int) error {
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+
+	results := make(chan sizeResult, len(dirs))
+	for _, d := range dirs {
+		go func(name string) {
+			p := filepath.Join(root, name)
+			s, err := sizeOf(p)
+			results <- sizeResult{Name: p, Size: s, Err: err}
+		}(d.Name())
+	}
+
+	deadline := time.After(duTimeout)
+	var dSizes []dirSize
+	var firstErr error
+	for i := 0; i < len(dirs); i++ {
+		select {
+		case r := <-results:
+			if r.Err != nil {
+				if firstErr == nil {
+					firstErr = r.Err
+				}
+				continue
+			}
+			dSizes = append(dSizes, dirSize{r.Name, r.Size})
+		case <-deadline:
+			return fmt.Errorf("du top: timed out after %s waiting for %d of %d entries", duTimeout, len(dirs)-i, len(dirs))
+		}
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+
+	sort.Slice(dSizes, func(i, j int) bool { return dSizes[i].Size > dSizes[j].Size })
+	n = min(len(dSizes), n)
+	for _, d := range dSizes[:n] {
+		fmt.Printf("%10d %q\n", d.Size, d.Name)
+	}
+	return nil
+}</code></pre>
+            <p>The loop still runs <code>len(dirs)</code> times at most — but now every single iteration races the deadline, not just the function as a whole. The <code>results</code> channel stays buffered from Lesson 5, at capacity <code>len(dirs)</code>: if the timeout fires, any goroutines that hadn't sent yet can still send later without blocking forever, even though nothing will ever receive it — a buffered channel with no receiver just holds the value until it's garbage collected, it doesn't panic or leak a blocked goroutine the way an unbuffered one would.</p>
+          </div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <p>To actually see the timeout fire, you need something slow to wait on. Rather than fighting with real slow disks, fake it directly in code — a one-line, clearly-temporary change you'll delete afterward.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="simulate-slow-entry">
+      <div class="todo-item-head">
+        <input type="checkbox" id="simulate-slow-entry-cb">
+        <label for="simulate-slow-entry-cb">Temporarily add a line at the top of <code>sizeOf</code> that sleeps for a couple of seconds when the entry's base name is a specific marker, like <code>"slowdir"</code>. Create a scratch directory with a few normal subdirectories plus one literally named <code>slowdir</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal">
+          <summary>Stuck? Show the temporary change</summary>
+          <div class="reveal-body">
+            <pre><code>func sizeOf(root string) (int64, error) {
+	if filepath.Base(root) == "slowdir" {
+		time.Sleep(3 * time.Second) // TEMPORARY: simulate a slow entry
+	}
+	// ... rest unchanged
+}</code></pre>
+            <pre><code>mkdir -p slow-test/big slow-test/slowdir
+head -c 100 /dev/zero > slow-test/big/data.bin
+head -c 10 /dev/zero > slow-test/slowdir/a.bin</code></pre>
+          </div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>burrow du top --path slow-test --n 10</code> now returns in about half a second (not 3 seconds) with an error like <code>du top: timed out after 500ms waiting for 1 of 2 entries</code>, and exits non-zero. Time it if you want proof: on a normal directory with no <code>slowdir</code>, the same command still completes in well under 500ms as before.</p>
+        </div>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="remove-slow-simulation">
+      <div class="todo-item-head">
+        <input type="checkbox" id="remove-slow-simulation-cb">
+        <label for="remove-slow-simulation-cb">Remove the temporary sleep from <code>sizeOf</code> and confirm your original scratch fixture is back to passing under <code>-race</code>.</label>
+      </div>
+      <div class="todo-item-body">
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint</span>
+          <p><code>go run -race . du top --path scratch --n 10</code> is back to its normal output, no warnings, no timeout — the marker check is gone, so nothing is artificially slow anymore.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p><code>time.After</code> is convenient for a one-shot demo like this, but it has a real cost worth knowing about: it starts a timer that isn't cleaned up until it fires, even if your <code>select</code> already returned via the other case. Called once per <code>duTop</code> call, as here, that's negligible. Called inside a hot loop that runs thousands of times, those uncollected timers add up — <code>context.WithTimeout</code> (a good next thing to learn after this course) is the standard fix, since its timer can be cancelled explicitly. For a single timeout guarding one function call, <code>time.After</code> in a <code>select</code> is exactly the right, idiomatic tool.</p>
+  </div>
+
+  <p>A timeout doesn't make the slow work finish faster — it just stops <code>duTop</code> from waiting on it forever. Lesson 7 tackles a different problem with the same shape: what happens when there isn't one slow entry, but thousands of entries, and starting a goroutine per one stops being a good idea at all.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear — why the deadline channel has to be created once outside the loop instead of fresh on every iteration, what happens to a goroutine whose send never gets received, why <code>time.After</code> has a real cost inside a hot loop, anything else? Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary source for this lesson: <a href="https://go.dev/tour/concurrency/5">go.dev, "A Tour of Go": select</a> for the core semantics (blocks until a case is ready, picks randomly among simultaneously-ready cases).</p>
+
+  <div class="lesson-nav">
+    <a href="./0005-buffered-vs-unbuffered-channels.html">← Lesson 5: Buffered vs. Unbuffered Channels</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./0007-worker-pools.html">Next: Worker Pools →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+</body>
+</html>

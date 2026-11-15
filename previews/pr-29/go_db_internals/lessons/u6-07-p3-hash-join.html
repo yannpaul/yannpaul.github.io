@@ -1,0 +1,391 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 6 · Lesson 7 · P3.6 Hash Join and the NLJ→HashJoin Rule</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 6 · Lesson 7</p>
+  <h1>P3.6 Hash Join and the NLJ→HashJoin Rule</h1>
+  <p class="subtitle">Implement inner and left hash joins that build a hash table on the right child in <code>Init</code> and probe it with left tuples, on keys of several columns, with duplicates on both sides and NULL keys that never match; then write the optimizer rule that turns a nested loop join on ANDed column equalities into a hash join.</p>
+
+  <p class="lede"><a href="./u5-04-hash-joins.html">Unit 5, Lesson 4</a> showed why a hash join wins on equality predicates: each tuple of one input only has to look in one bucket of a table built from the other. Until now every join in your engine has been a nested loop join, and a query such as <code>p3.14</code>'s join of a 10,000-row table runs one full scan of the inner side per outer tuple. This stage adds the executor and the rule that chooses it. The writeup asks for the Grace hash join; this lesson explains what CMU's tests and this course's tests actually check, and leaves partitioning to disk as an optional exercise.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Unit 5, Lesson 4: a Grace hash join of R (M pages) and S (N pages) needs no recursive partitioning. What does it cost in I/Os?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Reading each table once is the simple hash join whose table fits in memory; partitioning adds a write and a second read of both tables.">M + N</li>
+      <li data-option="b" data-explain="The partition phase reads and writes both tables (2(M + N)), and the probe phase reads every partition once more (M + N).">3(M + N)</li>
+      <li data-option="c" data-explain="That is the shape of a nested loop join's cost, not a hash join's.">M + M × N</li>
+      <li data-option="d" data-explain="Each table is read twice and written once, not written twice.">4(M + N)</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 5, Lesson 7: BusTub's planner turns <code>FROM t1, t2 WHERE t1.a = t2.b</code> into which plan, before any rule runs?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The planner never creates a hash join; only an optimizer rule does.">A hash join on <code>t1.a = t2.b</code>.</li>
+      <li data-option="b" data-explain="The planner doesn't consult indexes; NLJAsIndexJoin is an optimizer rule.">A nested index join probing t2's index.</li>
+      <li data-option="c" data-explain="The WHERE condition is not attached to the join by the planner; folding it in is MergeFilterNLJ's job.">A nested loop join whose predicate is <code>t1.a = t2.b</code>.</li>
+      <li data-option="d" data-explain="The comma join is a cross product, a nested loop join with an always-true predicate, and the WHERE clause is a filter above it. MergeFilterNLJ later merges the two.">A filter on <code>t1.a = t2.b</code> above a nested loop join whose predicate is always true.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 6, Lesson 5: with the starter <code>AggregateKey.Equal</code>, which compares with <code>CompareEquals</code>, what happens to rows whose group key is NULL?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="CompareEquals on a NULL returns CmpNull, so a NULL key equals no other key and InsertCombine creates a new group for each such row. The fix was CompareExactlyEquals.">Each row becomes a group of its own.</li>
+      <li data-option="b" data-explain="Grouping all NULLs together is the correct behaviour, which the starter lacks.">They all go into one group.</li>
+      <li data-option="c" data-explain="InsertCombine always inserts; nothing drops the rows.">They are dropped from the result.</li>
+      <li data-option="d" data-explain="Hash skips NULL values, so it never fails on them.">The hash function panics.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>The hash join plan</h2>
+
+  <p>The writeup's example, with this stage finished:</p>
+
+<pre><code>bustub&gt; explain (o) select * from test_1 t1, test_2 t2 where t1.colA = t2.colA and t1.colB = t2.colC;
+=== OPTIMIZER ===
+HashJoin { type=Inner, left_key=["#0.0", "#0.1"], right_key=["#0.0", "#0.2"] }
+  SeqScan { table=test_1 }
+  SeqScan { table=test_2 }</code></pre>
+
+  <p>A <code>HashJoinPlanNode</code> has two children, a <code>JoinType</code> (inner or left; the factory refuses any other type before your code runs) and two lists of key expressions. <code>LeftKeyExpressions</code> are evaluated on a left tuple with the left child's schema, <code>RightKeyExpressions</code> on a right tuple with the right child's schema, and they pair up by position: here left column 0 must equal right column 0, and left column 1 must equal right column 2. Every key expression uses tuple index 0 (<code>#0.2</code>, not <code>#1.2</code>), because each one is evaluated on a single tuple with <code>Evaluate</code>, not on a pair with <code>EvaluateJoin</code>. A key need not be a bare column: <code>TestHashJoinTwoKeys</code> also joins on <code>a + b = c</code>. The output is the left columns followed by the right columns, as for the nested loop join.</p>
+
+  <h2>Build on the right, probe with the left</h2>
+
+  <p>The simple hash join of Lecture #12 has two phases. The build phase reads one input and puts every tuple into a hash table keyed on its join key. The probe phase reads the other input, hashes each tuple's key, and compares it with the tuples in that bucket. The writeup's hint repeats Lesson 5's: the build side is a pipeline breaker, so decide where the build happens. The starter's doc comments decide it for you: <code>Init</code> initializes the children and builds the hash table, and the struct comment says that <code>left</code> produces the probe tuples and <code>right</code> the build tuples.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L12-simple-hash-join-p62.png" alt="Pseudocode: foreach tuple r in R, insert h1(r) into hash table HT_R; foreach tuple s in S, output if h1(s) is in HT_R. Below, table R(id, name) with a red arrow at one row feeds a circle labelled h1, whose arrows fan out into the slots of a hash table HT_R. On the right, table S(id, value, cdate), with a red arrow at its top row, feeds its own h1 circle." loading="lazy">
+    <figcaption>The lecture builds on R and probes with S. This course's executor builds on its right child and probes with its left one, the reverse assignment, so that a left join can pad each left tuple as soon as it has been probed (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/12-joins.pdf#page=62">Lecture #12, slide 35</a>).</figcaption>
+  </figure>
+
+  <p>Lecture #12 builds on the outer table, which here would be the left child. The course builds on the right child because of left joins. A left join must emit every left tuple, matched or padded. When left tuples are the probe side, each one arrives, finds all its matches in the finished table, and is emitted with them or padded on the spot, exactly as in the nested loop join. If the left side were the build side, the join would have to remember which build tuples ever matched and emit the unmatched ones after the whole probe side had passed. Either way, slide 46's rule still holds: only the build side has to fit in memory, and the probe side is streamed.</p>
+
+  <h3>Keys of several columns</h3>
+
+  <p>The writeup's hint: "You will need a way to hash a tuple with multiple attributes in order to construct a unique key. As a starting point, take a look at how the <code>SimpleAggregationHashTable</code> in the <code>AggregationExecutor</code> implements this functionality." <code>AggregateKey.Hash</code> folds each value's <code>Hash()</code> into one <code>uint64</code> with <code>types.CombineHashes</code>, and so can your join key. Hashing alone isn't enough, because different keys can share a hash: the writeup says the implementation should handle hash collisions on either side of the join. So the table maps a hash to the build tuples that have it, and a probe compares the actual key values of each candidate before it counts as a match. A Go <code>map[uint64][]int</code> from hash to positions in a slice of build tuples, with each tuple's evaluated key stored next to it, is enough.</p>
+
+  <h3>Duplicates on both sides</h3>
+
+  <p>Nothing makes join keys unique. A right key can appear several times, so a bucket holds a list; a left key can appear several times, so the same bucket is probed again and again. Every left tuple produces one output tuple per matching build tuple, and <code>TestHashJoinDuplicateKeys</code> joins 30 left rows with three distinct keys against 25 right rows with five, expecting 150 rows: each of the three shared keys pairs 10 left rows with 5 right rows. One left tuple's matches can outlast a batch, so keep the current left tuple, its list of matches and a position in that list between calls, the same resumable shape as the nested index join of the last lesson.</p>
+
+  <h3>NULL keys never match</h3>
+
+  <p>A join predicate <code>l.a = r.b</code> is NULL when either side is NULL, and NULL is not true, so a NULL key matches nothing. This is the opposite of Lesson 5's GROUP BY, where two NULL keys had to be equal: compare join keys with <code>CompareEquals(...) == types.CmpTrue</code>, never with <code>CompareExactlyEquals</code>. The cleanest rule is to treat a key with any NULL part as "no key": don't insert such a build tuple at all, and let such a probe tuple find no matches. In a left join that probe tuple is still emitted, padded:</p>
+
+<pre><code>left:  (NULL, 1), (1, 2)        right: (NULL, 'n'), (1, 'one')
+inner: 1, 2, 1, one
+left:  integer_null, 1, integer_null, varlen_null
+       1, 2, 1, one</code></pre>
+
+  <p>An empty build side is the extreme case: an inner join returns nothing, a left join returns every left tuple padded. And <code>Init</code> rebuilds the table from scratch on every call; <code>TestHashJoinReInit</code> runs a left join three times and checks that each child was initialized exactly three times.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=YIdIaPopfpk&amp;t=2906s">#12 Join Algorithms, "Basic hash join" (48:26)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/12-joins.pdf#page=57">slides 33–36</a>: why partitioning by hash works for equality, build and probe, and probe filters.</p>
+
+  <h2>Grace hash join: taught, not tested</h2>
+
+  <p>The writeup goes further than the simple hash join: "It is possible that the probe hash table may NOT fit entirely in memory (assuming our memory can support hash table of up to 4KB tuples). So your implementation should follow the Grace Hash Table algorithm discussed in lecture." It also asks you to design the <code>IntermediateResultPage</code> that holds the partitions, and suggests reading the external merge sort task first so that one page format can serve both.</p>
+
+  <p>No test checks how the join stores its build side. CMU's <code>p3.14</code> and <code>p3.15</code> compare rows and the plan's shape, and so do this course's unit tests; the doc comment on <code>HashJoinExecutor</code> says so: "the tests check only the results". <code>TestHashJoinLargeBuildSideSmallPool</code> joins 20,000 by 20,000 rows through a 16-frame buffer pool, but the frames hold the scanned table pages, and an in-memory hash table on the Go heap passes it. This course's reference solution is in-memory. So the graded stage is the in-memory hash join described above. Grace partitioning is still part of the design the writeup asks for, and the next section turns it into an exercise.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L12-grace-probe-p77.png" alt="R-buckets on the left and S-buckets on the right, each a column of bucket boxes with a red arrow at the second bucket. Each side feeds a circle labelled h2, and red arrows from both h2 circles point into the slots of one hash table labelled HT partition=1 in the middle." loading="lazy">
+    <figcaption>The probe phase of the Grace hash join for partition 1: one side's bucket is hashed with h<sub>2</sub> into an in-memory table, the other side's bucket probes it, and the table is discarded before partition 2 (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/12-joins.pdf#page=77">Lecture #12, slide 40</a>).</figcaption>
+  </figure>
+
+  <h3>Optional exercise: a hash join that spills</h3>
+
+  <p>Do this after Lesson 8, once your <code>IntermediateResultPage</code> can store and read back VARCHAR tuples. It changes only your <code>Init</code> and <code>Next</code>; the stage-9 checkpoint must still pass.</p>
+  <ol>
+    <li>Partition. Pick <em>k</em> partitions. Read the right child and append each tuple with a non-NULL key to partition <code>h1(key) % k</code>, a chain of intermediate pages from <code>NewPage</code>; drop each page's write guard when it is full. Do the same for the left child, except that a left tuple with a NULL key can be emitted padded right away (left join) or dropped (inner join).</li>
+    <li>Probe. For each partition <em>i</em>, build an in-memory table from right partition <em>i</em>, keyed with a second hash <code>h2</code> (Unit 5's reason: within one partition, every key already agrees on <code>h1</code>). Then stream left partition <em>i</em> through it, with the same matching, duplicate and padding rules as before. Every left tuple's matches are in the same-numbered right partition, so a left tuple with no match in it has none at all and can be padded there.</li>
+    <li>Clean up. Delete each partition's pages with <code>DeletePage</code> once it has been joined, and the rest on re-<code>Init</code>, as the sort does with its runs.</li>
+  </ol>
+  <p>A partition whose right side still doesn't fit can be partitioned again with another hash function, Lecture #12's recursive partitioning; one with a single key too common to fit can fall back to a block nested loop join for that key. To see the spill, wrap the buffer pool's page writes in a test of your own the way <code>TestSortLargeVarcharSmallPool</code> counts them, or run <code>TestHashJoinLargeBuildSideSmallPool</code> with a small <em>k</em> and print how many pages each partition uses.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=YIdIaPopfpk&amp;t=3833s">#12 Join Algorithms, "Partitioned hash join" (1:03:53)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/12-joins.pdf#page=67">slides 37–48</a>: the Grace hash join, recursive partitioning, its cost and the hybrid hash join.</p>
+
+  <h2>The NLJ→HashJoin rule</h2>
+
+  <p>The writeup: "the hash join algorithm can be used when a join predicate is a conjunction of several equi-conditions between two columns. For this project, you should be able to handle a varying number of equi-conditions connected by AND." You write <code>Optimizer.OptimizeNLJAsHashJoin</code> in <code>optimizer/nlj_as_hash_join.go</code>. Its starter version returns its input, which is why every join so far stayed a nested loop join.</p>
+
+  <h3>Where the rule runs</h3>
+
+  <p><a href="./u5-07-query-optimization-rules-and-search.html">Unit 5, Lesson 7</a> explained why the order of rules matters. <code>OptimizeCustom</code>, the default list, runs <code>OptimizeMergeProjection</code>, then <code>OptimizeMergeFilterNLJ</code>, then your rule. By the time your rule sees a comma join, its WHERE clause has already been merged into the join's predicate. On the starter, with your rule still a stub, the writeup's two forms of the same join look like this:</p>
+
+<pre><code>bustub&gt; explain (o) select * from test_1 t1, test_2 t2 where t1.colA = t2.colA and t1.colB = t2.colC;
+=== OPTIMIZER ===
+NestedLoopJoin { type=Inner, predicate=((#0.0=#1.0)and(#0.1=#1.2)) }
+  SeqScan { table=test_1 }
+  SeqScan { table=test_2 }
+bustub&gt; explain (o) select * from test_1 t1 left outer join test_2 t2 on t2.colA = t1.colA and t2.colC = t1.colB;
+=== OPTIMIZER ===
+NestedLoopJoin { type=Left, predicate=((#1.0=#0.0)and(#1.2=#0.1)) }
+  SeqScan { table=test_1 }
+  SeqScan { table=test_2 }</code></pre>
+
+  <p>Both must become a <code>HashJoin</code> with <code>left_key=["#0.0", "#0.1"]</code> and <code>right_key=["#0.0", "#0.2"]</code>, the second one of type <code>Left</code>.</p>
+
+  <h3>Extracting the keys</h3>
+
+  <p>The writeup's last hint: "When dealing with multiple equi-conditions, try to extract out the keys recursively, instead of matching the joining condition with multiple layers of if clauses." The predicate is a tree. A recursive function that takes an expression and appends to the two key lists, returning false as soon as some part doesn't fit, handles any number of conditions and any nesting of ANDs (<code>TestHashJoinRuleThreeEqualities</code> tries both <code>(x AND y) AND z</code> and <code>x AND (y AND z)</code>):</p>
+  <ul>
+    <li>A <code>*expressions.LogicExpression</code> whose <code>LogicType</code> is <code>expressions.And</code>: both children (<code>ChildAt(0)</code> and <code>ChildAt(1)</code>) must succeed. An <code>Or</code> fails.</li>
+    <li>A <code>*expressions.ComparisonExpression</code> whose <code>CompType</code> is <code>expressions.Equal</code>, and whose two children are both <code>*expressions.ColumnValueExpression</code> from different sides: one key pair. Anything else fails.</li>
+    <li>Any other expression (a constant such as TRUE, arithmetic, another comparison type) fails.</li>
+  </ul>
+
+  <p>The side comes from <code>TupleIdx()</code>: 0 is the left child, 1 the right child. The writeup warns that "it is possible that the column from outer table is on the right side of the equi-condition", as in the left outer join above, where every equality reads <code>#1.x=#0.y</code>; swap the two columns so that the tuple-0 column goes into the left keys. Two columns with the same tuple index, such as <code>left.a = left.b</code>, compare columns of one input and can't be a join key, so the whole predicate fails. Each key goes into its list rewritten to tuple index 0, with <code>expressions.NewColumnValueExpression(0, c.ColIdx(), c.ReturnType())</code>, which is what produces <code>right_key=["#0.0", "#0.2"]</code>.</p>
+
+  <p>If extraction fails anywhere, return the nested loop join unchanged: the rule must never drop part of a predicate. The rule tests check each case that stays: <code>a &lt; x</code>, <code>a != x</code>, <code>a = 1</code>, a cross join on TRUE, <code>left.a = left.b</code>, <code>a = x AND b &gt; y</code>, <code>a = x AND b = 3</code> and <code>a = x OR b = y</code>. Only inner and left joins are rewritten. When extraction succeeds, build the node with <code>plans.NewHashJoinPlanNode(nlj.OutputSchema(), nlj.LeftPlan(), nlj.RightPlan(), leftKeys, rightKeys, nlj.JoinType)</code>: same children in the same order, same output schema, same join type.</p>
+
+  <h3>Bottom-up, for nested joins</h3>
+
+  <p>Like most of BusTub's rules, this one rebuilds the tree bottom-up: first apply the rule to the node's children, then look at the node. The pre-built helper does the first step: <code>optimizeChildren(plan, o.OptimizeNLJAsHashJoin)</code> returns the node rebuilt over its rewritten children. A join of three tables then becomes a hash join over a hash join:</p>
+
+<pre><code>bustub&gt; explain (o) select * from (__mock_table_1 a inner join __mock_table_3 b on a.colA = b.colE) inner join __mock_table_1 c on b.colE = c.colB;
+=== OPTIMIZER ===
+HashJoin { type=Inner, left_key=["#0.2"], right_key=["#0.1"] }
+  HashJoin { type=Inner, left_key=["#0.0"], right_key=["#0.0"] }
+    MockScan { table=__mock_table_1 }
+    MockScan { table=__mock_table_3 }
+  MockScan { table=__mock_table_1 }</code></pre>
+
+  <p>The outer join's left input is the inner join's output, <code>a</code>'s two columns followed by <code>b</code>'s, so <code>b.colE</code> is its column 2. A join under a <code>Limit</code> or a <code>Projection</code> must be found too; <code>TestHashJoinRuleNestedJoins</code> checks both.</p>
+
+  <h3>What the .slt files check</h3>
+
+  <p><code>p3.14</code> and <code>p3.15</code> run under the default rules and mark their queries with plan checks on the <code>explain (o)</code> text. <code>+ensure:hash_join</code> fails with <code>HashJoin not found</code> unless the text contains exactly one <code>HashJoin</code>; <code>+ensure:hash_join*2</code> and <code>*3</code> want two and three. BusTub's predicate has a quirk that the Go runner keeps: these three also pass whenever the plan contains <code>Filter</code> anywhere. <code>+ensure:hash_join_no_filter</code> has no such escape: it wants one <code>HashJoin</code> and no <code>Filter</code> in the optimized plan, so every equality must have become a key. With the rule still a stub, the SQL test fails at the first plan check:</p>
+
+<pre><code>--- FAIL: TestHashJoinSQL/p3.14-hash-join (0.04s)
+    stages_test.go:33: p3.14-hash-join.slt:19: HashJoin not found; failed to process extra options
+        --- SQL
+        select * from test_simple_seq_1 s1 inner join test_simple_seq_2 s2 on s1.col1 = s2.col1;</code></pre>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>The rule walks an expression tree whose nodes are different Go types behind one interface, <code>expressions.Expression</code>. A type switch, <code>switch e := expr.(type) { case *expressions.LogicExpression: … case *expressions.ComparisonExpression: … default: … }</code>, does the work of the <code>dynamic_cast</code>s in BusTub's rules: each case gets <code>e</code> already converted to that type, and the <code>default</code> branch is the "anything else fails" rule. A two-value type assertion, <code>c, ok := e.ChildAt(0).(*expressions.ColumnValueExpression)</code>, checks one child without panicking when it is something else.</p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">An inner hash join on <code>l.k = r.k</code>. The left keys are 2, 2, 2 and 5; the right keys are 2, 2 and 7. How many rows does it return?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Each left tuple produces one row per matching build tuple, not one row per key.">1</li>
+      <li data-option="b" data-explain="That counts each side's matching tuples once and adds them; a join pairs them.">5</li>
+      <li data-option="c" data-explain="Each of the three left 2s matches both right 2s: 3 × 2 = 6. Neither 5 nor 7 has a partner.">6</li>
+      <li data-option="d" data-explain="Only equal keys pair up; 5 and 7 match nothing, so this isn't the cross product of 4 × 3.">12</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">The left child holds (NULL, 1) and (1, 2); the right child holds (NULL, 'n') and (1, 'one'). What does a left hash join on the first columns return?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="NULL = NULL is not true, so the NULL-keyed left tuple matches nothing and is padded; (1, 2) matches (1, 'one').">(NULL, 1, NULL, NULL) and (1, 2, 1, one).</li>
+      <li data-option="b" data-explain="That treats the two NULL keys as equal, which GROUP BY does but a join predicate does not.">(NULL, 1, NULL, n) and (1, 2, 1, one).</li>
+      <li data-option="c" data-explain="A left join keeps every left tuple, including one whose key is NULL.">Only (1, 2, 1, one).</li>
+      <li data-option="d" data-explain="Only one right tuple has key 1, and NULL keys don't match it.">(NULL, 1, NULL, NULL), (1, 2, 1, one) and (1, 2, NULL, n).</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Your rule receives <code>NestedLoopJoin { type=Left, predicate=((#1.0=#0.0)and(#1.2=#0.1)) }</code>. Which keys must the hash join get?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Those lists are taken from each equality's position (first operand, second operand) instead of from the tuple index; the left keys must come from tuple 0.">left_key=[#0.0, #0.2], right_key=[#0.0, #0.1]</li>
+      <li data-option="b" data-explain="The predicate is a plain AND of two column equalities across the two sides, which the rule must convert, whatever the order of operands.">None: the predicate stays a nested loop join because the right table's columns come first.</li>
+      <li data-option="c" data-explain="Each key is evaluated on its own side's tuple with Evaluate, so it is rewritten to tuple index 0; #1.x keys would also print differently from BusTub's expected plan.">left_key=[#0.0, #0.1], right_key=[#1.0, #1.2]</li>
+      <li data-option="d" data-explain="Each equality is swapped so that its tuple-0 column goes into the left keys, and both keys are rewritten to tuple index 0: left column 0 with right column 0, left column 1 with right column 2.">left_key=[#0.0, #0.1], right_key=[#0.0, #0.2]</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Which of these nested loop join predicates does the rule turn into a hash join?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The second conjunct is not an equality, and the rule must not drop it, so the whole join stays a nested loop join.">((#0.0=#1.0)and(#0.1&gt;#1.2))</li>
+      <li data-option="b" data-explain="Two column equalities across the two sides under one AND, the first written right-to-left: the keys become left [#0.1, #0.2] and right [#0.2, #0.0].">((#1.2=#0.1)and(#0.2=#1.0))</li>
+      <li data-option="c" data-explain="An OR can't be answered by one hash lookup per tuple; the rule leaves it alone.">((#0.0=#1.0)or(#0.1=#1.2))</li>
+      <li data-option="d" data-explain="Both columns belong to the left input, so this filters left tuples instead of pairing them.">(#0.0=#0.1)</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Why does this course's hash join build its table on the right child rather than on the left?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Nothing in the plan says which side is smaller; BusTub has no statistics.">The right child is always the smaller input.</li>
+      <li data-option="b" data-explain="The keys of both sides are plain expressions; either side can be hashed.">Only the right keys can be hashed with <code>CombineHashes</code>.</li>
+      <li data-option="c" data-explain="With left tuples as the probe side, each one finds all of its matches when it is probed, so a left join can emit it padded on the spot, as the nested loop join does.">A left join can then pad each left tuple as soon as it has been probed.</li>
+      <li data-option="d" data-explain="Lecture #12 builds on the outer (left) table; the course reverses that for left joins.">Lecture #12's algorithm builds on the inner table.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Build it: the hash join executor and its rule (stage 9)</h2>
+
+  <p>You edit <code>execution/hash_join_executor.go</code> (<code>Init</code>, <code>Next</code> and the fields of <code>HashJoinExecutor</code>) and <code>optimizer/nlj_as_hash_join.go</code> (<code>OptimizeNLJAsHashJoin</code> and any helpers). Run commands from <code>go_db_internals/intro_to_db</code>. The rules, in plain words:</p>
+  <ul>
+    <li><code>Next</code> follows the batch contract: clear <code>*tuples</code> and <code>*rids</code> first, append up to <code>batchSize</code> tuples with one RID each (the zero <code>common.RID{}</code>), return true for every non-empty batch including the last partial one, and false once the join is exhausted, on every later call too. Return errors from the children instead of panicking.</li>
+    <li><code>Init</code> initializes both children and builds the table from the right child, from scratch on every call.</li>
+    <li>Two tuples match only when every key pair compares <code>CmpTrue</code>; a key with a NULL part matches nothing. Duplicates on either side produce every pair.</li>
+    <li>Output tuples are the left columns followed by the right columns. A left join emits an unmatched left tuple once, padded with NULLs of the right columns' types.</li>
+    <li>The rule converts an inner or left nested loop join whose predicate is an AND tree of equalities between a left column and a right column, applying itself to the children first; anything else stays.</li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u6-07-build">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-07-build-cb">
+        <label for="u6-07-build-cb">Write Init: initialize both children, then read the whole right child into a hash table keyed on its join key, skipping tuples whose key has a NULL part.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>What does the table map from and to, given that different keys can share a hash and one key can have many tuples? Which schema do you pass to <code>Evaluate</code> for a right key? What must the table and the probe-side state look like after a second <code>Init</code>?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Write a helper that evaluates a list of key expressions on one tuple and returns the values, their combined hash (start at 0 and fold each value's <code>Hash()</code> in with <code>types.CombineHashes</code>) and whether the key is usable (no NULL part). In <code>Init</code>, initialize both children, reset a slice of build tuples, a parallel slice of their keys and a <code>map[uint64][]int</code> from hash to positions, then drain <code>e.right</code> with <code>Next</code> in batches of <code>common.BatchSize</code> and add every tuple with a usable key. Reset the probe-side state last.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>v := expr.Evaluate(t, schema)
+if v.IsNull() {
+	return nil, 0, false // a NULL key matches nothing
+}
+hash = types.CombineHashes(hash, v.Hash())</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-07-probe">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-07-probe-cb">
+        <label for="u6-07-probe-cb">Write Next: probe the table with each left tuple, compare the key values of every candidate in its bucket, emit one tuple per match across batch boundaries, and pad unmatched left tuples in a left join.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>A bucket can hold tuples whose keys differ from the probe key: what decides a match? Which state lets the next call continue in the middle of one left tuple's matches? This loop is very close to one you wrote in the last lesson; which one?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Reuse the nested index join's shape: the left batch with a position and an exhausted flag, the current left tuple, its matches (positions in the build slice) and a position in them. For a new left tuple, evaluate the left keys with the same helper; if the key is usable, look up its hash in the map and keep the candidates whose stored key equals it, value by value, with <code>CompareEquals</code> returning <code>types.CmpTrue</code>. No matches: pad it for a left join, skip it for an inner join. Otherwise emit one combined tuple per match, advancing the position and stopping when the batch is full.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>for k, v := range e.buildKeys[i] {
+	if v.CompareEquals(key[k]) != types.CmpTrue {
+		equal = false</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: the executor</span>
+          <p>Run <code>go test -race -run '^TestHashJoin' ./execution/</code>. It runs only the eight executor tests, since the rule's tests are in another package: <code>OneKey</code>, <code>TwoKeys</code> (with the expression key), <code>LeftJoinPadding</code>, <code>DuplicateKeys</code>, <code>NullKeysNeverMatch</code>, <code>EmptyBuildSide</code>, <code>LargeBuildSideSmallPool</code> and <code>ReInit</code>. Success prints <code>ok  	intro_to_db/execution</code>; on the starter they fail with <code>panic: TODO(P3): HashJoinExecutor.Init not implemented</code>.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-07-extract">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-07-extract-cb">
+        <label for="u6-07-extract-cb">Write a recursive helper that matches an AND tree of left-column = right-column equalities and collects the left and right keys, rewritten to tuple index 0, failing on anything else.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which expression types can appear in a predicate that converts, and which tells you to give up? How do you know which side a column belongs to, and what do you do when the right side's column is written first? Why must one failing conjunct make the whole predicate fail?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Take the expression and pointers to the two key slices; return a bool. Type-switch on the expression. For a <code>*expressions.LogicExpression</code>, require <code>LogicType == expressions.And</code> and recurse into both children, succeeding only if both do. For a <code>*expressions.ComparisonExpression</code>, require <code>CompType == expressions.Equal</code> and two <code>*expressions.ColumnValueExpression</code> children with different <code>TupleIdx()</code>; if the first has tuple index 1, swap them; append each as a new column expression with tuple index 0. Every other case returns false.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>if a.TupleIdx() == 1 {
+	a, b = b, a // the left input's column goes into the left keys
+}
+*leftKeys = append(*leftKeys, expressions.NewColumnValueExpression(0, a.ColIdx(), a.ReturnType()))</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-07-rule">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-07-rule-cb">
+        <label for="u6-07-rule-cb">Write OptimizeNLJAsHashJoin: optimize the children first, then replace an inner or left nested loop join whose predicate the helper accepts with a hash join over the same children.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>What must the rule return for a node that is not a nested loop join, or one whose predicate doesn't convert? Which parts of the old node does the hash join keep unchanged? What does "bottom-up" mean for a join whose left child is another join?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Start with <code>optimized := optimizeChildren(plan, o.OptimizeNLJAsHashJoin)</code>. If <code>optimized</code> is not a <code>*plans.NestedLoopJoinPlanNode</code>, or its predicate is <code>nil</code>, or its join type is neither inner nor left, return it. Call the helper with fresh key slices; if it fails, return <code>optimized</code>. Otherwise return <code>plans.NewHashJoinPlanNode</code> with the join's output schema, <code>LeftPlan()</code>, <code>RightPlan()</code>, the two key lists and the join type.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>optimized := optimizeChildren(plan, o.OptimizeNLJAsHashJoin)
+nlj, ok := optimized.(*plans.NestedLoopJoinPlanNode)
+if !ok || nlj.Predicate == nil {
+	return optimized
+}</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: the rule</span>
+          <p>Run <code>go test -race -run '^TestHashJoinRule' ./optimizer/</code>. It runs the ten rule tests on mock tables (no buffer pool needed): <code>OneEquality</code>, <code>FlippedEquality</code>, <code>ThreeEqualities</code>, <code>NonEqualityStaysNLJ</code>, <code>SameSideEqualityStaysNLJ</code>, <code>EqualityAndNonEqualityStaysNLJ</code>, <code>OrStaysNLJ</code>, <code>LeftJoin</code>, <code>NestedJoins</code> and <code>WithCustomRules</code>, which goes through <code>Optimize</code> from a filter over a cross join. The "stays" tests first check that one equality converts and stop with "the rule does not turn a join ON left.a = right.x into a HashJoin yet" until it does. A rule that leaves a join alone prints the plan it returned:</p>
+<pre><code>--- FAIL: TestHashJoinRuleOneEquality (0.00s)
+    hash_join_rule_test.go:58: ON left.a = right.y: the rule returned
+        NestedLoopJoin { type=Inner, predicate=(#0.0=#1.1) }
+          MockScan { table=left }
+          MockScan { table=right }
+        want a HashJoin</code></pre>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage 9, P3.6</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestHashJoin' -timeout 300s ./...</code></pre>
+    <p>It runs the eight executor tests in <code>execution</code>, the ten <code>TestHashJoinRule</code> tests in <code>optimizer</code>, and <code>TestHashJoinSQL</code> in <code>sqllogictest</code>, whose subtests run <code>p3.14-hash-join.slt</code> (one-key and two-key joins with duplicates, left joins, a 10,000-row join, <code>ensure:hash_join</code> and <code>ensure:hash_join_no_filter</code>) and <code>p3.15-multi-way-hash-join.slt</code> (joins of three and four inputs with <code>ensure:hash_join*2</code> and <code>*3</code>). Success prints three <code>ok</code> lines, with every other package at <code>ok</code> and <code>[no tests to run]</code> (or <code>[no test files]</code>):</p>
+<pre><code>ok  	intro_to_db/execution	1.845s
+ok  	intro_to_db/optimizer	1.014s
+ok  	intro_to_db/sqllogictest	1.411s</code></pre>
+    <p>On the starter the executor tests fail at the stub, the rule tests as shown above, and the SQL test at its first plan check (<code>p3.14-hash-join.slt:19: HashJoin not found</code>, and <code>p3.15-multi-way-hash-join.slt:9: HashJoin should appear exactly twice</code>). One file, with every record logged:</p>
+<pre><code>go test -race -run '^TestHashJoinSQL$/p3.15' ./sqllogictest/
+go test -race -run '^TestHashJoinSQL$/p3.15' -v ./sqllogictest/ -args -slt.verbose</code></pre>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why the build side is the right child when the lecture builds on the outer table, why NULL keys never match here although they formed one group in Lesson 5, what the optional Grace version would have to do with a left tuple whose key is NULL, or why <code>a = x AND b &gt; y</code> must stay a nested loop join. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: the CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/project3/">Project #3 writeup</a> (Task #3, HashJoin and Optimizing NestedLoopJoin to HashJoin, and their hints); BusTub <code>src/include/execution/executors/hash_join_executor.h</code>, <code>src/execution/hash_join_executor.cpp</code>, <code>src/include/execution/plans/hash_join_plan.h</code>, <code>src/include/storage/page/intermediate_result_page.h</code>, <code>src/optimizer/nlj_as_hash_join.cpp</code> and <code>src/optimizer/optimizer_custom_rules.cpp</code> at commit d49b823, and its <code>test/sql/p3.14-hash-join.slt</code> and <code>p3.15-multi-way-hash-join.slt</code>; Lecture #12 slides 33–48; this course's <code>execution/hash_join_executor.go</code>, <code>optimizer/nlj_as_hash_join.go</code>, <code>optimizer/optimizer_custom_rules.go</code>, <code>sqllogictest/runner.go</code> (<code>checkEnsure</code>) and their tests.</p>
+
+  <div class="lesson-nav">
+    <a href="./u6-06-p3-nested-loop-joins.html">← P3.5 Nested Loop and Nested Index Joins</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u6-08-p3-sort-limit.html">Next: P3.7 External Merge Sort and Limit →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
