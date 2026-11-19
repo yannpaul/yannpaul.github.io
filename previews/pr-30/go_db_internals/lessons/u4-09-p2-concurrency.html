@@ -1,0 +1,338 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 4 · Lesson 9 · P2.9 Concurrency: Latch Crabbing and Optimistic Latching</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 4 · Lesson 9</p>
+  <h1>P2.9 Concurrency: Latch Crabbing and Optimistic Latching</h1>
+  <p class="subtitle">Make Insert and Remove concurrent: try an optimistic descent with read guards and a single leaf write guard, fall back to pessimistic write crabbing that releases the header page and every safe ancestor early, and pass the concurrency tests and the full suite under the race detector.</p>
+
+  <p class="lede">Your tree is correct, but every insertion and deletion starts with a write guard on the header page and keeps it to the end. That one latch is taken by every writer, which makes it a global latch, and the writeup forbids one: "you may not latch the whole index and only unlatch when operations are done." This last stage applies Lecture #10's optimistic crabbing to your page guards, so that writers working in different leaves can run at the same time. It changes how <code>Insert</code> and <code>Remove</code> latch; the splits, merges and tombstone rules stay as they are.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 3, Lesson 8: under optimistic crabbing, a writer reaches an unsafe leaf with read latches on the path above it. Why does a Go implementation restart from the root instead of upgrading those read latches to write latches?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Upgrading is a known variant; the notes call it less straightforward, not incorrect. The Go reason is simpler.">Upgrading is always incorrect, because another reader could change the page in between.</li>
+      <li data-option="b" data-explain="Restarting re-takes latches from the root, so it is slower when the guess fails, as slide 32 says. Speed is not why Go restarts.">Restarting is faster than upgrading in every case.</li>
+      <li data-option="c" data-explain="sync.RWMutex has no operation that turns a held read lock into a write lock, so the only way to get a write latch is to release the read latch and take the write latch, which in a tree means restarting.">sync.RWMutex has no upgrade operation, so a read latch can't become a write latch in place.</li>
+      <li data-option="d" data-explain="The pessimistic restart does take write latches on inner nodes, from the root down.">Inner nodes can never be write-latched under the optimistic scheme.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 2, Lesson 7: in what order does a page guard's <code>Drop</code> release what it holds, and why?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Releasing the latch before taking bpmLatch to unpin follows the lock order (a frame latch is never awaited under bpmLatch), and it means a frame with pin count 0 has no latch holder, which eviction relies on.">Frame latch first, then the pin under bpmLatch, so it never waits for a latch while holding the pool latch.</li>
+      <li data-option="b" data-explain="Unpinning first would leave a latched frame with pin count 0, which eviction could reset under the latch holder.">The pin first, then the frame latch, so the frame is evictable as early as possible.</li>
+      <li data-option="c" data-explain="The two are released separately and in a fixed order; nothing makes them atomic.">Both at once, in one atomic step under bpmLatch.</li>
+      <li data-option="d" data-explain="A guard holds a pin from creation; Drop must give it back, or the frame could never be evicted.">Only the frame latch: the pin is released by the next eviction.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 4, Lesson 6: a merge leaves an internal root with a single child. What does <code>Remove</code> do?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A root needs at least two children only while it is internal; the fix is to remove a level, not to keep the root.">It leaves the root as it is, because the root has no minimum size.</li>
+      <li data-option="b" data-explain="The child already holds every entry of the tree; nothing has to be rebuilt.">It rebuilds the tree from its leaves.</li>
+      <li data-option="c" data-explain="The header page is never deleted; it records the new root ID.">It deletes the header page and the old root, and the child becomes a new tree.</li>
+      <li data-option="d" data-explain="The only child becomes the root: its page ID goes into the header page, and the old root page is deleted through the buffer pool after its guard is dropped.">It writes the child's page ID into the header page and deletes the old root page.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>What stage 9 asks for</h2>
+
+  <p>The doc comment of <code>BPlusTree</code>, under "Latching (stage 9)", is the specification, and the tests check each part of it:</p>
+  <ul>
+    <li><code>GetValue</code> and the iterator take read guards from the header page down, "dropping a page's guard as soon as its child is guarded". Your stage-2 and stage-8 code already does this.</li>
+    <li><code>Insert</code> and <code>Remove</code> "first descend optimistically: read guards on the header page and the internal pages, and a write guard on the leaf only. If the leaf is safe (the change cannot split it or make it underflow), they change it and return. Such an insertion or deletion takes exactly one write guard, and the tests count them through the <code>TracedBufferPoolManager</code>."</li>
+    <li>"Otherwise they start over pessimistically: write guards from the header page down, dropping the guards of every ancestor (the header page included) as soon as the current page is safe."</li>
+    <li>"Always take latches from the header page towards the leaves, release them in the same order, and never take the same latch twice in one goroutine."</li>
+  </ul>
+
+  <p>Safe has a precise meaning in this course, one per operation:</p>
+  <table>
+    <tr><th></th><th>Safe for an insertion</th><th>Safe for a deletion</th></tr>
+    <tr><td>Leaf</td><td>one more entry keeps it below <code>LeafMaxSize</code>: <code>Size() + 1 &lt; LeafMaxSize</code></td><td>more than <code>MinSize</code> entries; or its tombstone buffer still has room, since the deletion only adds a tombstone</td></tr>
+    <tr><td>Internal page</td><td>fewer than <code>InternalMaxSize</code> children</td><td>more than <code>MinSize</code> children</td></tr>
+    <tr><td>Root</td><td>as above</td><td>a leaf with more than one entry; an internal page with more than two children</td></tr>
+  </table>
+
+  <p>These follow from the split and merge rules of stages 3 to 6. A leaf splits when it reaches <code>LeafMaxSize</code>, so it is safe if it won't reach it. An internal page splits when a child arrives while it holds <code>InternalMaxSize</code>, so it is safe below that. A non-root page is repaired below <code>MinSize</code>, so it is safe above it. A root leaf is only deleted when it empties, and an internal root only collapses when it drops to one child.</p>
+
+  <h2>Context, Release and the header page</h2>
+
+  <p>The pre-built <code>Context</code> is BusTub's <code>Context</code> class in Go. It holds <code>HeaderPage</code> (the header's write guard, or nil), <code>RootPageID</code>, <code>WriteSet</code> (write guards from the root down) and <code>ReadSet</code>. BusTub releases a context in its destructor; Go has none, so <code>Release</code> does it: "the header page first, then <code>WriteSet</code> and <code>ReadSet</code> from front to back, so latches are released from the top of the tree down, as the writeup asks." It can be called twice. Create a context per operation, with <code>defer ctx.Release()</code>, and every return path is covered.</p>
+
+  <p>Releasing ancestors early uses the same structure. When the page at the back of <code>WriteSet</code> turns out to be safe, nothing above it can change any more, so drop the header guard and set <code>HeaderPage</code> to nil, then drop every guard in <code>WriteSet</code> except the last, top first, and keep the last one alone in the slice. The writeup's tips describe exactly this ("To unlock the header page, simply set header_page_ to std::nullopt. To unlock other pages, pop from the write_set_ and drop"), and its pitfalls give the order: "every thread will always acquire latches from the header page to the bottom. When you release latches, make sure you release them in the same order (from the header page to the bottom)." Lecture #10's notes add why: the latches higher up block a larger part of the tree.</p>
+
+  <p>The header page deserves its own rule because it holds the root ID, and four events change it: the first insertion into an empty tree, a root split, an internal root collapsing, and the last entry leaving a root leaf. Each of them must hold the header's write guard, so:</p>
+  <ul>
+    <li>A pessimistic operation takes the header's write guard first and keeps it only until the root turns out to be safe. A safe root can't split or collapse, so the root ID can't change.</li>
+    <li>An optimistic operation takes only a read guard on the header, and only until it holds the root. An empty tree can't be handled optimistically, because the first insertion must create a root: report "not done" and go pessimistic.</li>
+    <li>A lookup drops the header's read guard as soon as it holds the root. <code>TestBPlusTreeConcurrentBlockedLeafDoesNotBlockOthers</code> catches a lookup that keeps it: while that lookup waits for a latched leaf, a removal elsewhere that needs the header's write guard would wait behind it.</li>
+  </ul>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=YgOvfXl6pss&amp;t=4684s">#10 Latching in Data Structures, "Summary and conclusion" (1:18:04)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/10-indexconcurrency.pdf#page=131">slides 43–44</a>: the Project 2 hints, including making splits and merges work single-threaded first, and protecting the root page ID.</p>
+
+  <h2>The optimistic descent in Go</h2>
+
+  <p>Slide 30 states the optimistic protocol: "Set latches as if for search, get to leaf, and set W latch on leaf." In Go there is a wrinkle: a page's type is stored in the page, so you only learn that a child is a leaf after you have latched it, and you latched it for reading. <code>sync.RWMutex</code> can't upgrade that latch. The way out is to let go of the leaf's read guard and take a write guard on the same page while you still hold its parent's read guard.</p>
+
+  <ol>
+    <li>Read-guard the header page and read the root ID. If the tree is empty, drop it and report "not done".</li>
+    <li>Read-guard the current page. If it is internal, find the child, drop the parent's guard (the header page, the first time), and continue from the child.</li>
+    <li>If it is a leaf, drop its read guard, take a write guard on the same page ID, and only then drop the parent's read guard.</li>
+    <li>Decide at the leaf. If the operation finds nothing to change (a duplicate key, a key to revive, an absent or tombstoned key to remove), or the change keeps the leaf safe, do it, drop the leaf and return "done". Otherwise drop the leaf and report "not done".</li>
+  </ol>
+
+  <p>Step 3 is safe because of the parent's read guard. Any split or merge that could replace or empty the leaf needs a write latch on its parent (or on the header page, for a root leaf), and it can't get one while you hold a read latch there. So the page you write-latch is still the leaf that covers your key. Step 3 also respects the rule against taking a latch twice: the leaf's read guard is dropped before its write guard is requested. Holding both, in one goroutine, would wait forever.</p>
+
+  <p>The cost is one extra read guard per optimistic operation. The tests only require that an optimistic operation takes some read guards and exactly one write guard: <code>TestBPlusTreeConcurrentOptimisticInsert</code> and <code>...OptimisticDelete</code>, BusTub's own tests, compare the wrapper's <code>Reads()</code> and <code>Writes()</code> before and after.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L10-optimistic-restart-p107.png" alt="T1: Insert 25 under optimistic latching. A single write latch sits on the leaf F (23, 31), which is circled in red. No other node is latched. A callout reads: We need to split F, so we have to restart and re-execute like before." loading="lazy">
+    <figcaption>The optimistic guess failing: the insert holds only the leaf's write latch, the leaf is full, and the split would need its parent. In the Go tree, the optimistic function drops the leaf and reports "not done", and <code>Insert</code> runs the pessimistic descent (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/10-indexconcurrency.pdf#page=107">Lecture #10, slide 32</a>).</figcaption>
+  </figure>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=YgOvfXl6pss&amp;t=3129s">#10 Latching in Data Structures, "Optimistic latching" (52:09)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/10-indexconcurrency.pdf#page=97">slides 28–32</a>: the root bottleneck, the optimistic protocol, and the Delete 38 and Insert 25 examples.</p>
+
+  <h2>The pessimistic descent and its siblings</h2>
+
+  <p>The pessimistic descent is the one you have used since stage 3, with early release added: after write-guarding each page and appending it to <code>WriteSet</code>, test it for safety and release the ancestors if it passes. What remains in the context when the descent reaches the leaf is exactly what the operation may still change: the leaf and the unsafe pages above it, up to the deepest safe one, plus the header page if the root itself is unsafe. Your split and merge code finds parents at the back of <code>WriteSet</code> as before; it only has to stop expecting the whole path. The context's comment suggests a check: before splitting the root, make sure <code>HeaderPage</code> is not nil, and before changing a parent, make sure the write set still holds one.</p>
+
+  <p>A deletion also latches a sibling, which isn't on the path. It does so while holding the parent's write guard, so no other operation can come down to either child, and any goroutine already holding the sibling is one that needs nothing more above it: it finishes and lets go. <code>TestBPlusTreeConcurrentPessimisticReleasesAncestors</code> makes one wait there. Its tree has a root with three children, each with three leaves at their minimum, leaf max size 4 and internal max size 4. Removing 10 makes the leaf <code>[10,20]</code> underflow. The test holds a read guard on the sibling <code>[30,40]</code>, so the removal blocks there, and while it waits, a lookup and an insertion in another subtree must finish. They can, because the root and the parent both have three children, more than the minimum of 2, so the removal released the header page at the root and the root at the parent.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>The race detector finds one kind of concurrency bug. <code>-race</code> reports two goroutines touching the same memory without synchronization, for example a field added to <code>BPlusTree</code> that every operation reads and writes, or a page's bytes changed through a read guard's <code>Data()</code>. It says nothing about a latch held too long or taken in the wrong order; those show up as hangs. The tests bound every wait (10 seconds for a single operation, 60 seconds for BusTub's concurrent rounds) and report which operation didn't finish, so a deadlock fails with a message instead of a frozen terminal. A field in <code>BPlusTree</code> that every operation latches would also be a global latch, which the struct's comment forbids.</p>
+  </div>
+
+  <h2>The stage-9 tests</h2>
+
+  <table>
+    <tr><th>Test</th><th>What it checks</th></tr>
+    <tr><td><code>...InsertTest1</code>, <code>...InsertTest2</code>, <code>...DeleteTest1</code>, <code>...DeleteTest2</code>, <code>...MixTest1</code>, <code>...MixTest2</code></td><td>BusTub's concurrent tests: goroutines inserting, removing and looking up the same or interleaved keys, each run without tombstones and with a buffer of 3, then checked by lookups and a scan. Iteration counts are lower than BusTub's (10 instead of 50, 5 instead of 20).</td></tr>
+    <tr><td><code>...OptimisticInsert</code>, <code>...OptimisticDelete</code></td><td>BusTub's: a safe insertion or deletion takes more than 0 read guards and exactly 1 write guard.</td></tr>
+    <tr><td><code>...OptimisticTakesReadLatches</code></td><td>The test holds read guards on the header page and every internal page; a safe insertion, a safe removal, a duplicate insertion and a lookup must still finish.</td></tr>
+    <tr><td><code>...BlockedLeafDoesNotBlockOthers</code></td><td>The test write-latches one leaf, and a lookup and a removal wait there; operations elsewhere must finish, including a removal that underflows and so needs the header's write guard.</td></tr>
+    <tr><td><code>...PessimisticReleasesAncestors</code></td><td>The removal above, waiting for a sibling, must have released the header page and the root.</td></tr>
+    <tr><td><code>...Stress</code></td><td>8 goroutines insert, remove and look up keys of their own and others', with and without tombstones; then the tree, its live keys, a scan and the pin counts are checked.</td></tr>
+  </table>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A tree has leaf max size 4 and internal max size 3, and some leaf holds 2 entries. An insertion into that leaf runs. How many write guards does <code>TestBPlusTreeConcurrentOptimisticInsert</code> expect it to take?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The header page is read-guarded on the optimistic path; only the leaf is write-guarded.">Two: one on the header page and one on the leaf.</li>
+      <li data-option="b" data-explain="2 + 1 = 3 is below the leaf max size 4, so the leaf is safe. The optimistic descent read-guards the header and the internal pages and write-guards only the leaf.">Exactly one, on the leaf.</li>
+      <li data-option="c" data-explain="That is the pessimistic descent, which the insertion never needs here: the leaf is safe.">One per level, from the root to the leaf.</li>
+      <li data-option="d" data-explain="The leaf changes, so it needs a write guard; a read guard can't modify a page.">None: an insertion into a safe leaf needs only read guards.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">No tombstones, leaf max size 4 (min size 2). Which of these removals has to go pessimistic?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A leaf of 3 entries keeps 2 after the removal, its min size, so it is safe.">Removing a key from a non-root leaf of 3 entries.</li>
+      <li data-option="b" data-explain="An absent key changes nothing, so the optimistic path finishes it at the leaf.">Removing a key that isn't in the tree.</li>
+      <li data-option="c" data-explain="A root leaf may shrink to one entry, so with 2 entries it is safe for a deletion.">Removing a key from a root leaf of 2 entries.</li>
+      <li data-option="d" data-explain="The leaf drops to 1 entry, below its min size of 2, so it needs a borrow or a merge, which changes its sibling and parent: unsafe, so the operation restarts pessimistically.">Removing a key from a non-root leaf of 2 entries.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">In <code>TestBPlusTreeConcurrentPessimisticReleasesAncestors</code>, the root and the parent of leaf <code>[10,20]</code> each have 3 children, with internal max size 4. The removal of 10 is waiting for the sibling <code>[30,40]</code>. Which guards does it hold?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The root has 3 children, more than 2, so the header page was dropped when the root was latched. The parent has 3 children, more than MinSize 2, so the root was dropped at the parent. The leaf is unsafe, so the parent stays.">Write guards on the parent and on the leaf [10,20].</li>
+      <li data-option="b" data-explain="The root is safe for a deletion, so the header page was released as soon as the root was latched.">Write guards on the header page, the root, the parent and the leaf.</li>
+      <li data-option="c" data-explain="The leaf underflows, so the merge or borrow changes the parent; the parent must stay latched.">A write guard on the leaf only.</li>
+      <li data-option="d" data-explain="The removal is pessimistic: it already found the leaf unsafe on the optimistic path, so it now uses write guards.">Read guards on the root and the parent, and a write guard on the leaf.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">On the optimistic path, the descent reaches a leaf with a read guard. It drops that guard and takes a write guard on the same page. Why must it still hold the parent's read guard while it does so?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Pins are per guard. Dropping the read guard does unpin the leaf, but a pin is not what keeps the leaf correct here.">Because dropping the leaf's read guard would otherwise evict the leaf before the write guard is taken.</li>
+      <li data-option="b" data-explain="The parent is never changed on the optimistic path; it is only read.">Because the change to the leaf also writes the parent's separator.</li>
+      <li data-option="c" data-explain="A split or merge involving the leaf needs a write latch on its parent, which can't be granted while the read guard is held. So between dropping the read guard and getting the write guard, the leaf can't be split, merged or deleted.">Because no split or merge of that leaf can happen while the parent is read-latched, so the leaf is still the right one.</li>
+      <li data-option="d" data-explain="The opposite: holding the leaf's read guard while asking for its write guard is what deadlocks. The parent's guard is a different latch.">Because sync.RWMutex requires a read lock on the parent before a write lock on the child.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A <code>GetValue</code> keeps the header page's read guard for its whole descent and drops it at the end. A test write-latches one leaf, and the lookup waits there. What else stops working until the leaf is released?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Other lookups take read guards on the header page, which are compatible with the waiting lookup's read guard.">Every other lookup in the tree.</li>
+      <li data-option="b" data-explain="A removal that underflows, or an insertion that splits up to the root, starts pessimistically with the header's write guard, which can't be granted while the lookup holds a read guard. TestBPlusTreeConcurrentBlockedLeafDoesNotBlockOthers fails on Remove(70).">Every pessimistic insertion or removal, anywhere in the tree, because it needs the header's write guard.</li>
+      <li data-option="c" data-explain="Safe operations take only read guards on the header page, so they still pass the waiting lookup.">Every optimistic insertion into a safe leaf.</li>
+      <li data-option="d" data-explain="The latched leaf blocks only the operations that need it, unless something else holds a latch higher up, which is the bug in question.">Nothing: only operations on the latched leaf wait.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Build it: concurrent writers (stage P2.9)</h2>
+
+  <p>You edit <code>btree/b_plus_tree.go</code>: <code>Insert</code> and <code>Remove</code> and their helpers. Run commands from <code>go_db_internals/intro_to_db</code>. The rules, in plain words:</p>
+  <ul>
+    <li>First the optimistic descent: read guards on the header page and the internal pages, a write guard on the leaf only, exactly one write guard in all. Change the leaf only if it stays safe.</li>
+    <li>Otherwise drop everything and run the pessimistic descent: write guards from the header page down, releasing the header page and every ancestor as soon as the current page is safe.</li>
+    <li>Safe: see the table above. A leaf with room in its tombstone buffer is always safe for a deletion.</li>
+    <li>Latch from the header page down, release top-down, never take a latch you already hold, and no field in <code>BPlusTree</code> that every operation latches.</li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u4-09-release">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-09-release-cb">
+        <label for="u4-09-release-cb">Add safety checks for insertion and deletion, and release the header page and the ancestors in the pessimistic descent as soon as the current page is safe.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which code in your split and merge paths assumes that the whole path, or the header page, is still held? After an early release, where is the parent of the back of the write set, and is it always there when it is needed?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Write two predicates from the table, one for insertion and one for deletion, that take the page and whether it is the root. In both descents, after appending a page's guard to <code>WriteSet</code>, call a helper if the page is safe: it drops <code>ctx.HeaderPage</code> (setting it to nil) and every guard of <code>WriteSet</code> but the last, and leaves the slice holding only that last guard. Then audit the split and merge code: a level of the write set is now relative to whatever was kept, and the root can only change while <code>HeaderPage</code> is non-nil. A panic on "parent not held" is a good assertion while you test.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>last := len(ctx.WriteSet) - 1
+for _, g := range ctx.WriteSet[:last] { // top first
+	g.Drop()
+}
+ctx.WriteSet = append(ctx.WriteSet[:0], ctx.WriteSet[last])</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: early release</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreeConcurrentPessimisticReleasesAncestors$' -timeout 120s ./btree/</code>. Success prints <code>ok  	intro_to_db/btree</code>. A descent that keeps every ancestor fails after 10 seconds with <code>GetValue(150) while a removal waits for a sibling under another subtree did not return within 10s: it waits for a page latch that should be free (a guard that is never dropped, or a latch taken where it is not needed)</code>. Rerun stages 3 to 8 afterwards: early release is where split and merge code meets a write set shorter than it expected.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-09-opt-insert">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-09-opt-insert-cb">
+        <label for="u4-09-opt-insert-cb">Write the optimistic descent, ending in a write guard on the leaf taken while the parent is still read-guarded, and use it in Insert before the pessimistic path.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>When do you learn that the current page is a leaf, and what latch do you hold on it then? What is the leaf's "parent" when the root is a leaf? Which outcomes of an insertion change nothing, or change the leaf without endangering it, and so can finish here?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Write a helper that returns the leaf's write guard, or nil for an empty tree. It read-guards the header page and then each page in turn; at an internal page it drops the parent's guard and moves to the child; at a leaf it drops the leaf's read guard, write-guards the same page ID, and then drops the parent's guard (the header page's, for a root leaf). In <code>Insert</code>, call it first. Nil: go pessimistic. Otherwise, under the leaf's write guard: a duplicate returns false, a tombstoned key is revived, and a new key is inserted only if <code>Size() + 1 &lt; LeafMaxSize</code>; if it isn't, drop the leaf and go pessimistic.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>guard.Drop()                                     // the leaf's read guard: never hold both
+leaf := t.bpm.WritePage(pageID, bufferpool.AccessUnknown)
+parent.Drop()                                    // only now: the leaf can't have moved</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: optimistic insertion</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreeConcurrentOptimisticInsert$' ./btree/</code>. Success prints <code>ok  	intro_to_db/btree</code>. Without an optimistic path it fails with <code>inserting 41 into a leaf with room took 0 read guards, want &gt; 0: descend with read guards</code> and <code>... took 5 write guards, want exactly 1 (on the leaf)</code>.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-09-opt-remove">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-09-opt-remove-cb">
+        <label for="u4-09-opt-remove-cb">Use the optimistic descent in Remove: finish at the leaf when the key is absent or tombstoned or the leaf stays safe, and go pessimistic otherwise.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>The safety test for a deletion depends on whether the leaf is the root. How can the optimistic helper tell you that? And with tombstones, which deletions can't change the leaf's size at all?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Let the optimistic helper also report whether the leaf is the root (it is if the header page was its parent). In <code>Remove</code>: an empty tree, an absent key or a tombstoned key is done. If the leaf is safe for a deletion, delete as in stage 7 (tombstone or physical removal) and return. Otherwise drop the leaf and run the pessimistic removal. Then run the three tests that hold latches themselves: they hang, and fail after 10 seconds, if an optimistic operation takes a write latch above the leaf or a lookup keeps the header page.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>if leaf.tombCount &gt; 0 &amp;&amp; tombstones(leaf) &lt; leaf.tombCount {
+	return true // the deletion only adds a tombstone: always safe
+}</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: optimistic deletion and the latch-holding tests</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreeConcurrent(OptimisticDelete|OptimisticTakesReadLatches|BlockedLeafDoesNotBlockOthers)$' -timeout 120s ./btree/</code>. Success prints <code>ok  	intro_to_db/btree</code>. A write latch where a read latch belongs fails with <code>Insert(85) into a leaf with room while the test holds read guards on the header and internal pages did not return within 10s</code>.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-09-stress">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-09-stress-cb">
+        <label for="u4-09-stress-cb">Run BusTub's concurrent tests and the stress test, several times, and fix every failure, hang and race report.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>A concurrency bug can pass once and fail the next run. When a test hangs, which goroutine holds the latch the others wait for, and does any goroutine hold a latch below one it is waiting for? When the race detector reports, which two stacks touched the memory, and which guard should have protected it?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Run with <code>-count=3</code> to repeat the tests without the cache. For a hang, rerun the single test with <code>-v -timeout 120s</code> after the regex and read the goroutine stacks <code>go test</code> prints: each blocked goroutine shows the <code>ReadPage</code> or <code>WritePage</code> it waits in, and its caller shows which guards it still holds. The usual causes: a guard not dropped on one early-return path, a guard dropped and then still used through a view, a page latched twice by one goroutine, and a split or merge that reached for a parent the early release already dropped.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>go test -race -count=3 -run '^TestBPlusTreeConcurrent(InsertTest|DeleteTest|MixTest|Stress)' -timeout 300s ./btree/</code></pre></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage P2.9</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestBPlusTreeConcurrent' ./btree/</code></pre>
+    <p>It runs the twelve stage-9 tests: BusTub's <code>TestBPlusTreeConcurrentInsertTest1</code>, <code>...InsertTest2</code>, <code>...DeleteTest1</code>, <code>...DeleteTest2</code>, <code>...MixTest1</code>, <code>...MixTest2</code>, <code>...OptimisticInsert</code> and <code>...OptimisticDelete</code>, and the extra tests <code>...OptimisticTakesReadLatches</code>, <code>...BlockedLeafDoesNotBlockOthers</code>, <code>...PessimisticReleasesAncestors</code> and <code>...Stress</code>. Success prints <code>ok  	intro_to_db/btree</code> and the time, about 30 seconds with the race detector; <code>InsertTest2</code> and <code>MixTest1</code> take about 10 seconds each.</p>
+    <p>Typical failures: a guard count (<code>took 5 write guards, want exactly 1 (on the leaf)</code>); an operation that doesn't finish within a bounded wait (<code>... did not return within 10s: it waits for a page latch that should be free</code>, or <code>the test's goroutines did not finish within 1m0s: a page guard is never dropped, or there is a deadlock</code>); a <code>WARNING: DATA RACE</code> report with two stacks; and wrong results under concurrency (<code>GetValue(37) = (page_id: 0 slot_num: 0, false) during concurrent changes to other keys, want (page_id: 0 slot_num: 37, true)</code>). Add <code>-timeout 120s</code> after the regex for anything the bounded waits don't cover, such as a repair loop that spins.</p>
+    <p>Then run the whole project once, every package and every stage:</p>
+<pre><code>go test -race -count=1 ./...</code></pre>
+    <p><code>-count=1</code> disables the test cache, so a lucky earlier pass isn't replayed. On the reference solution, on a 4-core machine, it printed:</p>
+<pre><code>ok  	intro_to_db/btree	44.041s
+ok  	intro_to_db/bufferpool	11.350s
+?   	intro_to_db/cmd/btree_printer	[no test files]
+ok  	intro_to_db/common	1.090s
+ok  	intro_to_db/storage/disk	1.068s</code></pre>
+    <p>Run it a few times. When it passes repeatedly, Project 2 is done: commit your branch. The optional stretch lesson that follows measures how fast your tree is.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why the optimistic descent can drop the leaf's read guard before taking its write guard without losing the leaf, why a safe root lets the header page go, or how to read the goroutine stacks of a hung test. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: the CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/project2/">Project #2 writeup</a> (Task #2's Context tips, Task #4, Requirements and Hints, Common Pitfalls); BusTub <code>src/include/storage/index/b_plus_tree.h</code> (Context), <code>src/include/buffer/traced_buffer_pool_manager.h</code>, <code>test/storage/b_plus_tree_concurrent_test.cpp</code>, <code>b_plus_tree_insert_test.cpp</code> and <code>b_plus_tree_delete_test.cpp</code> at commit d49b823; Lecture #10 slides 28–32 and 43–44, and notes (section 5); this course's <code>btree/b_plus_tree.go</code> (the "Latching (stage 9)" doc comment and <code>Context</code>), <code>btree/b_plus_tree_concurrent_test.go</code> and <code>btree/b_plus_tree_concurrent_extra_test.go</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u4-08-p2-iterator.html">← P2.8 The Index Iterator</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u4-10-p2-stretch-leaderboard.html">Next: P2 Stretch: Leaderboard Benchmark →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

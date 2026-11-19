@@ -1,0 +1,283 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 7 · Lesson 5 · Multi-Version Concurrency Control: Snapshots and Write Skew</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 7 · Lesson 5</p>
+  <h1>Multi-Version Concurrency Control: Snapshots and Write Skew</h1>
+  <p class="subtitle">Work out which version of a tuple a transaction sees from its timestamp, predict when a second writer aborts or waits, and explain why snapshot isolation still lets two transactions produce a result no serial order gives.</p>
+
+  <p class="lede">Every protocol so far kept one copy of each object. Under 2PL a reader and a writer of the same tuple wait for each other; under OCC they run freely but one of them may abort at validation. Multi-version concurrency control keeps several versions of each tuple instead, so a reader can use an older version while a writer creates a newer one. The Lecture #20 notes call it the most widely used scheme in DBMSs, used in almost every new DBMS of the last ten years, and Project 4 builds it into BusTub. This lesson covers what MVCC guarantees and where those guarantees stop; the next one covers how the versions are stored, cleaned up and indexed.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 7, Lesson 3: in Lecture #19's OCC example, A = 123 with W-TS 0. T1 begins and reads A; T2 begins, reads A, validates and commits; then T1 writes A = 456 in its workspace, validates and commits. What is in the database at the end?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="T1 validates successfully, so its write phase installs its write set into the global database.">A = 123, W-TS 0</li>
+      <li data-option="b" data-explain="TS 1 went to T2, which reached validation first. T2 wrote nothing, so it installed nothing.">A = 456, W-TS 1</li>
+      <li data-option="c" data-explain="OCC assigns timestamps at the start of validation, so T2 gets TS 1 and T1 gets TS 2, although T1 began first. T1's write phase stamps A with W-TS 2.">A = 456, W-TS 2</li>
+      <li data-option="d" data-explain="∞ marks a write that is still in a private workspace. After the write phase the installed object carries the transaction's real timestamp.">A = 456, W-TS ∞</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 1, Lesson 3: a log-structured storage manager answers GET(k). Where does it look, and which record decides the answer?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The newest record for a key wins, so the search goes from newest to oldest and stops at the first record it finds. A DELETE record found first means the key is not found.">The MemTable first, then the SSTables from newest to oldest; the first record found for k decides.</li>
+      <li data-option="b" data-explain="Older SSTables can hold stale records for k. Reading from the oldest end would return an outdated value.">The SSTables from oldest to newest; the first record found for k decides.</li>
+      <li data-option="c" data-explain="Records are appended without overwriting, so several records for k can exist at once until compaction merges them.">Only the newest SSTable, because each PUT overwrites the older record in place.</li>
+      <li data-option="d" data-explain="Compaction keeps the newest record per key and drops older ones; the DBMS doesn't combine all of them on every read.">It reads every record for k and merges them into one value.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 7, Lesson 1: in Lecture #17's Example #2, T1 reads and writes A; T3 reads and writes A and commits; T2 reads and writes B and commits; then T1 reads and writes B. Which serial order is conflict-equivalent to this schedule?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="T1 touches B after T2 wrote B, so T2 must come before T1 (edge T2 → T1).">T1, T2, T3</li>
+      <li data-option="b" data-explain="T3 touches A after T1 wrote A, so T1 must come before T3. This order breaks both edges.">T3, T2, T1</li>
+      <li data-option="c" data-explain="This order puts T1 before T2, but T1 accesses B after T2 wrote it, which requires T2 first.">T1, T3, T2</li>
+      <li data-option="d" data-explain="The graph has T2 → T1 (on B) and T1 → T3 (on A). Its only topological order is T2, T1, T3, although T3 started before T2.">T2, T1, T3</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Many versions of one tuple</h2>
+
+  <p>Slide 4 defines <strong>multi-version concurrency control (MVCC)</strong>: the DBMS maintains multiple physical versions of a single logical object.</p>
+  <ul>
+    <li>When a transaction writes an object, the DBMS creates a new version of it instead of overwriting it.</li>
+    <li>When a transaction reads an object, it reads the newest version that existed when the transaction started.</li>
+    <li>Timestamps decide which versions a transaction can see.</li>
+  </ul>
+  <p>The slide's last line states the payoff: writers do not block readers, and readers do not block writers. A transaction can modify an object while others go on reading its old version. Writers can still block other writers: the notes say two transactions writing the same object still conflict. The notes add that a read-only transaction can read a consistent snapshot of the database without taking locks of any kind.</p>
+
+  <p>Old versions have a second use. If the DBMS never removes them, it can answer <strong>time-travel queries</strong>, which the notes describe as queries on the database as it was at some earlier time, for example three hours ago. Removing versions no one needs is garbage collection, one of the next lesson's topics.</p>
+
+  <p>The idea is old. Slide 5 traces it to a 1978 MIT PhD dissertation; the first implementations were Rdb/VMS and InterBase at DEC in the early 1980s, both by Jim Starkey. Rdb/VMS is now Oracle Rdb, and InterBase was open-sourced as Firebird.</p>
+
+  <h2>Versions, timestamps and visibility</h2>
+
+  <p>The lecture's examples, which the slides label "Illustrative Only", give each transaction one timestamp when it begins and each version two:</p>
+  <ul>
+    <li>A version's <strong>begin-ts</strong> is the timestamp of the transaction that created it.</li>
+    <li>Its <strong>end-ts</strong> is the timestamp of the transaction that replaced it with a newer version, or empty while it is the newest.</li>
+    <li>A <strong>transaction status table</strong> records each transaction's id, timestamp and status: Active, Committed or Aborted. The notes say a typical design takes a snapshot of this table when a transaction starts and uses it to decide which versions the transaction can see.</li>
+  </ul>
+
+  <p>Example #1 on slide 6: the database holds A0 = 123 with begin-ts 0. T1 begins with TS 1 and reads A0. T2 begins with TS 2 and writes A: it creates version A1 = 456 with begin-ts 2 and sets A0's end-ts to 2. When T1 reads A again, it gets A0 once more. A0's range [0, 2) contains T1's timestamp, and A1 begins at 2, after T1. T1's two reads agree, and neither transaction waited for the other.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L20-mvcc-example1-p12.png" alt="Schedule with time running down. T1 with TS(T1)=1: BEGIN, R(A), then later R(A) and COMMIT. T2 with TS(T2)=2: BEGIN, W(A), COMMIT. An arrow at T1's second R(A) says T1 reads version A0. The database table has columns begin-ts, end-ts, value: A0 0, 2, 123 and A1 2, -, 456. The Txn Status Table lists T1 with timestamp 1, Active, and T2 with timestamp 2, Active." loading="lazy">
+    <figcaption>T2's write created A1 and closed A0's range at 2, but T1, with timestamp 1, still falls inside A0's range and keeps reading 123 (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/20-multiversioning.pdf#page=12">Lecture #20, slide 6</a>).</figcaption>
+  </figure>
+
+  <p>The slides' tables show a new version's begin-ts, and the old version's end-ts, as soon as the writer creates the version, before the writer commits. Other transactions must not treat those numbers as final: a version whose creator hasn't committed is invisible to everyone else, and the old version stays visible until the writer commits. The rule this course uses is that a transaction sees the newest <em>committed</em> version whose begin-ts is at or before its own timestamp, or its own write if it has made one. Project 4 makes this unambiguous with temporary timestamps, as you'll see at the end of the lesson.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=tUFha9-DuSk&amp;t=723s">#20 Multi-Version Concurrency Control, "MVCC example" (12:03)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/20-multiversioning.pdf#page=6">slides 6–7</a>: begin-ts and end-ts, the status table, Example #1, and in the next chapters the visibility rules and the writer conflict of Example #2.</p>
+
+  <h2>Two writers: the first one wins</h2>
+
+  <p>Example #2 on slide 7 adds a second writer. T1 (TS 1) reads A and writes it: A1 = 456 appears with begin-ts 1, and A0's end-ts becomes 1. T2 (TS 2) begins and reads A. T1 hasn't committed, so T2's read returns A0; slide 13 spells this out for the same schedule. Then T2 tries to write A. The slide's annotation: "T2 detects there is an uncommitted change." T2 is aborted. T1 reads A again, gets the A1 it wrote itself, and commits.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L20-first-writer-wins-p18.png" alt="Schedule with time running down. T1 with TS(T1)=1: BEGIN, R(A), W(A), later R(A) and COMMIT. T2 with TS(T2)=2: BEGIN, R(A), W(A) marked with a skull, COMMIT. A callout says T2 detects there is an uncommitted change. Database: A0 with begin-ts 0, end-ts 1, value 123; A1 with begin-ts 1, end-ts -, value 456. Txn Status Table: T1, 1, Active; T2, 2, Aborted, highlighted." loading="lazy">
+    <figcaption>T2's write finds T1's uncommitted A1, so T2 aborts and T1 goes on to commit: the first writer wins (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/20-multiversioning.pdf#page=18">Lecture #20, slide 7</a>).</figcaption>
+  </figure>
+
+  <p>This is <strong>first-writer-wins</strong>: when two concurrent transactions write the same object, the one that wrote first keeps going and the later one aborts. The L20 notes state it directly ("If two transactions update the same object, the first writer wins"), and slide 31 repeats it.</p>
+
+  <div class="callout bad">
+    <p class="callout-label">Pitfall</p>
+    <p>Slide 8 says that under snapshot isolation "last writer wins". That contradicts the deck's own Example #2, slide 31, the notes and Project 4, which all abort the second writer. Read slide 8 as first writer wins.</p>
+  </div>
+
+  <h2>Snapshot isolation</h2>
+
+  <p>MVCC with these rules gives <strong>snapshot isolation (SI)</strong>. Slide 8: when a transaction starts, it sees a consistent snapshot of the database as it existed at that moment. There are no torn writes from active transactions: a transaction sees all of another transaction's writes or none of them. If two transactions update the same object, the first writer wins. The notes add that a snapshot contains only values from committed transactions, and that a transaction's writes stay in its private workspace, or in storage marked with transaction metadata, until it commits. That makes SI ideal for read-only transactions, which never wait for writers.</p>
+
+  <p>SI is not serializable. Slide 8 ends: "SI is susceptible to the Write Skew Anomaly." Slide 9 shows it with four marbles, two black and two white, and two transactions that run at the same time:</p>
+  <ul>
+    <li>Txn #1 changes all white marbles to black.</li>
+    <li>Txn #2 changes all black marbles to white.</li>
+  </ul>
+  <p>Run serially, they always end with one colour. Txn #1 then Txn #2 leaves four white marbles; Txn #2 then Txn #1 leaves four black ones. Under SI both transactions read the same snapshot. Txn #1 finds the two white marbles and blackens them; Txn #2 finds the two black marbles and whitens them. Their write sets are disjoint, so first-writer-wins never fires, and both commit. The result is two white and two black marbles, with the colours swapped, which neither serial order produces.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L20-write-skew-p24.png" alt="On the left, four marbles: two black on top, two white below. Txn #1, change all white marbles to black, produces a group whose bottom two are now black, boxed in red. Txn #2, change all black marbles to white, produces a group whose top two are now white, boxed in red. Both arrows lead to the final state on the right: two white marbles on top and two black below." loading="lazy">
+    <figcaption>Each transaction changes only the marbles it found in the shared snapshot, so their writes never overlap, and the merged result swaps the colours (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/20-multiversioning.pdf#page=24">Lecture #20, slide 9</a>).</figcaption>
+  </figure>
+
+  <p><strong>Write skew</strong> is that pattern: two transactions read overlapping data, each writes something the other read, their write sets don't overlap, and the combined result matches no serial order. First-writer-wins only compares writes with writes, so it can't see the problem. That is why Lesson 4's isolation hierarchy puts SNAPSHOT ISOLATION below SERIALIZABLE, on a branch of its own beside REPEATABLE READS.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=tUFha9-DuSk&amp;t=1345s">#20 Multi-Version Concurrency Control, "Snapshot isolation" (22:25)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/20-multiversioning.pdf#page=22">slides 8–9</a>: what a snapshot guarantees and the marble example of write skew.</p>
+
+  <h2>MVCC is a whole design</h2>
+
+  <p>Slide 10: "MVCC is more than just a concurrency control protocol. It completely affects how the DBMS manages transactions and the database." Slide 11 lists five design decisions: the concurrency control protocol, version storage, garbage collection, index management and deletes. This lesson takes the first; the next lesson takes the other four.</p>
+
+  <p>Versions alone don't settle what happens when two writers meet, so MVCC runs on top of one of the protocols from earlier lessons (slide 12):</p>
+  <ul>
+    <li><strong>Timestamp ordering</strong>: transactions get timestamps that determine the serial order.</li>
+    <li><strong>OCC</strong>: the three-phase protocol of Lesson 3, with the private workspace holding the new versions.</li>
+    <li><strong>Two-phase locking</strong>: a transaction acquires the appropriate lock on the physical version before it can read or write the logical tuple.</li>
+  </ul>
+
+  <p>Slide 13 reruns Example #2 under MVCC with 2PL, and the second writer waits instead of aborting. T1 creates A1 as before. T2 reads A0, because T1 hasn't committed. T2's write needs the write lock on A, which T1 holds, so T2 stalls until T1 commits. Then T2 creates its own version: A1's range becomes [1, 2) and A2 = 789 begins at 2.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L20-mvcc-2pl-p36.png" alt="Schedule with time running down. T1 with TS(T1)=1: BEGIN, R(A), W(A), R(A), COMMIT. T2 with TS(T2)=2: BEGIN, R(A), W(A), then a dotted arrow and an hourglass down to COMMIT. A callout says Now T2 can create the new version. Database: A0 0, 1, 123; A1 1, 2, 456; A2 2, -, 789, with an arrow at A2. Txn Status Table: T1 Committed, T2 Active." loading="lazy">
+    <figcaption>With 2PL underneath, T2's write waits for T1's lock instead of aborting, and the chain grows to three versions (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/20-multiversioning.pdf#page=36">Lecture #20, slide 13</a>).</figcaption>
+  </figure>
+
+  <p>Real systems use all three. Slide 33's survey lists Oracle, MySQL-InnoDB, SAP HANA and CockroachDB as MV-2PL; Microsoft's Hekaton, SingleStore, DuckDB and HyPer as MV-OCC; and Postgres as MV-2PL/MV-TO.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=tUFha9-DuSk&amp;t=1715s">#20 Multi-Version Concurrency Control, "MVCC design decisions" (28:35)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/20-multiversioning.pdf#page=26">slides 10–13</a>: the five decisions, the protocol choice and the MVCC-with-2PL rerun of Example #2. The video then spends about 18 minutes on live Postgres and MySQL demonstrations.</p>
+
+  <h2>What Project 4 builds</h2>
+
+  <p>Project 4 adds <strong>optimistic multi-version concurrency control (MVOCC)</strong> to BusTub; the writeup notes that the same high-level protocol is used in HyPer and DuckDB, both MV-OCC in the survey. It differs from the slides' examples in a few ways worth knowing before Unit 8.</p>
+
+  <h3>Two timestamps per transaction</h3>
+
+  <p>The slides give each transaction one timestamp. BusTub gives it two:</p>
+  <ul>
+    <li>A <strong>read timestamp</strong>, assigned at begin and equal to the commit timestamp of the most recently committed transaction. It determines the latest version of a tuple the transaction can see.</li>
+    <li>A <strong>commit timestamp</strong>, assigned at commit from a monotonically increasing counter. It determines the serialization order, and every version a transaction writes is stamped with it.</li>
+  </ul>
+  <p>Visibility becomes: for each tuple, read the newest version whose timestamp is at or below your read timestamp. The writeup's example has versions of A at timestamps 1, 2, 3 and 4, of B at 1, 3 and 4, of C at 1, 2 and 4, and a single version of D at 3. A transaction with read timestamp 3 sees A3, B3, C2 and D3. C has no version at 3, so C2 is the newest it may read.</p>
+
+  <h3>Temporary timestamps</h3>
+
+  <p>An uncommitted writer stamps the tuple it changed with <code>TXN_START_ID</code> plus its transaction id, where <code>TXN_START_ID</code> is 2<sup>62</sup> (<code>common.TxnStartID = 1 &lt;&lt; 62</code> in the Go port). That number is larger than any commit timestamp, so no read timestamp ever reaches it and no other transaction sees the uncommitted version. It plays the role of the "uncommitted change" in Example #2. The writeup uses bit 62 instead of 63 so that temporary timestamps still compare correctly with plain <code>&lt;</code> and <code>&gt;</code>.</p>
+
+  <h3>First writer wins</h3>
+
+  <p>If a tuple is being modified by an uncommitted transaction, no other transaction may modify it. A transaction that finds a committed version newer than its read timestamp also may not overwrite it. Either way it becomes tainted (<code>TxnTainted</code> in the Go port), the write fails with an execution exception, and the transaction must abort. You implement snapshot isolation first; SERIALIZABLE comes later, using the OCC-style predicate check from Lesson 4. The <strong>watermark</strong>, the lowest read timestamp still in use, decides which old versions anyone can still see, and it belongs to the next lesson's garbage collection.</p>
+
+  <h2>Work it out</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u7l5-slide13-table">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u7l5-slide13-table-cb">
+        <label for="u7l5-slide13-table-cb">Write the version table (version, begin-ts, end-ts, value) at the end of slide 13's MVCC-with-2PL schedule, and say which version T1's second read returned and which version a new transaction with TS 3 would read.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Each write by a different transaction adds a version and closes the previous one's range. Which transactions wrote A, and in what order did they get to do it?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Start from A0 = 123 with begin-ts 0. Add T1's version, then T2's after T1 commits. A version's end-ts is the begin-ts of the version that replaced it. A transaction reads its own write if it has one, otherwise the newest committed version that began at or before its timestamp.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>A0: [0, 1), 123. A1: [1, 2), 456. A2: begin-ts 2, no end-ts yet, 789. T1's second read returned A1, its own write. A transaction with TS 3 that starts after T2 commits reads A2 = 789.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u7l5-p4-snapshots">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u7l5-p4-snapshots-cb">
+        <label for="u7l5-p4-snapshots-cb">Using the Project 4 writeup's versions (A at 1, 2, 3, 4; B at 1, 3, 4; C at 1, 2, 4; D at 3), list what a transaction with read timestamp 1 sees and what one with read timestamp 4 sees.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>What does a transaction see for a tuple whose oldest version is newer than its read timestamp?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>For each tuple, take the largest version timestamp that is at most the read timestamp. If there is none, the tuple doesn't exist yet for that transaction.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>Read timestamp 1: A1, B1 and C1, and no D, which was created at 3. Read timestamp 4: A4, B4, C4 and D3, the newest version of every tuple.</p></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Lecture #20, Example #1: T1 (TS 1) reads A. Then T2 (TS 2) writes A, creating A1 with begin-ts 2 and setting A0's end-ts to 2. Which version does T1's second read of A return?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A1 begins at timestamp 2, which is after T1's timestamp 1, so it is in T1's future.">A1, the newest version</li>
+      <li data-option="b" data-explain="A0's range [0, 2) contains T1's timestamp 1. The slide's annotation: &quot;T1 reads version A0.&quot;">A0, the version that existed when T1 started</li>
+      <li data-option="c" data-explain="Readers don't block on writers under MVCC; T1 reads immediately.">A1, after T1 waits for T2 to commit</li>
+      <li data-option="d" data-explain="A writer never aborts a reader in MVCC; the reader just uses the older version.">None: T1 aborts because A changed under it</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Lecture #20, Example #2: T1 (TS 1) has written A1 and has not committed. T2 (TS 2) reads A and then tries to write A. With no locks involved, what happens?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is slide 8's &quot;last writer wins&quot;, which contradicts this very example, slide 31, the notes and Project 4.">T2 creates A2 on top of A1, and the last writer wins.</li>
+      <li data-option="b" data-explain="Waiting for the lock is what happens when MVCC runs on 2PL (slide 13), not in this example.">T2 waits until T1 commits and then creates A2.</li>
+      <li data-option="c" data-explain="T1 keeps running, reads its own A1 and commits. The later writer is the one that loses.">T1 aborts, because T2 has the larger timestamp.</li>
+      <li data-option="d" data-explain="&quot;T2 detects there is an uncommitted change&quot; and the status table marks it Aborted. In Project 4, the same situation taints the transaction.">T2 aborts, because it finds T1's uncommitted change.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Lecture #20, slide 13 runs the same schedule as Example #2 on MVCC with two-phase locking. What happens to T2?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="&quot;T2 reads version A0 because T1 has not committed yet&quot;; &quot;T2 stalls until T1 commits to acquire write lock on A&quot;; then &quot;Now T2 can create the new version.&quot;">It reads A0, its write waits for T1's lock, and after T1 commits it creates A2.</li>
+      <li data-option="b" data-explain="A1 is uncommitted, so T2 can't read it, and T1's lock on A stops T2's write from going through at once.">It reads A1, and its write creates A2 right away.</li>
+      <li data-option="c" data-explain="Aborting on an uncommitted change is the behaviour of Example #2 without locks.">It reads A0 and aborts when it tries to write A.</li>
+      <li data-option="d" data-explain="Readers don't wait under MVCC, even on top of 2PL: T2 reads the committed version A0 immediately.">Its read waits for T1 to commit, and then it reads A1.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Lecture #20, slide 9: two black and two white marbles. Under snapshot isolation, Txn #1 changes all white marbles to black while Txn #2 changes all black marbles to white, at the same time. What is the result?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="All black is the serial order Txn #2 then Txn #1. Under SI neither transaction sees the other's writes.">All four are black.</li>
+      <li data-option="b" data-explain="Each transaction writes only the marbles it found in its snapshot, and those sets don't overlap, so first-writer-wins never fires.">One transaction aborts on a write-write conflict.</li>
+      <li data-option="c" data-explain="Both read the same snapshot, write disjoint marbles and commit. The colours swap, which no serial order produces: write skew.">The colours swap: two white and two black.</li>
+      <li data-option="d" data-explain="All white is the serial order Txn #1 then Txn #2.">All four are white.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Project 4 writeup: tuple A has versions with commit timestamps 1, 2, 3 and 4; B has 1, 3 and 4; C has 1, 2 and 4; D has one version, at 3. Which versions does a transaction with read timestamp 2 see?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is read timestamp 3. D was created at 3, which is after read timestamp 2.">A3, B3, C2 and D3</li>
+      <li data-option="b" data-explain="For each tuple, the newest version at or below 2: A2, then B1 because B has no version at 2, then C2. D's only version is at 3, so D doesn't exist yet for this transaction.">A2, B1 and C2, and no D</li>
+      <li data-option="c" data-explain="B has no version at 2. A transaction can only see versions that exist, so it falls back to B1.">A2, B2 and C2, and no D</li>
+      <li data-option="d" data-explain="Read timestamp 2 can't see anything committed at 3 or 4.">A4, B4, C4 and D3</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why T2 in Example #2 can read A but not write it, why the slides' end-ts values can't be trusted before the writer commits, how write skew slips past first-writer-wins, or how Project 4's read timestamp differs from the slides' single timestamp. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 Lecture #20 <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/20-multiversioning.pdf">slides</a> 2–13 and 31–33 and <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/20-multiversioning.pdf">notes</a> (section 1); Lecture #19 slide 45; the Project #4 writeup (Background, Task 1.1, Task 2.2 and Task 3.4); BusTub <code>src/include/concurrency/transaction.h</code> and <code>src/include/common/config.h</code> at commit d49b823.</p>
+
+  <div class="lesson-nav">
+    <a href="./u7-04-lock-granularity-phantoms-isolation.html">← Lock Granularity, Phantoms, and Isolation Levels</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u7-06-mvcc-design.html">Next: MVCC Design: Version Storage, Garbage Collection, and Indexes →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

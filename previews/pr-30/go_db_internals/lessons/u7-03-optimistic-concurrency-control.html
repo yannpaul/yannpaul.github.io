@@ -1,0 +1,349 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 7 · Lesson 3 · Timestamps and Optimistic Concurrency Control</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 7 · Lesson 3</p>
+  <h1>Timestamps and Optimistic Concurrency Control</h1>
+  <p class="subtitle">Use timestamps to fix a serialization order, run transactions through OCC's read, validation and write phases, and decide with forward or backward validation which transactions commit and which abort.</p>
+
+  <p class="lede">Two-phase locking makes every transaction ask for a lock before it touches anything, and Lesson 2 showed what that costs: waiting, deadlocks and the machinery to break them. Lecture #19 starts from the opposite assumption. If conflicts are rare and most transactions are short, most of that locking is wasted effort, and a protocol should be optimized for the case where nothing conflicts. This lesson covers the idea of ordering transactions by timestamps and the protocol the lecture builds on it, optimistic concurrency control. Project 4's SERIALIZABLE isolation level is a version of it.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 7, Lesson 1: in Lecture #17's Example #2, T3 starts before T2, yet the only equivalent serial order is T2, T1, T3. Why?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="T2's write of B precedes T1's read of B, giving T2 → T1, and T1's write of A precedes T3's read of A, giving T1 → T3. Edges follow conflicts, not start times.">The conflicts on B give T2 → T1 and those on A give T1 → T3, and the serial order has to respect both edges.</li>
+      <li data-option="b" data-explain="Commit order doesn't define the serial order either; T3 commits before T2 in this schedule.">A serializable schedule must be equivalent to the order in which the transactions commit.</li>
+      <li data-option="c" data-explain="T3 and T2 touch different objects (A and B), so they don't conflict with each other at all.">T3 conflicts directly with T2 on B, so it must follow T2.</li>
+      <li data-option="d" data-explain="The schedule is conflict serializable: its graph is acyclic, and T2, T1, T3 is its topological order.">The schedule isn't serializable, so the DBMS reorders the transactions by number.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 3, Lesson 7: memory location M holds 20, and a thread runs <code>__sync_bool_compare_and_swap(&amp;M, 20, 30)</code>. What happens?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Compare-and-swap installs the new value only if the comparison succeeds, and here it does.">M stays 20 and the call fails, because the old and new values differ.</li>
+      <li data-option="b" data-explain="CAS doesn't wait or block; it either succeeds or fails in one atomic step.">The thread blocks until another thread sets M to 30.</li>
+      <li data-option="c" data-explain="M holds the expected value 20, so CAS installs 30 and reports success, all in one step no other thread can interrupt.">M becomes 30, and the call reports success.</li>
+      <li data-option="d" data-explain="Adding is a different atomic instruction. CAS compares M with the expected value and replaces it.">M becomes 50, the sum of the old value and the argument.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Unit 5, Lesson 8: a table has 1,000 rows. Predicate P1 has selectivity 0.1 and P2 has selectivity 0.5. Under the independence assumption, how many rows does the optimizer estimate for P1 AND P2?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="100 is P1 alone. The conjunction also has to satisfy P2.">100</li>
+      <li data-option="b" data-explain="Independent predicates: sel(P1 AND P2) = 0.1 × 0.5 = 0.05, and 0.05 × 1,000 = 50.">50</li>
+      <li data-option="c" data-explain="Adding the selectivities, 0.1 + 0.5, is closer to an OR (which also subtracts the overlap).">600</li>
+      <li data-option="d" data-explain="Taking the smaller selectivity assumes every row that satisfies P1 also satisfies P2, which is the opposite of independence.">10</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Timestamp ordering</h2>
+
+  <p>Slide 4 recalls that 2PL is pessimistic: it requires transactions to acquire locks on database objects before they may access them. Slide 5 makes the observation behind this lecture: if conflicts are rare and most transactions are short-lived, forcing them to acquire locks adds unnecessary overhead, and a better protocol could be optimized for the no-conflict case.</p>
+
+  <p><strong>Timestamp ordering</strong> (T/O) uses timestamps instead of locks to decide the serialization order of transactions (slide 6). If TS(Ti) &lt; TS(Tj), the DBMS must ensure that the execution schedule is equivalent to the serial schedule in which Ti appears before Tj. To check that, each database object, for example a tuple, carries extra fields that record the timestamps of the transactions that last accessed or modified it. Lesson 1 asked whether some serial order exists; T/O names the order in advance and makes the schedule match it.</p>
+
+  <p>Slide 7 sets the rules for the timestamps. Each transaction Ti gets a unique, fixed timestamp TS(Ti), and timestamps increase monotonically. Different protocols assign the timestamp at different times during the transaction, which matters below. There are three ways to generate them:</p>
+  <ul>
+    <li>A system or wall clock, such as the CPU clock, the RDTSC instruction or an external clock. The notes suggest UTC, to avoid daylight-saving problems.</li>
+    <li>A logical counter. The notes warn that a counter can overflow and is hard to keep consistent across several machines.</li>
+    <li>A hybrid of the two.</li>
+  </ul>
+  <p>The Fall 2025 lecture teaches T/O through one protocol, optimistic concurrency control, and that is the protocol this lesson covers.</p>
+
+  <h2>Optimistic concurrency control</h2>
+
+  <p><strong>Optimistic concurrency control</strong> (OCC) is a T/O protocol in which the DBMS creates a <strong>private workspace</strong> for each transaction (slide 9). Any object the transaction reads is copied into its workspace, and its modifications are applied to the workspace. No other transaction can see what is in it. When the transaction commits, the DBMS compares the workspace's write set with other transactions to see whether they conflict. If nothing conflicts, the write set is installed into the "global" database.</p>
+
+  <p>Every transaction goes through three phases (slide 10):</p>
+  <ol>
+    <li><strong>Read phase.</strong> The DBMS tracks the transaction's <strong>read set</strong> and <strong>write set</strong>, the objects it has read and written, and stores its writes in the private workspace. It copies every tuple the transaction accesses from the shared database into the workspace, to ensure repeatable reads. Slide 12 adds that the lecture ignores, for now, what happens when a transaction reads or writes through an index.</li>
+    <li><strong>Validation phase.</strong> When the transaction invokes COMMIT, the DBMS assigns it a unique timestamp and checks whether it conflicts with other transactions.</li>
+    <li><strong>Write phase.</strong> If validation succeeds, the DBMS sets the <strong>write timestamp</strong> (W-TS) of every modified object in the workspace and installs them into the global database. Otherwise it aborts the transaction.</li>
+  </ol>
+  <p>The timestamp is assigned at the start of the validation phase, not when the transaction begins (slide 15). The serialization order is therefore the order in which transactions validate. The notes sum up the division of labour: the read phase does all the work, and validation and write make up the commit protocol.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L19-occ-example-p22.png" alt="Left: a schedule with time running downward. T1 begins and enters its READ phase with R(A). T2 begins, reads A in its READ phase, then VALIDATE (labelled TS(T2)=1) and WRITE, and commits. T1 continues with W(A) and R(A), then VALIDATE (labelled TS(T1)=2) and WRITE, marked by a black arrow, and commits. Right: the Database table shows object A with value 456 and W-TS 2, and the T1 Workspace table shows A, 456, W-TS 2, with an arrow from the workspace up to the database." loading="lazy">
+    <figcaption>T1 begins first, but T2 validates first and gets timestamp 1. T1 validates later, gets 2, and its write phase installs A = 456 with W-TS 2. Before that, T1's workspace held A = 456 with W-TS ∞, the mark of a write that isn't installed yet (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/19-timestampordering.pdf#page=22">Lecture #19, slide 11</a>).</figcaption>
+  </figure>
+
+  <p>In the example the database starts with A = 123 and W-TS 0. T1 reads A into its workspace. T2 begins, reads A, validates, writes nothing and commits. T1 then writes A = 456 in its workspace and reads A again, getting its own 456 from the workspace. The equivalent serial order is T2, then T1: T2 read the old A, and T1 overwrote it afterwards.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=risHwKeWbBM&amp;t=647s">#19 Timestamp Ordering Concurrency Control, "Optimistic concurrency" (10:47)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/19-timestampordering.pdf#page=9">slides 9–11</a>: private workspaces, the three phases and the two-transaction example with its timestamps.</p>
+
+  <h2>Validation</h2>
+
+  <p>Slide 13 notes that the original OCC algorithm uses <strong>serial validation</strong>: one transaction validates at a time. Parallel validation is possible, but then each transaction must also check the read and write sets of other transactions that are validating at the same moment. Either way the DBMS has to permit only serializable schedules, and there are two approaches (slide 14):</p>
+  <ul>
+    <li><strong>Forward validation</strong> checks whether the committing transaction's read and write sets intersect those of any active transactions, ones that have not yet committed.</li>
+    <li><strong>Backward validation</strong> checks them against transactions that have already committed. The slide marks it as the more common approach.</li>
+  </ul>
+
+  <h3>Forward validation and its three cases</h3>
+
+  <p>In forward validation the committing transaction, which has just received its timestamp, is checked against every active transaction (slide 15). The notes add that a transaction that hasn't reached validation yet has timestamp ∞, so the committing transaction is always the older one. If TS(T1) &lt; TS(T2), one of three conditions must hold:</p>
+  <ol>
+    <li>T1 completes its write phase before T2 begins its read phase (slide 16). Everything T1 does happens before T2, so this is simply a serial order.</li>
+    <li>T1 completes its write phase before T2 starts its write phase, and T1 doesn't write any object T2 has read: WriteSet(T1) ∩ ReadSet(T2) = Ø (slide 17).</li>
+    <li>T1 completes its read phase before T2 completes its read phase, and T1 doesn't modify any object that T2 reads or writes: WriteSet(T1) ∩ ReadSet(T2) = Ø and WriteSet(T1) ∩ WriteSet(T2) = Ø (slide 20).</li>
+  </ol>
+
+  <figure class="slide">
+    <img src="../assets/slides/L19-forward-validation-abort-p36.png" alt="Left: a schedule. T1 begins, READ phase with R(A) and W(A), then VALIDATE, marked by a black arrow. T2 begins after T1's write, READ phase with R(A), then VALIDATE, WRITE and COMMIT further down. A callout: T1 must abort even though T2 did not modify the database. Right: the Database table holds A = 123 with W-TS 0. T1's workspace holds A = 456 with W-TS ∞, and T2's workspace holds A = 123 with W-TS 0; a double arrow joins the two rows above a skull and crossbones." loading="lazy">
+    <figcaption>T1 validates while T2 is still reading. T2 has read A = 123, which T1 is about to replace with 456. TS(T1) &lt; TS(T2) says T2 comes after T1, so T2 should have seen 456: no case holds, and T1 must abort, even though T2 changed nothing (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/19-timestampordering.pdf#page=36">Lecture #19, slide 18</a>).</figcaption>
+  </figure>
+
+  <p>Slide 19 runs the same reads and writes in a different order: T2 validates and writes first. Now T2 has the smaller timestamp, T2 commits logically before T1, and T2 reading the old A is exactly what that order requires, so it is safe to commit T1.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L19-forward-validation-case3-p49.png" alt="Left: a schedule. T1 begins, reads and writes A, validates, writes and commits. Meanwhile T2 begins and reads B; after T1's commit it reads A, then VALIDATE (labelled TS(T2)=2), WRITE and COMMIT, with a black arrow at T2's validation. Right: the Database table shows A = 456 with W-TS 1 and B = XYZ with W-TS 0. T2's workspace shows B = XYZ with W-TS 0 and A = 456 with W-TS 1." loading="lazy">
+    <figcaption>Case 3: T1 validated earlier with timestamp 1 and installed A = 456. T2 reads A only after that, so its workspace gets 456 with W-TS 1, and T2 validates with timestamp 2 and commits (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/19-timestampordering.pdf#page=49">Lecture #19, slide 21</a>).</figcaption>
+  </figure>
+
+  <p>Together the two examples show what validation is for. It exists to catch a transaction that read a value that a transaction ordered before it then overwrote: it read too early and missed the write. In slide 18, T2 read A before T1's write would be installed, so the order T1 → T2 is impossible and T1 aborts. In slide 21, T2 read A after T1 installed it, so T2 saw T1's value, and the order T1 → T2 holds. The set conditions are how the protocol detects the first situation, so when you apply them, keep track of when each read happened.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=risHwKeWbBM&amp;t=1460s">#19 Timestamp Ordering Concurrency Control, "Validation types" (24:20)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/19-timestampordering.pdf#page=24">slides 13–21</a>: serial and parallel validation, forward and backward validation, and the examples for each of the three cases.</p>
+
+  <h3>Backward validation</h3>
+
+  <p>Backward validation looks the other way. The notes say the DBMS checks the committing transaction against the read and write sets of the transactions that have already committed since the committing transaction started, using the same three conditions. Slides 22 and 23 compare the scope of the two checks on four transactions.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L19-backward-validation-scope-p53.png" alt="Text: Check whether the committing txn intersects its read/write sets with those of any txns that have already committed. Below, four horizontal bars on a time axis. T1, marked by an arrow, runs from the second gridline to its COMMIT at the fourth. T2 starts before T1 and commits at the third gridline. T3 starts early and commits after T1. T4 starts in the middle and commits last. A red box labelled Validation Scope surrounds T2." loading="lazy">
+    <figcaption>T1 is committing. T2 committed while T1 was running, so backward validation checks T1 against T2. T3 and T4 are still active; forward validation would check those two instead (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/19-timestampordering.pdf#page=53">Lecture #19, slide 23</a>).</figcaption>
+  </figure>
+
+  <p>A transaction that committed before T1 started needs no check: case 1 holds, and T1 read everything it wrote from the global database.</p>
+
+  <h2>The write phase</h2>
+
+  <p>The write phase propagates the changes in the transaction's write set to the database, which makes them visible to other transactions (slide 24). Two designs:</p>
+  <ul>
+    <li><strong>Serial commits</strong> use a global latch, so that only one transaction can be in the validation or write phase at a time.</li>
+    <li><strong>Parallel commits</strong> use fine-grained write latches, so several transactions can validate and write at once. Transactions acquire the latches in a sequential key order to avoid deadlocks.</li>
+  </ul>
+  <p>These are latches, not locks: they are held only for the commit's critical section. The key order is the same discipline you used in Project 1, where a fixed order of the frame latch and the pool latch made a cycle impossible.</p>
+
+  <h2>When OCC pays off</h2>
+
+  <p>Slide 25 says OCC works well when the number of conflicts is low: ideally when all transactions are read-only, or when transactions access disjoint subsets of data. The notes add that a large database with a workload that isn't skewed has a low probability of conflict. OCC has its own problems, though:</p>
+  <ul>
+    <li>There is a high overhead for copying data into the private workspace.</li>
+    <li>The validation and write phases can become a bottleneck.</li>
+    <li>Aborts are more wasteful than in 2PL, because they only occur after a transaction has already executed.</li>
+    <li>The notes add a timestamp allocation bottleneck.</li>
+  </ul>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=risHwKeWbBM&amp;t=2664s">#19 Timestamp Ordering Concurrency Control, "Commit phases" (44:24)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/19-timestampordering.pdf#page=54">slides 24–25</a>: serial and parallel commits, and when OCC works well and when it doesn't.</p>
+
+  <h2>OCC in Project 4</h2>
+
+  <p>Project 4 builds optimistic multi-version concurrency control into the Go port of BusTub. Two parts of it come from this lesson.</p>
+  <ul>
+    <li>Each transaction gets a <strong>commit timestamp</strong> when it commits, and commit timestamps increase monotonically. The writeup says the commit timestamp determines the serialization order, which is OCC's rule that the order is the order of validation, not of begin. Commits run one at a time under a single mutex, the serial-commit design of slide 24.</li>
+    <li>For the SERIALIZABLE isolation level, the writeup says: "We use OCC backward validation for serializable verification." At commit, a transaction is checked against the transactions that committed after it started. The writeup adds that "the verification method we talked about in the lecture only applies to a static database", so Project 4 extends it to catch inserted and deleted rows. Lesson 4 explains why that extension is needed.</li>
+  </ul>
+  <p>Project 4 doesn't copy objects into a private workspace the way slide 9 does. Lessons 5 and 6 show the multi-version storage it uses instead.</p>
+
+  <h2>Work it out</h2>
+
+  <p>These are HW5 Question 3's true-or-false statements (f) to (h) and (j). Decide each one and say why before opening the result.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u7l3-hw5-q3f">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u7l3-hw5-q3f-cb">
+        <label for="u7l3-hw5-q3f-cb">HW5 Q3(f), true or false: OCC works best when concurrent transactions access disjoint subsets of data in a database.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>What makes a validation fail, and how often can that happen if no two transactions touch the same object?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Every validation condition intersects one transaction's write set with another's read or write set. Ask what those intersections are when the data is disjoint.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p><strong>True.</strong> The official solution: OCC is good to use when the number of conflicts is low. Slide 25 names disjoint subsets of data as one such case, and all-read-only transactions as the ideal.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u7l3-hw5-q3g">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u7l3-hw5-q3g-cb">
+        <label for="u7l3-hw5-q3g-cb">HW5 Q3(g), true or false: aborts due to OCC are wasteful because they happen after a transaction has already finished executing.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>In which phase does an OCC transaction find out that it must abort, and what has it done by then?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Compare with 2PL, where a transaction learns about a conflict when a lock request blocks, in the middle of its work.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p><strong>True.</strong> Slide 25: aborts are more wasteful than in 2PL because they only occur after a transaction has already executed. The whole read phase is thrown away.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u7l3-hw5-q3h">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u7l3-hw5-q3h-cb">
+        <label for="u7l3-hw5-q3h-cb">HW5 Q3(h), true or false: transactions can suffer from unrepeatable reads in OCC.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Where does a transaction's second read of an object get its value?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Reread slide 10's description of the read phase, and check what a commit by another transaction changes: the global database or the reader's workspace.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p><strong>False.</strong> Slide 10: the DBMS copies every tuple the transaction accesses into its workspace to ensure repeatable reads. Later reads use that copy, so another transaction's commit can't change what the reader sees. (The notes tie the copy to the isolation level; follow the slide, which HW5 relies on.)</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u7l3-hw5-q3j">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u7l3-hw5-q3j-cb">
+        <label for="u7l3-hw5-q3j-cb">HW5 Q3(j), true or false: all objects in the read set of a transaction are read as a whole when the transaction starts.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Does OCC know a transaction's read set when the transaction begins?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Look again at slide 21: when does T2 copy A into its workspace, and which value does it get?</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p><strong>False.</strong> The read set is built during the read phase, and each object is copied into the workspace when the transaction first accesses it. In slide 21, T2 reads A after T1 committed and gets T1's 456, not the value A had when T2 began.</p></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="callout"><!-- homework-box -->
+    <p class="callout-label">The homework behind these questions</p>
+    <p>The questions marked HW5 come from CMU's Homework #5: <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw5-clean.pdf#page=6">Question 3</a>, with the original figures. Work each one out on paper first, then click the option you got. The quiz tells you at once whether it matches CMU's official answer, and explains why. To compare your working step by step, open the official solutions for <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw5-sols.pdf#page=9">Question 3</a>.</p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <p>These questions use HW5 Question 3. The DBMS uses OCC with serial validation, so only one transaction is in the validation phase at a time, and each transaction does backward validation. A transaction begins its read phase with its first operation and switches to validation immediately after its last operation. If validation fails, the transaction is aborted at once. There are no other transactions. Time runs downward.</p>
+  <table>
+    <tr><th>Time</th><th>T1</th><th>T2</th><th>T3</th></tr>
+    <tr><td>1</td><td></td><td>WRITE(B)</td><td></td></tr>
+    <tr><td>2</td><td>READ(A)</td><td></td><td>READ(C)</td></tr>
+    <tr><td>3</td><td></td><td>WRITE(C)</td><td></td></tr>
+    <tr><td>4</td><td>WRITE(A)</td><td></td><td></td></tr>
+    <tr><td>5</td><td></td><td></td><td></td></tr>
+    <tr><td>6</td><td></td><td>READ(A)</td><td></td></tr>
+    <tr><td>7</td><td>READ(B)</td><td></td><td></td></tr>
+    <tr><td>8</td><td>VALIDATE?</td><td></td><td>WRITE(C)</td></tr>
+    <tr><td>9</td><td>WRITE?</td><td></td><td></td></tr>
+    <tr><td>10</td><td></td><td></td><td></td></tr>
+    <tr><td>11</td><td></td><td>WRITE(A)</td><td>READ(D)</td></tr>
+    <tr><td>12</td><td></td><td>VALIDATE?</td><td></td></tr>
+    <tr><td>13</td><td></td><td>WRITE?</td><td></td></tr>
+    <tr><td>14</td><td></td><td></td><td>READ(A)</td></tr>
+    <tr><td>15</td><td></td><td></td><td></td></tr>
+    <tr><td>16</td><td></td><td></td><td>WRITE(D)</td></tr>
+    <tr><td>17</td><td></td><td></td><td>VALIDATE?</td></tr>
+    <tr><td>18</td><td></td><td></td><td>WRITE?</td></tr>
+  </table>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">HW5 Q3(a): when is each transaction's timestamp assigned?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The write phase only stamps W-TS on the installed objects, using the timestamp the transaction already has (slide 10).">At the start of the write phase</li>
+      <li data-option="b" data-explain="OCC is a T/O protocol: validation decides the serialization order by comparing timestamps (slides 9 and 15).">Timestamps are not necessary for OCC</li>
+      <li data-option="c" data-explain="Slide 15: the DBMS assigns the transaction a unique timestamp at the beginning of the validation phase. This matches the official answer, and it is why T2 gets 1 and T1 gets 2 in slide 11.">At the start of the validation phase</li>
+      <li data-option="d" data-explain="In slide 11, T1 begins first but gets timestamp 2, because T2 validates first.">At the start of the read phase</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">HW5 Q3(b): will T1 abort?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="T2's write of B at time 1 is in T2's private workspace. T1 reads the global B at time 7, and T2 hasn't committed, so there is nothing to conflict with.">Yes, because T2 wrote B at time 1 and T1 read B at time 7.</li>
+      <li data-option="b" data-explain="Checking against active transactions is forward validation. This homework uses backward validation.">Yes, because T3 is still active and has read C.</li>
+      <li data-option="c" data-explain="A transaction's own read and write sets are never compared with each other.">Yes, because T1 read A and then wrote A.</li>
+      <li data-option="d" data-explain="Backward validation checks only transactions that have already committed (slide 14), and at time 8 none has. The official answer is No.">No, because no transaction has committed when T1 validates at time 8.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">HW5 Q3(c): will T2 abort?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="T1 committed (validated at 8, wrote at 9) after T2 started at time 1. WriteSet(T1) = {A} meets ReadSet(T2) = {A}, and T2 read A at time 6, before T1 installed it, so T2 missed T1's write. The official answer is Yes: T2 should have read the value of A written by T1.">Yes, because T2 read A at time 6, before T1 installed its write of A.</li>
+      <li data-option="b" data-explain="Case 2 also requires WriteSet(T1) ∩ ReadSet(T2) = Ø (slide 17), and here both contain A.">No, because T1 finished its write phase before T2 began validating.</li>
+      <li data-option="c" data-explain="T3 hasn't committed at time 12, and backward validation checks only committed transactions. T3's write of C is still private.">Yes, because T3 wrote C at time 8 and T2 also writes C.</li>
+      <li data-option="d" data-explain="T1 writes A at time 4 in its workspace and installs it at time 9, so the two transactions don't only read A.">No, because T1 and T2 both only read A.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">HW5 Q3(d): will T3 abort?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="This applies the set intersection without looking at when T3 read A, and it contradicts the official answer, No. T3 read A after T1 installed it, so it read T1's value, which is consistent with the order T1 → T3. Slide 21 shows the same pattern committing.">Yes: T1 wrote A, A is in T3's read set, and T1 committed while T3 was running.</li>
+      <li data-option="b" data-explain="T2 aborted, so T1 is the only committed transaction to check. T3's reads of C (time 2) and D (time 11) don't touch T1's write set {A}, and its read of A at time 14 came after T1's write phase at time 9. Nothing T3 read missed a committed write, so it commits. The official answer is No.">No: T3 read A at time 14, after T1 installed A at time 9, so none of its reads missed T1's write.</li>
+      <li data-option="c" data-explain="T2 aborted at time 12, so it never committed and backward validation never checks it.">Yes: T2 wrote C at time 3, and T3 wrote C at time 8.</li>
+      <li data-option="d" data-explain="The official solution's one-line reason does mention the write sets, but validation also checks read sets: in slide 18, T1 aborts only because WriteSet(T1) meets ReadSet(T2). The verdict No needs the timing argument.">No: backward validation compares only write sets, and T3's {C, D} doesn't meet T1's {A}.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">HW5 Q3(e): at time 14, does T3 read the value of A written by T1?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A snapshot taken at begin is how multi-versioning works (Lesson 5), not OCC. OCC copies an object into the workspace when the transaction first accesses it.">No: T3 reads A from a snapshot taken when it began at time 2, so it sees A's initial value.</li>
+      <li data-option="b" data-explain="T1's write phase at time 9 installs its write set into the global database (slide 10).">No: T1's write of A stays in T1's private workspace until T3 commits.</li>
+      <li data-option="c" data-explain="No transaction can read another transaction's private workspace (L19 notes). T3 gets T1's value from the global database.">Yes: T3 reads A directly from T1's private workspace.</li>
+      <li data-option="d" data-explain="The official solution: when a transaction commits, its write set is written to the global database, and a transaction that reads an object picks up the value from the global database at the time of reading.">Yes: T1 installed A in the global database at time 9, and T3 copies A when it first reads it, at time 14.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why the timestamp is assigned at validation and not at begin, which transactions forward and backward validation each check, or why T3 in HW5 Q3 commits although T1's write set and T3's read set both contain A. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 Lecture #19 <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/19-timestampordering.pdf">slides</a> 4–25 and <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/19-timestampordering.pdf">notes</a> (sections 1–2); Homework #5 Question 3, parts (a) to (h) and (j), and its <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw5-sols.pdf">official solutions</a>; the Project #4 writeup (Tasks 1.1, 3.2 and 4.4).</p>
+
+  <div class="lesson-nav">
+    <a href="./u7-02-two-phase-locking.html">← Two-Phase Locking and Deadlocks</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u7-04-lock-granularity-phantoms-isolation.html">Next: Lock Granularity, Phantoms, and Isolation Levels →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

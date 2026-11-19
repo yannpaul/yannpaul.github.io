@@ -1,0 +1,445 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 8 · Lesson 1 · P4.1 Timestamps and the Watermark</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 8 · Lesson 1</p>
+  <h1>P4.1 Timestamps and the Watermark</h1>
+  <p class="subtitle">Pull Project 4 onto your own Project 1 to 3 code, then give every transaction a read timestamp at begin and a commit timestamp at commit, and keep a watermark of the lowest running read timestamp that costs amortized O(1) per update.</p>
+
+  <p class="lede">Unit 7 described multi-version concurrency control on paper: each transaction reads a snapshot fixed by its timestamp, writers create new versions, and old versions are thrown away once no reader can see them. Project 4 builds that into BusTub, on top of your buffer pool, your B+tree and your executors. Everything later in the project compares timestamps, so the first stage is where they come from: the transaction manager hands them out, and the watermark tracks the oldest snapshot still in use.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 7, Lesson 5: an uncommitted writer stamps its tuples with <code>TXN_START_ID</code> plus its transaction id, where <code>TXN_START_ID</code> is 2<sup>62</sup>. Why bit 62 and not bit 63?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Transaction ids and timestamps are both 64-bit signed integers (common.TxnID and common.Timestamp are int64), so there is room for either bit; space is not the reason.">Timestamps are 63-bit numbers in BusTub, so bit 63 does not exist.</li>
+      <li data-option="b" data-explain="The human-readable id strips the high bit for printing; that works with either bit and is not why bit 62 was chosen.">Bit 63 is reserved for the human-readable transaction id.</li>
+      <li data-option="c" data-explain="The writeup says so: setting the most significant bit would make the timestamp negative, and then a temporary timestamp would compare below every commit timestamp. With bit 62 it stays larger than all of them, so plain &lt; and &gt; still work.">With bit 63 set the number would be negative, and temporary timestamps would no longer compare correctly with &lt; and &gt;.</li>
+      <li data-option="d" data-explain="Commit timestamps are small counters starting at 1; they never come near bit 62 or bit 63.">Commit timestamps already use bit 63 to mark a committed version.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 6, Lesson 2: in Project 3, what does a tuple's <code>TupleMeta.Ts</code> hold?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Project 3 writes every tuple with Ts 0; the field exists for Project 4, which puts read, commit and temporary timestamps there.">Always 0; the field is there for Project 4.</li>
+      <li data-option="b" data-explain="Project 3 has no notion of when a tuple was written; nothing stores the time.">The wall-clock time at which the tuple was inserted.</li>
+      <li data-option="c" data-explain="Project 3 has a transaction per statement but never stamps tuples with its id.">The id of the transaction that inserted the tuple.</li>
+      <li data-option="d" data-explain="A delete sets IsDeleted and leaves Ts alone; there is no deletion counter.">The number of times the tuple has been deleted and re-inserted.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 3, Lesson 7: a goroutine holds a <code>sync.RWMutex</code> in read mode, another goroutine is waiting in <code>Lock</code>, and the first goroutine calls <code>RLock</code> on the same mutex again. What happens?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Read mode is shareable, but Go's RWMutex queues new readers behind a waiting writer, so the second RLock does not get in.">The second <code>RLock</code> succeeds at once, because read mode is shared.</li>
+      <li data-option="b" data-explain="Go's mutexes are not reentrant and do not track which goroutine holds them, so nothing detects the situation.">The runtime notices that the goroutine already holds the lock and panics.</li>
+      <li data-option="c" data-explain="The writer cannot get the lock while a reader holds it, so it cannot go first.">The writer goes first, then the second <code>RLock</code> succeeds.</li>
+      <li data-option="d" data-explain="The doc comment of sync.RWMutex says a waiting Lock blocks new RLock calls, which prohibits recursive read-locking. The writer waits for the first read lock, and the second RLock waits for the writer.">All of them wait forever: the new <code>RLock</code> queues behind the writer, which waits for the first read lock.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Before you pull: Projects 1 to 3 must pass</h2>
+
+  <p>Project 4 has no executors or storage of its own. Every SQL statement in its tests runs through your Project 3 executors, over your Project 2 B+tree, over your Project 1 buffer pool. The writeup says the same of BusTub: the project's correctness depends on Projects 1 and 2, and Task 4 needs the optimizer rule that turns a sequential scan into an index scan, which you wrote in Project 3. So start from a clean, passing tree. From <code>go_db_internals/intro_to_db</code>:</p>
+
+<pre><code>go test -race -count=1 ./...
+git add -A &amp;&amp; git commit -m "P3 passes"</code></pre>
+
+  <p>Every package must print <code>ok</code> (or <code>[no test files]</code>). The B+tree package takes the longest, about 30 seconds under <code>-race</code>.</p>
+
+  <h2>Pull Project 4</h2>
+
+  <p>Run the same command as in <a href="./u0-00-setup.html">Lesson 0</a> and <a href="./u6-01-p3-sql-pipeline.html">P3.0</a>, from your sparse checkout:</p>
+
+<pre><code>git pull --no-rebase origin main
+ls     # README.md  binder  btree  bufferpool  bustub  catalog  cmd  common  concurrency
+       # execution  go.mod  go.sum  optimizer  planner  sqllogictest  storage  txntest  types</code></pre>
+
+  <p>The pull adds three things:</p>
+  <ul>
+    <li><code>concurrency/execution_common.go</code>, a new learner file. It holds the four MVCC helpers you write in the next lessons (<code>ReconstructTuple</code>, <code>CollectUndoLogs</code>, <code>GenerateNewUndoLog</code>, <code>GenerateUpdatedUndoLog</code>), which panic with <code>TODO(P4)</code> for now, and the debug dump <code>TxnMgrDbg</code>, which only prints a reminder.</li>
+    <li><code>bustub/dbgmvcc.go</code>, pre-built. It registers the shell command <code>\dbgmvcc &lt;table&gt;</code>, which prints whatever your <code>TxnMgrDbg</code> writes for that table.</li>
+    <li>The <code>txntest</code> package, pre-built: BusTub's <code>test/txn</code> tests translated to Go, 28 of them, plus 33 more that stand in for the cases Gradescope keeps hidden. Its <code>doc.go</code> lists every stage with its command.</li>
+  </ul>
+
+  <p>It also changes two Project 3 test files, <code>execution/insert_executor_test.go</code> and <code>execution/update_executor_test.go</code>. You never edit test files, so the merge is clean. Two of their tests pinned Project 3's single-version storage: <code>TestInsertTupleMeta</code> expected <code>Ts</code> 0 after an insert, and <code>TestUpdateOldDeletedNewVisible</code> expected an update to delete the old tuple and insert a new one. Project 4 inserts with the transaction's temporary timestamp and updates in place, so no correct Project 4 code could pass them. Both now accept either behaviour, and still catch the Project 3 bugs they were written for. Every Project 3 test keeps passing after Project 4.</p>
+
+  <p>Two files you have not touched yet were already there: <code>concurrency/transaction_manager.go</code> and <code>concurrency/watermark.go</code>. Project 3 shipped them with a header saying "This is a Project 4 file. Do not edit it in Project 3", and with <code>TODO(P4)</code> bodies that already did what Project 3 needed. From this stage on you edit them.</p>
+
+  <h3>What you edit in Project 4</h3>
+
+  <table>
+    <tr><th>Stage</th><th>Lesson</th><th>What</th><th>Files</th></tr>
+    <tr><td>1</td><td>P4.1</td><td>timestamps, watermark</td><td><code>concurrency/watermark.go</code>, <code>concurrency/transaction_manager.go</code> (<code>Begin</code>, <code>Commit</code>)</td></tr>
+    <tr><td>2</td><td>P4.2</td><td>tuple reconstruction</td><td><code>concurrency/execution_common.go</code></td></tr>
+    <tr><td>3</td><td>P4.3</td><td>MVCC sequential scan</td><td><code>execution_common.go</code>, <code>execution/seq_scan_executor.go</code></td></tr>
+    <tr><td>4</td><td>P4.4</td><td>insert and commit</td><td><code>execution/insert_executor.go</code>, <code>transaction_manager.go</code>, <code>execution_common.go</code> (<code>TxnMgrDbg</code>)</td></tr>
+    <tr><td>5</td><td>P4.5</td><td>undo logs, update and delete</td><td><code>execution_common.go</code>, <code>execution/delete_executor.go</code>, <code>execution/update_executor.go</code></td></tr>
+    <tr><td>6, 7</td><td>P4.6</td><td>garbage collection, abort</td><td><code>transaction_manager.go</code></td></tr>
+    <tr><td>8, 9</td><td>P4.7</td><td>primary-key index</td><td><code>insert_executor.go</code>, <code>execution/index_scan_executor.go</code>, <code>delete_executor.go</code>, <code>update_executor.go</code></td></tr>
+    <tr><td>10, 11</td><td>P4.8</td><td>primary-key updates, serializable verification</td><td><code>update_executor.go</code>, the two scans, <code>transaction_manager.go</code></td></tr>
+  </table>
+
+  <p>So the files are the three in <code>concurrency</code> plus five of your own Project 3 executors: sequential scan, insert, delete, update and index scan. You rewrite parts of them in place. Everything else in <code>concurrency</code> (<code>transaction.go</code>, <code>transaction_manager_impl.go</code>) is pre-built and stays as it is.</p>
+
+  <h2>The tests and how to read them</h2>
+
+  <p>Right after the pull, the whole module still passes except the new package:</p>
+
+<pre><code>$ go test -race -count=1 ./...
+ok  	intro_to_db/binder	1.249s
+ok  	intro_to_db/btree	28.049s
+...
+ok  	intro_to_db/sqllogictest	4.817s
+...
+FAIL	intro_to_db/txntest	1.102s
+ok  	intro_to_db/types	1.012s
+FAIL</code></pre>
+
+  <p>All 61 <code>TestTxn</code> tests fail, each on the first check that needs Project 4. Each stage has a test-name prefix, and a stage's tests pass once stages 1 to N are done.</p>
+
+  <p>The tests log BusTub's step lines, one per transaction operation, and after each important step they call your <code>TxnMgrDbg</code> and log what it wrote under a <code>TxnMgrDbg "…"</code> heading. Go shows these logs for a failing test, or for every test with <code>-v</code>. Until stage 4 the dump is only the starter's reminder; once you write it, it shows every tuple's version chain at the moment of the failure. In the shell, <code>\dbgmvcc &lt;table&gt;</code> prints the same dump. The concurrent tests of stages 8, 9 and 11 run BusTub's full trial counts; while you work on those, <code>-short</code> cuts the trials for a quicker loop.</p>
+
+  <h2>Two timestamps per transaction</h2>
+
+  <p>Unit 7, Lesson 5 introduced <a href="./u7-05-mvcc-snapshot-isolation.html">Project 4's two timestamps</a>. Task 1.1 of the writeup is about where they come from:</p>
+  <ul>
+    <li>When a transaction begins, its <strong>read timestamp</strong> is the commit timestamp of the most recently committed transaction. The writeup's way to think of it: the timestamp of the latest atomic write into the database. It decides the newest version of each tuple the transaction can see.</li>
+    <li>When a transaction commits, it gets a <strong>commit timestamp</strong> from a monotonically increasing counter: the last commit timestamp plus one. Commit timestamps are unique, so they give the serialization order, and a committed transaction can be named by its commit timestamp.</li>
+  </ul>
+
+  <p>Transaction ids are a third, separate sequence. The first id is <code>common.TxnStartID</code> (1 &lt;&lt; 62) and each <code>Begin</code> takes the next one; the logs print the <strong>human-readable id</strong>, the id with that bit stripped (<code>TransactionIDHumanReadable</code>). An id is also the transaction's temporary timestamp (<code>TransactionTempTs</code>), which matters from stage 3 on. The writeup warns not to confuse ids with commit timestamps: both increase, but a transaction that aborts has an id and no commit timestamp, and the order of ids is the order of <code>Begin</code> calls, not of commits.</p>
+
+  <p>BusTub's <code>TimestampTracking</code> test shows the rule. Begin two transactions and commit one between them:</p>
+
+<pre><code>- txn_begin var=txn0 id=0 status=RUNNING read_ts=0 iso_lvl=SNAPSHOT_ISOLATION
+- txn_begin var=txn_store_1 id=1 status=RUNNING read_ts=0 iso_lvl=SNAPSHOT_ISOLATION
+- txn_commit var=txn_store_1 id=1 status=COMMITTED read_ts=0 commit_ts=1</code></pre>
+
+  <p>Nothing has committed when txn0 and txn_store_1 begin, so both read at 0. txn_store_1 commits with 0 + 1 = 1, and the next transaction to begin, txn1, reads at 1. txn0 keeps its read timestamp 0 for as long as it runs: a snapshot doesn't move. On the starter the last line says <code>commit_ts=-1</code> (<code>common.InvalidTS</code>), because <code>Commit</code> never sets one, and the test stops there with <code>txn_store_1 commit ts = -1, want 1</code>.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=tUFha9-DuSk&amp;t=889s">#20 Multi-Version Concurrency Control, "Visibility and status" (14:49)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/20-multiversioning.pdf#page=6">slides 6–7</a>: how a transaction's timestamp and the status table decide which version it sees, the problem that Project 4's read and commit timestamps solve.</p>
+
+  <h2>The watermark</h2>
+
+  <p>Task 1.2 defines the <strong>watermark</strong> as the lowest read timestamp among all transactions that have not yet committed or aborted, or the latest commit timestamp if there is no such transaction. <a href="./u7-06-mvcc-design.html">Unit 7, Lesson 6</a> explained what it is for: a version that the reader with the lowest read timestamp can't see, no reader can see, so garbage collection (stage 6) may drop it. Stage 1 only has to keep the number right.</p>
+
+  <p>The easy way to compute it is to walk every transaction and take the minimum read timestamp of the running ones. The writeup rejects that as too slow and asks for O(log N); BusTub's reference solution is amortized O(1) with a hash map. The test, <code>TestTxnTsWatermarkPerformance</code>, adds a million read timestamps, then removes them all, once in order and once in reverse order, and checks the watermark after every call. Anything that scans all running transactions per call does hundreds of billions of steps there.</p>
+
+  <p>The Go type is BusTub's, with exported fields:</p>
+
+<pre><code>type Watermark struct {
+	CommitTs     common.Timestamp
+	WatermarkTs  common.Timestamp
+	CurrentReads map[common.Timestamp]int
+}</code></pre>
+
+  <p><code>Watermark()</code> is already written: it returns <code>CommitTs</code> when <code>CurrentReads</code> is empty, and <code>WatermarkTs</code> otherwise. <code>UpdateCommitTs</code> is written too, and its doc comment adds a rule for the caller: update the commit timestamp before removing the transaction, so that the watermark is right when the last running transaction leaves. Your part is <code>AddTxn</code> and <code>RemoveTxn</code>, and the two facts that make them cheap:</p>
+  <ul>
+    <li>Several running transactions can share a read timestamp: every transaction that begins between two commits gets the same one. So <code>CurrentReads</code> counts transactions per read timestamp, and a timestamp leaves the map only when its count reaches zero.</li>
+    <li>A new transaction's read timestamp is the last commit timestamp, which is at least every running read timestamp. So the minimum only changes on <code>AddTxn</code> when the map was empty, and it only ever moves forward. When the minimum's count drops to zero, step forward one timestamp at a time until you reach one that is in the map. Over the watermark's whole life those steps add up to at most the last commit timestamp, which is what makes the cost amortized O(1).</li>
+  </ul>
+  <p>A sorted structure is the O(log N) alternative. Go's standard library has no ordered map (the writeup hints at a container in C++'s), but <code>container/heap</code> with a count map works: push each new read timestamp, and when you need the minimum, pop entries whose count has dropped to zero.</p>
+
+  <p>The starter's <code>AddTxn</code> only checks one thing, and panics with <code>read ts &lt; commit ts</code> if a read timestamp below the last commit timestamp is added. That check will catch a race in <code>Begin</code> below.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=tUFha9-DuSk&amp;t=4025s">#20 Multi-Version Concurrency Control, "Transaction-level GC" (1:07:05)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/20-multiversioning.pdf#page=74">slides 23–24</a>: the vacuum frees a finished transaction's old versions once no active transaction has a timestamp below a bound. Project 4's watermark is that bound.</p>
+
+  <h2>The transaction manager's two latches</h2>
+
+  <p><code>TransactionManager</code> in <code>transaction_manager.go</code> has two latches that matter here. They are latches in Unit 3, Lesson 7's sense, protecting in-memory structures for a moment, not the transaction locks of Unit 7:</p>
+  <ul>
+    <li><code>TxnMapMu</code>, a <code>sync.RWMutex</code>, protects <code>TxnMap</code> and the watermark in <code>RunningTxns</code>. The <code>Watermark</code> type is not thread-safe on its own; the manager only calls it under <code>TxnMapMu</code>.</li>
+    <li><code>commitMu</code>, a <code>sync.Mutex</code>, lets one transaction commit at a time. That keeps commit timestamps in order, and from stage 4 on it keeps the stamping of each committing transaction's writes in order too.</li>
+  </ul>
+  <p>The last commit timestamp lives in <code>lastCommitTs</code>, an <code>atomic.Int64</code>. <code>Begin</code>, <code>Commit</code> and <code>Abort</code> already take the latches in the right places; the <code>TODO(P4)</code> comments sit where your lines go. Two orderings inside them decide whether the stage works.</p>
+
+  <p>First, <code>Begin</code> reads the last commit timestamp inside its <code>TxnMapMu</code> section, before <code>AddTxn</code>. Commit publishes a new commit timestamp to the watermark (<code>UpdateCommitTs</code>) under the same latch, so a <code>Begin</code> that reads under it sees either the old commit timestamp in both places or the new one in both. Read it before taking the latch, and a commit can finish in between: <code>Begin</code> then adds a read timestamp below the watermark's commit timestamp, and <code>AddTxn</code> panics. With that bug planted, <code>TestTxnTsConcurrentBeginCommit</code> (8 goroutines, 200 transactions each) fails on every run:</p>
+
+<pre><code>--- FAIL: TestTxnTsConcurrentBeginCommit (0.01s)
+    txn_extra_test.go:105: worker 0: worker 0 panicked: read ts &lt; commit ts
+                at concurrency.(*Watermark).AddTxn (concurrency/watermark.go:23)
+                at concurrency.(*TransactionManager).Begin (concurrency/transaction_manager.go:69)
+                at txntest.TestTxnTsConcurrentBeginCommit.func1 (txntest/txn_extra_test.go:87)</code></pre>
+
+  <p>Second, <code>Commit</code> computes its timestamp with <code>Load</code> and publishes it at the very end. Under <code>commitMu</code>, the commit timestamp is the last one plus one, read with <code>lastCommitTs.Load()</code>, not taken with <code>Add(1)</code>. Then, under <code>TxnMapMu</code>: store the transaction's commit timestamp, set its state to COMMITTED, call <code>UpdateCommitTs(txn.CommitTs())</code> and <code>RemoveTxn(txn.ReadTs())</code> (both shipped), and only then store the new last commit timestamp. The reason is the snapshot rule. A transaction that begins with read timestamp <em>c</em> must see everything committed at <em>c</em>. From stage 4 on, a commit stamps its tuples with <em>c</em> before it publishes <em>c</em>. If <code>Add(1)</code> published it early, a <code>Begin</code> could read <em>c</em> while the commit is still stamping, see some of its writes as uncommitted, and see them appear later in the same snapshot.</p>
+
+  <p><code>Abort</code> needs nothing in this stage: its shipped body already removes the transaction from the watermark under <code>TxnMapMu</code>. The writeup says the same of BusTub's starter. You come back to it in stage 7.</p>
+
+  <div class="callout bad">
+    <p class="callout-label">Pitfall</p>
+    <p><code>TransactionManager.Watermark()</code>, <code>GetUndoLog</code> and <code>GetUndoLogOptional</code> (in <code>transaction_manager_impl.go</code>) take <code>TxnMapMu.RLock</code> themselves. Go's mutexes are not reentrant, so calling any of them while your goroutine holds <code>TxnMapMu</code> blocks forever, in either mode (the warm-up question). Inside <code>Begin</code> and <code>Commit</code>, use <code>m.RunningTxns</code> directly. This matters most in stage 6's garbage collection. Every test call into your code is bounded, so a deadlock fails the test with a message instead of hanging the run.</p>
+  </div>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>In BusTub, <code>Transaction</code> declares <code>friend class TransactionManager</code>, so the manager writes <code>read_ts_</code> and <code>commit_ts_</code>, two <code>std::atomic&lt;timestamp_t&gt;</code> fields, while everyone else only has getters. Go has no friend classes; the same effect comes from the package. <code>Transaction</code>'s fields <code>readTs</code>, <code>commitTs</code> and <code>state</code> are unexported <code>atomic.Int64</code> values, and <code>transaction_manager.go</code> is in package <code>concurrency</code>, so it calls <code>txn.readTs.Store(…)</code> directly. Executors in package <code>execution</code> can only read them through <code>ReadTs()</code>, <code>CommitTs()</code> and <code>TransactionState()</code>.</p>
+  </div>
+
+  <h2>In the shell</h2>
+
+  <p>The shell runs in managed transaction mode, so <code>BEGIN</code>, <code>COMMIT</code> and <code>ABORT</code> work there, and each prints the transaction's timestamps. On the starter:</p>
+
+<pre><code>bustub&gt; BEGIN;
+begin txn txn_id=3 txn_real_id=4611686018427387907 read_ts=0 commit_ts=-1 status=RUNNING iso_lvl=SNAPSHOT_ISOLATION
+txn3&gt; COMMIT;
+txn committed, txn_id=3, status=COMMITTED, read_ts=0, commit_ts=-1
+bustub&gt; BEGIN;
+begin txn txn_id=5 txn_real_id=4611686018427387909 read_ts=0 commit_ts=-1 status=RUNNING iso_lvl=SNAPSHOT_ISOLATION
+txn5&gt; COMMIT;
+txn committed, txn_id=5, status=COMMITTED, read_ts=0, commit_ts=-1</code></pre>
+
+  <p>After this stage, the same four lines give:</p>
+
+<pre><code>bustub&gt; BEGIN;
+begin txn txn_id=3 txn_real_id=4611686018427387907 read_ts=2 commit_ts=-1 status=RUNNING iso_lvl=SNAPSHOT_ISOLATION
+txn3&gt; COMMIT;
+txn committed, txn_id=3, status=COMMITTED, read_ts=2, commit_ts=4
+bustub&gt; BEGIN;
+begin txn txn_id=5 txn_real_id=4611686018427387909 read_ts=4 commit_ts=-1 status=RUNNING iso_lvl=SNAPSHOT_ISOLATION
+txn5&gt; COMMIT;
+txn committed, txn_id=5, status=COMMITTED, read_ts=4, commit_ts=6</code></pre>
+
+  <p>The numbers skip because the shell runs transactions of its own. At startup it creates the mock tables and the test tables in two transactions, txn0 and txn1, which commit with timestamps 1 and 2. After that, every line you type outside a transaction runs in an auto-commit transaction of its own, the <code>BEGIN</code> line included. txn2 runs the first <code>BEGIN</code>, which starts txn3 with read timestamp 2, and then txn2 commits with timestamp 3, so txn3's own commit gets 4. <code>txn_real_id</code> is the id itself, 2<sup>62</sup> + 3.</p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">From BusTub's <code>TimestampTracking</code> test: txn0 begins; txn_store_1 begins and commits; txn1 begins; txn_store_2 begins and commits; txn2 begins; then txn0 aborts. What are txn2's read timestamp and the watermark at that point?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="txn0 held read timestamp 0, but it has aborted, so it no longer counts.">Read timestamp 2; watermark 0.</li>
+      <li data-option="b" data-explain="Two commits happened before txn2 began (timestamps 1 and 2), so it reads at 2. Of the running transactions, txn1 (read at 1) is the oldest, so the watermark is 1. The test checks exactly these values.">Read timestamp 2; watermark 1.</li>
+      <li data-option="c" data-explain="txn2 began after txn_store_2 committed with timestamp 2, so its read timestamp is 2, not 1.">Read timestamp 1; watermark 1.</li>
+      <li data-option="d" data-explain="The watermark is the lowest running read timestamp, and txn1 is still running at 1. It is the last commit timestamp only when nothing runs.">Read timestamp 2; watermark 2.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">On <code>NewWatermark(2)</code>: <code>AddTxn(3)</code>, <code>AddTxn(3)</code>, <code>AddTxn(5)</code>, then <code>RemoveTxn(3)</code> and <code>RemoveTxn(5)</code>. What does <code>Watermark()</code> return?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="2 is the commit timestamp, returned only when no read timestamp is counted. One transaction at 3 is still running.">2</li>
+      <li data-option="b" data-explain="5 was removed, and it was never the minimum.">5</li>
+      <li data-option="c" data-explain="The watermark is always a read timestamp of a running transaction or the commit timestamp; 4 is neither.">4</li>
+      <li data-option="d" data-explain="Read timestamp 3 was added twice, so removing it once leaves a count of 1, and removing 5 doesn't touch the minimum. TestTxnTsWatermarkDuplicates checks this sequence.">3</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Why does <code>Commit</code> compute its timestamp as <code>lastCommitTs.Load() + 1</code> and store the new value at the end of its <code>TxnMapMu</code> section, instead of calling <code>lastCommitTs.Add(1)</code> at the start?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Begin reads lastCommitTs as the new read timestamp. Published early, a new transaction could read at the commit's timestamp while the commit is still in progress, so (from stage 4 on) its snapshot would change as the commit finishes stamping its writes.">So that no transaction can begin with the new timestamp as its read timestamp before the commit is finished.</li>
+      <li data-option="b" data-explain="An atomic Add is a single indivisible step; two Adds never return the same value. And commitMu serializes commits anyway.">Because two concurrent <code>Add</code> calls could return the same commit timestamp.</li>
+      <li data-option="c" data-explain="Atomic operations are exactly what -race accepts without a report; the race detector understands sync/atomic.">Because <code>atomic.Int64.Add</code> is reported by the race detector.</li>
+      <li data-option="d" data-explain="AddTxn panics when a read timestamp is below the commit timestamp, not above it.">Because <code>AddTxn</code> panics when a read timestamp is above the watermark's commit timestamp.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">A version of <code>Begin</code> reads <code>lastCommitTs</code> just before it takes <code>TxnMapMu</code>, and uses that value as the read timestamp. What does <code>TestTxnTsConcurrentBeginCommit</code> report?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Ids come from nextTxnID.Add, which is atomic and unaffected by where the read timestamp is read.">Two transactions receive the same id.</li>
+      <li data-option="b" data-explain="No latch is taken twice and no lock order is reversed, so nothing deadlocks.">A deadlock between <code>Begin</code> and <code>Commit</code>.</li>
+      <li data-option="c" data-explain="A commit can finish between the read and the latch, raising the watermark's commit timestamp; AddTxn then sees a read timestamp below it and panics with this message. The planted bug fails the test on every run.">A worker panicked with <code>read ts &lt; commit ts</code> in <code>AddTxn</code>.</li>
+      <li data-option="d" data-explain="The atomic load is safe as a memory access, but the value it returns can be stale by the time the latch is held, which the watermark detects.">Nothing: an atomic load is safe without the latch.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">The last commit timestamp is 9, and three transactions are running with read timestamps 4, 4 and 7. The one at 7 commits; then both at 4 abort. What does the watermark report after each step?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Aborts don't produce commit timestamps, but the commit at 10 did, and with nothing running the watermark is the last commit timestamp.">4, then 9</li>
+      <li data-option="b" data-explain="The commit gets timestamp 10 and removes 7; the 4s are still running, so the watermark stays 4. Once both 4s are gone nothing runs, and the watermark is the last commit timestamp, 10.">4, then 10</li>
+      <li data-option="c" data-explain="Removing 7 doesn't change the minimum, which is 4 while either transaction at 4 runs.">7, then 10</li>
+      <li data-option="d" data-explain="The committing transaction has finished, so its read timestamp no longer counts toward the watermark.">7, then 7</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Build it: timestamps and the watermark (stage 1)</h2>
+
+  <p>You edit <code>concurrency/watermark.go</code> (<code>AddTxn</code>, <code>RemoveTxn</code>) and <code>concurrency/transaction_manager.go</code> (<code>Begin</code>, <code>Commit</code>). Run every command from <code>go_db_internals/intro_to_db</code>. The rules, in plain words:</p>
+  <ul>
+    <li>A transaction's read timestamp is the last commit timestamp at the moment it begins, read inside <code>Begin</code>'s <code>TxnMapMu</code> section.</li>
+    <li>A commit timestamp is the last commit timestamp plus one, computed under <code>commitMu</code>. Store it in the transaction before <code>UpdateCommitTs(txn.CommitTs())</code>, and publish it as the new last commit timestamp last, still under <code>TxnMapMu</code>.</li>
+    <li>The watermark is the lowest read timestamp of the running transactions, or the last commit timestamp if none runs. Several transactions may share a read timestamp. <code>AddTxn</code> and <code>RemoveTxn</code> must be amortized O(1) or O(log N).</li>
+    <li>Leave <code>Abort</code> as it is, and don't call <code>m.Watermark()</code> while holding <code>TxnMapMu</code>.</li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u8-01-pull">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u8-01-pull-cb">
+        <label for="u8-01-pull-cb">Commit your passing Project 3, pull Project 4, and check that every package except txntest still passes.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which files should the pull add, and which existing files may it change? None of the changed ones is a file you edited, so where could a merge conflict come from?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Run the whole module under <code>-race</code> first and commit. Pull with <code>--no-rebase</code>. Check that <code>txntest</code>, <code>concurrency/execution_common.go</code> and <code>bustub/dbgmvcc.go</code> exist, then run the whole module again: every package except <code>txntest</code> prints <code>ok</code>, the two rewritten Project 3 tests included.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>git pull --no-rebase origin main
+ls concurrency txntest
+go test -race -count=1 ./...   # only txntest fails</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u8-01-addtxn">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u8-01-addtxn-cb">
+        <label for="u8-01-addtxn-cb">Write AddTxn: count the new read timestamp and lower the watermark when it is the first one or a smaller one.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>What should <code>CurrentReads</code> hold when two transactions begin with the same read timestamp? What is <code>WatermarkTs</code> worth while the map is empty, and does <code>Watermark()</code> ever read it then?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Keep the shipped panic check at the top. Then, if the map is empty or the new read timestamp is below <code>WatermarkTs</code>, set <code>WatermarkTs</code> to it. Finally increment the read timestamp's count. In normal use the second case never happens (a new read timestamp is the newest), but <code>TestTxnTsWatermarkDuplicates</code> drives the type directly.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>w.CurrentReads[readTs]++ // a count per read ts, not a set</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u8-01-removetxn">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u8-01-removetxn-cb">
+        <label for="u8-01-removetxn-cb">Write RemoveTxn: decrement the count, and when the minimum's count reaches zero, move the watermark forward to the next counted read timestamp.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which removals can change the minimum? When the minimum disappears, where is the next one, and why is it never below the old one? What happens when the map becomes empty?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Decrement the count; if it is still positive, you are done. Otherwise delete the key. If the map is now empty, there is nothing to track (<code>Watermark()</code> returns <code>CommitTs</code>). If the removed timestamp was not the minimum, the minimum stands. Otherwise step a candidate up from the removed timestamp, one at a time, until it is a key of the map, and make that the new <code>WatermarkTs</code>. Every key is above the old minimum, so the walk ends. Don't look for the minimum with a <code>range</code> over the map: that is O(N) per call.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>next := readTs + 1
+for w.CurrentReads[next] == 0 { // absent keys read as 0
+	next++ // only forward: amortized O(1)
+}</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: the watermark on its own</span>
+          <p>Run <code>go test -race -run '^TestTxnTsWatermark' -timeout 300s ./txntest/</code>. It runs <code>TestTxnTsWatermarkPerformance</code> and <code>TestTxnTsWatermarkDuplicates</code>, which use the <code>Watermark</code> type directly and need nothing from the transaction manager. Success prints <code>ok  	intro_to_db/txntest</code>; the performance test takes about 2 seconds. A watermark that scans the whole map in <code>RemoveTxn</code> to find the new minimum fails the test's 30-second check:</p>
+<pre><code>--- FAIL: TestTxnTsWatermarkPerformance (31.05s)
+    txn_timestamp_test.go:40: RemoveTxn in order: still at step 832 of 1000000 after 30s: is AddTxn or RemoveTxn O(n)? Keep a count per read timestamp and move the watermark forward only when its count drops to zero</code></pre>
+          <p>Each removal walked about a million keys, so 30 seconds covered only 832 of the million steps.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u8-01-begin">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u8-01-begin-cb">
+        <label for="u8-01-begin-cb">In Begin, set the new transaction's read timestamp to the last commit timestamp, inside the TxnMapMu section and before AddTxn.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Where does the last commit timestamp live, and which latch does <code>Commit</code> hold when it changes the watermark's commit timestamp? What would <code>AddTxn</code> see if your read happened before that latch was yours?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>The shipped body already takes <code>TxnMapMu</code>, makes the transaction and calls <code>AddTxn(txn.ReadTs())</code>. At the <code>TODO(P4)</code>, load <code>m.lastCommitTs</code> and store it into the transaction's <code>readTs</code> field. Nothing else changes; <code>newTransaction</code> already set the commit timestamp to <code>InvalidTS</code>.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>m.TxnMapMu.Lock()
+// … id, newTransaction, TxnMap[id] = txn …
+// your line: readTs ← lastCommitTs, still under TxnMapMu
+m.RunningTxns.AddTxn(txn.ReadTs())</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u8-01-commit">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u8-01-commit-cb">
+        <label for="u8-01-commit-cb">In Commit, compute the commit timestamp under commitMu, store it in the transaction under TxnMapMu before the watermark is updated, and publish it as the last commit timestamp at the end.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>The shipped code calls <code>UpdateCommitTs(txn.CommitTs())</code>: what must <code>txn.CommitTs()</code> return by then? When may a <code>Begin</code> first see the new commit timestamp?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>At the first <code>TODO(P4)</code>, right after <code>commitMu.Lock()</code>, compute the last commit timestamp plus one into a local variable, with a load. Leave the state check and the serializable branch alone. At the second <code>TODO(P4)</code>, inside the <code>TxnMapMu</code> section, store the local into <code>txn.commitTs</code>. Let the shipped lines set the state, update the watermark's commit timestamp and remove the read timestamp, and then store the local into <code>m.lastCommitTs</code> before the latches are released. The middle <code>TODO(P4)</code> ("implement the commit logic") is stage 4's.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>commitTs := common.Timestamp(m.lastCommitTs.Load() + 1) // Load, not Add
+// … later, under TxnMapMu, after RemoveTxn:
+m.lastCommitTs.Store(int64(commitTs))</code></pre></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage P4.1</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestTxnTs' -timeout 300s ./...</code></pre>
+    <p>It runs the four stage 1 tests in <code>txntest</code>: <code>TestTxnTsWatermarkPerformance</code> and <code>TestTxnTsTimestampTracking</code> (BusTub's <code>txn_timestamp_test.cpp</code>), <code>TestTxnTsWatermarkDuplicates</code> (several transactions per read timestamp) and <code>TestTxnTsConcurrentBeginCommit</code> (8 goroutines of <code>Begin</code>, <code>Commit</code> and <code>Abort</code>; the commit timestamps must be exactly 1 to N). Success prints <code>ok  	intro_to_db/txntest</code>, and every other package shows <code>ok</code> with <code>[no tests to run]</code> (or <code>[no test files]</code>). It takes a few seconds once the build is cached.</p>
+    <p>On the starter all four fail:</p>
+<pre><code>--- FAIL: TestTxnTsWatermarkDuplicates (0.00s)
+    txn_extra_test.go:73: after AddTxn(3), AddTxn(3), AddTxn(5) on NewWatermark(2): watermark = 2, want 3
+        after removing one of the two read timestamps 3: watermark = 2, want 3
+        after removing 5 (not the minimum): watermark = 2, want 3
+--- FAIL: TestTxnTsConcurrentBeginCommit (0.01s)
+    txn_extra_test.go:114: the 1072 commits got commit timestamps [-1 -1 -1 -1 -1 -1 -1 -1 -1 -1]...; want exactly 1 to 1072, each once (the 1-th smallest is -1)
+--- FAIL: TestTxnTsWatermarkPerformance (0.05s)
+    txn_timestamp_test.go:64: reverse order: after UpdateCommitTs(1) and RemoveTxn(999999), watermark = 1, want 0 (read timestamp 0 is still running)
+--- FAIL: TestTxnTsTimestampTracking (0.00s)
+    txn_timestamp_test.go:123: - txn_begin var=txn0 id=0 status=RUNNING read_ts=0 iso_lvl=SNAPSHOT_ISOLATION
+    txn_timestamp_test.go:127: - txn_begin var=txn_store_1 id=1 status=RUNNING read_ts=0 iso_lvl=SNAPSHOT_ISOLATION
+    txn_timestamp_test.go:127: - txn_commit var=txn_store_1 id=1 status=COMMITTED read_ts=0 commit_ts=-1
+    txn_timestamp_test.go:127: txn_store_1 commit ts = -1, want 1</code></pre>
+    <p>If only the concurrent test fails, look at where <code>Begin</code> reads the last commit timestamp (the <code>read ts &lt; commit ts</code> panic above). To rerun one test with its step lines, add <code>-v</code>: <code>go test -race -run '^TestTxnTsTimestampTracking$' -v ./txntest/</code>.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why a read timestamp is the last commit timestamp and not a fresh number, why the watermark only moves forward, why <code>Begin</code> must read under <code>TxnMapMu</code>, or why <code>Commit</code> publishes its timestamp last. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: the CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/project4/">Project #4 writeup</a> (Overview, Background, Project Specification, Task #1.1 Timestamp Allocation, Task #1.2 Watermark, Task #2.2 on temporary timestamps and transaction ids); Lecture #20 slides 6–7 and 23–24; BusTub at commit d49b823: <code>src/include/concurrency/watermark.h</code>, <code>src/concurrency/watermark.cpp</code>, <code>src/include/concurrency/transaction_manager.h</code>, <code>src/concurrency/transaction_manager.cpp</code>, <code>src/include/concurrency/transaction.h</code>, <code>src/include/common/config.h</code> and <code>test/txn/txn_timestamp_test.cpp</code>; this course's <code>concurrency/watermark.go</code>, <code>concurrency/transaction_manager.go</code>, <code>concurrency/transaction.go</code>, <code>concurrency/transaction_manager_impl.go</code>, <code>bustub/dbgmvcc.go</code> and <code>txntest/</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u7-06-mvcc-design.html">← MVCC Design: Version Storage, Garbage Collection, and Indexes</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u8-02-p4-tuple-reconstruction.html">Next: P4.2 Tuple Reconstruction →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

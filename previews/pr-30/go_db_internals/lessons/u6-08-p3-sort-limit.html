@@ -1,0 +1,442 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 6 · Lesson 8 · P3.7 External Merge Sort and Limit</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 6 · Lesson 8</p>
+  <h1>P3.7 External Merge Sort and Limit</h1>
+  <p class="subtitle">Build ORDER BY as a two-way external merge sort: a tuple comparator with ASC/DESC and NULL placement, a page format of your own design for sorted runs, run generation and merge passes that go through the buffer pool and delete every page they create; then the Limit executor that sits on top of it.</p>
+
+  <p class="lede"><a href="./u5-01-external-sort.html">Unit 5, Lesson 1</a> counted the passes and I/Os of external merge sort on paper. This lesson builds it on the buffer pool you wrote in Project 1. The sort never writes a page to disk itself: it creates pages, fills them through guards, and lets the buffer pool evict them when memory runs out, which is exactly what a 16-frame test pool forces. You also design a page layout, as in Project 2, but this time no test pins it down. Limit is the small executor at the end; CMU's tests only run it on top of the sort.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 5, Lesson 1: a file of N = 16 pages is sorted with the 2-way external merge sort. How many passes, and how many I/Os?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That leaves out pass 0, which sorts each page into a one-page run.">4 passes, 128 I/Os</li>
+      <li data-option="b" data-explain="Each pass reads and writes every page, so it costs 2N, not N.">5 passes, 80 I/Os</li>
+      <li data-option="c" data-explain="Passes = 1 + ⌈log2 16⌉ = 1 + 4 = 5, and each pass costs 2N = 32 I/Os: 5 × 32 = 160.">5 passes, 160 I/Os</li>
+      <li data-option="d" data-explain="The 2-way sort halves the number of runs per pass; it doesn't need one pass per page.">16 passes, 512 I/Os</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 2, Lesson 8: your code still holds a <code>ReadPageGuard</code> on page 12 and calls <code>bpm.DeletePage(12)</code>. What happens?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A pinned page can't be deleted: DeletePage does nothing and returns false. Drop the guard first.">It returns false and the page stays.</li>
+      <li data-option="b" data-explain="DeletePage never waits for a guard to be dropped.">It blocks until the guard is dropped, then deletes the page.</li>
+      <li data-option="c" data-explain="Deleting a pinned frame would leave the guard pointing at freed memory; the buffer pool refuses instead.">It deletes the page, and the guard now reads zeros.</li>
+      <li data-option="d" data-explain="Only a pinned page makes DeletePage return false; it doesn't panic.">It panics.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 4, Lesson 1: how does the Go port represent a B+tree page, given that it can't cast a page's bytes to a struct as BusTub does?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Copying the page into a struct would mean writing it back after every change, and two copies could disagree.">It decodes the page into a Go struct when the guard is taken and encodes it when the guard is dropped.</li>
+      <li data-option="b" data-explain="The Go port doesn't use unsafe casts; it reads fields from the bytes.">With <code>unsafe.Pointer</code>, casting the byte slice to a struct pointer.</li>
+      <li data-option="c" data-explain="The page holds raw bytes at fixed offsets, not a serialized Go value.">With <code>encoding/gob</code>, one call per page.</li>
+      <li data-option="d" data-explain="A page view holds the page's []byte, keeps no state of its own, and reads or writes one field per method with encoding/binary, so two views of the same page always agree.">As a page view: a small struct over the page's <code>[]byte</code> whose methods read and write fields with <code>encoding/binary</code>.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Sort and Limit in a plan</h2>
+
+  <p>The writeup: except when the ORDER BY attributes match the keys of an index, BusTub uses a <code>SortPlanNode</code> for every ORDER BY. (The match case is the pre-built <code>OrderByAsIndexScan</code> rule, which reads the index in order with your Lesson 4 index scan instead.) A query with ORDER BY and LIMIT plans the two as separate nodes:</p>
+
+<pre><code>bustub&gt; explain (o) select * from __mock_table_4 order by colG desc nulls first, colH nulls last limit 3;
+=== OPTIMIZER ===
+Limit { limit=3 }
+  ExternalMergeSort { order_bys=[("Descending", "NullsFirst", "#0.0"), ("Default", "NullsLast", "#0.1")] }
+    MockScan { table=__mock_table_4 }</code></pre>
+
+  <p>The sort node prints as <code>ExternalMergeSort</code>; its output schema is its child's. Each ORDER BY item is a <code>plans.OrderBy</code> with a <code>Type</code> (<code>common.OrderByDefault</code>, <code>OrderByAsc</code> or <code>OrderByDesc</code>), a <code>NullOrder</code> (<code>OrderByNullsDefault</code>, <code>OrderByNullsFirst</code> or <code>OrderByNullsLast</code>) and an <code>Expr</code>, which can be any expression: <code>p3.16-sort-limit.slt</code> sorts on <code>col1 + col4 - col1 desc</code>. The planner keeps "Default" when the SQL says nothing, so your comparator has to turn defaults into a direction and a NULL placement.</p>
+
+  <p>The Limit stays a separate node over the sort as long as the stretch rule <code>SortLimitAsTopN</code> is a stub; once you write it in <a href="./u6-10-p3-stretch-topn.html">P3 Stretch: TopN</a>, the ORDER BY … LIMIT queries of <code>p3.16</code> and <code>p3.18</code> run through TopN instead of your sort.</p>
+
+  <h2>Sort keys and the tuple comparator</h2>
+
+  <p>The sort compares <code>SortEntry</code> values: a <code>SortKey</code> (a <code>[]types.Value</code>, one per ORDER BY item) and the tuple it came from. Evaluating the keys once per tuple, with <code>GenerateSortKey(t, orderBys, schema)</code>, keeps the expressions out of every comparison. For the tuple (7, NULL, −2) and <code>ORDER BY c DESC, a + 1, b</code>, the key is <code>[-2, 8, integer_null]</code>. Pairing the key with the whole tuple is early materialization in Lecture #11's terms: the sorted output already holds every column.</p>
+
+  <p><code>TupleComparator.Less(a, b)</code> reports whether <code>a</code> sorts before <code>b</code>, and the first ORDER BY item whose values differ decides. The writeup fixes the defaults: no direction means ascending; no NULL placement means NULLS FIRST for ascending order and NULLS LAST for descending order. An explicit NULLS FIRST or NULLS LAST overrides that. <code>TestSortComparatorNullPlacement</code> checks every combination:</p>
+
+  <table>
+    <tr><th>ORDER BY item</th><th>Where NULLs go</th></tr>
+    <tr><td><code>a</code>, <code>a ASC</code></td><td>first</td></tr>
+    <tr><td><code>a DESC</code></td><td>last</td></tr>
+    <tr><td><code>a ASC NULLS LAST</code>, <code>a DESC NULLS LAST</code></td><td>last</td></tr>
+    <tr><td><code>a NULLS FIRST</code>, <code>a DESC NULLS FIRST</code></td><td>first</td></tr>
+  </table>
+
+  <p>Put another way, a NULL behaves like a value smaller than every other in BusTub's defaults, and the explicit options move it. DuckDB, which you used in Unit 0, puts NULLs last by default in both directions, so don't check BusTub's NULL order against it without writing NULLS FIRST or LAST. Two NULLs are equal for the comparator: neither sorts before the other, and the next ORDER BY item decides. Non-NULL values compare with <code>CompareLessThan</code> and <code>CompareEquals</code>, which return a <code>types.CmpBool</code>; VARCHAR values compare bytewise, so <code>"ab"</code> sorts before <code>"b"</code>. When every item is equal, <code>Less</code> returns false both ways.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p><code>Less</code> has the shape Go's sort functions want: <code>sort.SliceStable(entries, func(i, j int) bool { return cmp.Less(entries[i], entries[j]) })</code>. It must be a strict ordering, so <code>Less(x, x)</code> is false; returning true for equal entries makes the sort's results depend on the algorithm's internals. The writeup lets you assume that every sort key appears only once, so ties never decide a test, but a stable sort costs little and keeps equal entries in input order. The doc comment on the executor allows this in-memory sort for the tuples of one page and forbids it for the whole input.</p>
+  </div>
+
+  <h2>Designing the IntermediateResultPage</h2>
+
+  <p>The sort stores its runs in pages from the buffer pool, and the writeup leaves the page format to you: "You should design the page layout and implement the read/write methods for the page." Its requirements, repeated in the doc comment on <code>IntermediateResultPage</code>:</p>
+  <ul>
+    <li>It must hold tuples with VARCHAR columns, so tuples have different lengths.</li>
+    <li>The layout should be compact, "as little fragmentation as possible".</li>
+    <li>A tuple never needs more than one page. When the next tuple doesn't fit, start a new page.</li>
+  </ul>
+
+  <p>Make it a page view like Project 2's pages: a struct holding the page's <code>[]byte</code>, with methods that read and write numbers through <code>encoding/binary</code>. <code>Tuple.SerializeTo(dst)</code> writes a 4-byte length followed by the tuple's bytes, and <code>DeserializeTuple(src)</code> reads that back into a new tuple (it copies, so the result outlives the page guard). The sort reads each run front to back and never jumps to the <em>i</em>-th tuple, so it doesn't need the slot array of Unit 1's slotted pages; tuples can follow each other directly:</p>
+
+<pre><code>offset 0     4       8
+       +-----+-------+------------------+------------------+-----     ------+
+       |count| used  | len | tuple 0    | len | tuple 1    | ...  free     |
+       +-----+-------+------------------+------------------+-----     ------+
+        uint32 uint32  uint32 + bytes     uint32 + bytes                8192</code></pre>
+
+  <p>Here <code>count</code> is the number of tuples and <code>used</code> the offset of the first free byte, so appending checks <code>used + 4 + len &lt;= 8192</code>, writes the tuple at <code>used</code> and bumps both fields. A reader keeps a byte offset, starting at 8, and moves it by 4 + the length of each tuple it reads. This is one layout; nothing outside your files uses the type, the tests never look at the bytes, and its methods can be unexported. The writeup suggests designing it with the hash join's partitions in mind as well, which matters only if you do Lesson 7's optional exercise.</p>
+
+  <h2>Run generation and merging through the buffer pool</h2>
+
+  <p>The writeup's assumption is that the input does not fit in memory, so the sort must follow the lecture: store intermediate results in temporary pages and merge recursively. And it tests only the two-way sort, <code>MergeSortWays = 2</code>, the 3-buffer algorithm of Unit 5, Lesson 1. <code>Init</code> does all of the sorting, because a sort is a pipeline breaker; <code>Next</code> reads the result.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L11-two-way-merge-p33.png" alt="Left: In each pass, the DBMS reads and writes every page in the file. Number of passes = 1 + ceiling of log base 2 of N. Total I/O cost = 2N times number of passes. Right: seven two-key pages 3|4, 6|2, 9|4, 8|7, 5|6, 3|1, 9|1. Pass 0 sorts each page into a 1-page run. Pass 1 merges pairs into 2-page runs, leaving 1|9 alone. Pass 2 makes 4-page runs. Pass 3 produces one 8-page run, 1|1 2|3 3|4 4|5 6|6 7|8 9|9." loading="lazy">
+    <figcaption>Your sort has the same shape: pass 0 turns each page of input into a one-page run, every later pass merges pairs of runs, and an odd run out is carried into the next pass unchanged (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/11-sorting.pdf#page=33">Lecture #11, slide 14</a>).</figcaption>
+  </figure>
+
+  <h3>Pass 0: one-page runs</h3>
+
+  <p>Read the child in batches. Collect <code>SortEntry</code> values, counting the bytes their tuples will take on a page, until the next tuple would not fit; then sort the collected entries in memory, write them in order to a new page, and start collecting again. Each such page is a run of one page: a <code>MergeSortRun</code>, which is pre-built and only holds the run's page IDs and the buffer pool (<code>NewMergeSortRun(pages, bpm)</code>). Pages come from <code>bpm.NewPage()</code>; you fill one through <code>bpm.WritePage(id, bufferpool.AccessUnknown)</code> and its <code>DataMut()</code>, and you drop the guard when the page is full. After that, the buffer pool may evict the page at any time and write it to disk; that is the external part of the sort, and you write no I/O code for it. The writeup's hint says exactly this: the page guard pins and unpins, and the buffer pool manager handles writing to disk.</p>
+
+  <h3>Merge passes</h3>
+
+  <p>Each pass takes the runs two at a time and merges each pair into a new run. A merge walks both runs with a <code>MergeSortRunIterator</code>, which you write: <code>Begin</code>, <code>IsEnd</code>, <code>Tuple</code>, <code>Next</code> and <code>Close</code>. The iterator holds a read guard on one page of its run at a time, moves to the run's next page when the current one is used up, and drops its guard in <code>Close</code>. At every step the merge compares the two current tuples' sort keys, appends the smaller tuple to the output run (a new page whenever the current output page is full), and advances that iterator. With an odd number of runs, the last one goes into the next pass unchanged. The pass ends when every pair is merged; the sort ends when one run is left.</p>
+
+  <p>During a merge the sort pins three pages at most: one page of each input run and the output page. Those are the three buffers of the lecture's 2-way algorithm, which is why the sort works through the 16-frame pool of <code>TestSortLargeVarcharSmallPool</code>: that test sorts 50,000 rows, about 200 pages, so the buffer pool has to evict sort pages, and the test checks that some of the sort's pages were written to disk.</p>
+
+  <h3>Delete every page the sort created</h3>
+
+  <p>The writeup warns about "zombie" pages: a page from a finished round that is never referred to again but still exists in the buffer pool. So once a pair of runs has been merged, delete both runs' pages with <code>bpm.DeletePage</code>; it returns false for a pinned page, so close both iterators first. The final run's pages go when <code>Next</code> has returned its last tuple, and again on a new <code>Init</code> if the previous output was not read to the end. <code>TestSortLargeVarcharSmallPool</code> allocates a marker page before and after the sort and checks that every page in between was deleted, then that no page is pinned:</p>
+
+<pre><code>--- FAIL: TestSortLargeVarcharSmallPool (1.91s)
+    external_merge_sort_executor_test.go:210: page 1314, allocated by the sort, was not deleted by the end (delete each run's pages once they are merged, and the last run's when Next returns false)</code></pre>
+
+  <p>That failure came from a sort that deleted every merged run but forgot the final one. A Limit above the sort stops pulling before the end, so the final run's pages can stay until the sort's next <code>Init</code>; the tests check deletion only after a full read.</p>
+
+  <h3>The pass count, measured</h3>
+
+  <p>In that test, pass 0 of a sort that fills each page produces 171 one-page runs. Unit 5's formula gives 1 + ⌈log<sub>2</sub> 171⌉ = 1 + 8 = 9 passes, and the sort really does run pass 0 plus eight merge passes. The general K-way sort would need far fewer with 16 frames, but the writeup tests only the two-way version, so the pass count depends only on the number of pages, not on the pool's size.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=LzyKTpeIgts&amp;t=1457s">#11 Sorting &amp; Aggregation Algorithms, "External merge sort" (24:17)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/11-sorting.pdf#page=23">slides 11–17</a>: the two phases, the 2-way sort pass by pass and the general formula.</p>
+
+  <h2>Limit</h2>
+
+  <p>The <code>LimitExecutor</code> returns at most <code>plan.Limit</code> tuples of its child. If the child has fewer, it returns them all, and offsets are not supported. It keeps one counter, reset in <code>Init</code>. In <code>Next</code>, with <em>left</em> = <code>Limit</code> − (tuples returned so far), return false at once when <em>left</em> is 0 or less, without calling the child; otherwise ask the child for at most <code>min(batchSize, left)</code> tuples (or take a full batch and truncate the slices), add what you return to the counter, and pass the child's false through. <code>LIMIT 0</code> returns nothing. The writeup calls Limit much easier than the sort and suggests writing it first if you are stuck, but warns that it is not tested without the sort; here too, <code>p3.16</code>'s first record is <code>order by colB desc limit 10</code>.</p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">The rows (a, b) are (3, 1), (NULL, 2), (1, 3), (5, 4), (−2, 5), (4, NULL) and (NULL, 7). Which row comes first under <code>ORDER BY b DESC NULLS FIRST</code>, and which under <code>ORDER BY b DESC</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="DESC without a NULL option puts NULLs last, so the default case starts with the largest b, 7.">(4, NULL) both times.</li>
+      <li data-option="b" data-explain="NULLS FIRST overrides the direction's default, so (4, NULL) leads. Plain DESC defaults to NULLS LAST, so the largest b, (NULL, 7), leads.">(4, NULL), then (NULL, 7).</li>
+      <li data-option="c" data-explain="The sort is on b, not a; a's NULL doesn't matter here.">(NULL, 7), then (NULL, 2).</li>
+      <li data-option="d" data-explain="NULLS FIRST is explicit, so the first query must start with the row whose b is NULL.">(NULL, 7) both times.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Your pass 0 produces 171 one-page runs, and the buffer pool has 16 frames. How many passes does your 2-way sort make in all, counting pass 0?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is the general sort's count with B = 16 (⌈171 / 16⌉ = 11 runs, then one 15-way merge); this sort merges two runs at a time.">2</li>
+      <li data-option="b" data-explain="That counts only the merge passes; pass 0 is a pass too.">8</li>
+      <li data-option="c" data-explain="1 + ⌈log2 171⌉ = 1 + 8 = 9: 171 runs halve (rounding up) to 86, 43, 22, 11, 6, 3, 2 and 1 in eight merge passes.">9</li>
+      <li data-option="d" data-explain="Each merge pass halves the number of runs; it doesn't merge one run at a time.">171</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">During one 2-way merge, how many pages does a correct sort hold guards on at the same time, at most?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="One read guard per input run (each iterator holds one page) and one write guard on the output page: the lecture's three buffers.">3</li>
+      <li data-option="b" data-explain="The iterators hold one page each, not the whole run.">Every page of both input runs, plus one.</li>
+      <li data-option="c" data-explain="The output page needs a guard while tuples are written into it.">2</li>
+      <li data-option="d" data-explain="The merge never needs all of the pool; the sort works with any pool of three frames or more.">All 16 frames of the pool.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">With the layout above (an 8-byte header, then each tuple as a 4-byte length and its bytes), how many 26-byte tuples fit on one 8,192-byte page?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That ignores both the header and the length prefixes: 8,192 / 26.">315</li>
+      <li data-option="b" data-explain="That forgets the 4-byte length in front of each tuple.">314</li>
+      <li data-option="c" data-explain="That rounds 272.8 up, but the 273rd tuple would end past the page.">273</li>
+      <li data-option="d" data-explain="Each tuple takes 4 + 26 = 30 bytes, and 8,184 bytes are left after the header: ⌊8,184 / 30⌋ = 272.">272</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A <code>LIMIT 47</code> over a child of 200 rows is drained with a batch size of 10. What do the calls to its <code>Next</code> return?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A batch never holds more than batchSize tuples.">One batch of 47, then false.</li>
+      <li data-option="b" data-explain="Four full batches, then the last 7 asked for with min(batchSize, left), each returned with true; the sixth call returns false without calling the child.">Batches of 10, 10, 10, 10 and 7, each with true, then false.</li>
+      <li data-option="c" data-explain="The limit must stop at 47 rows, so the fifth batch is cut to 7.">Five batches of 10 with true, then false.</li>
+      <li data-option="d" data-explain="The partial last batch must come back with true, or the engine drops it.">Four batches of 10 with true, then 7 tuples with false.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Build it: the sort and the limit (stage 10)</h2>
+
+  <p>You edit four files: <code>execution/execution_common.go</code> (<code>TupleComparator.Less</code> and <code>GenerateSortKey</code>), <code>execution/intermediate_result_page.go</code> (the page type and its methods), <code>execution/external_merge_sort_executor.go</code> (the run iterator and the executor's <code>Init</code> and <code>Next</code>) and <code>execution/limit_executor.go</code>. Run commands from <code>go_db_internals/intro_to_db</code>. The rules, in plain words:</p>
+  <ul>
+    <li><code>Next</code> follows the batch contract: clear <code>*tuples</code> and <code>*rids</code> first, append up to <code>batchSize</code> tuples with one RID each (the zero <code>common.RID{}</code> for the sort's output), return true for every non-empty batch including the last partial one, and false once exhausted, on every later call too. Return errors, including the buffer pool's refusals, instead of panicking.</li>
+    <li>Default direction ASC; default NULLs first for ASC and last for DESC; explicit NULLS FIRST/LAST wins.</li>
+    <li>Sort in memory only the tuples of one page. Store runs in buffer pool pages, merge two at a time, and delete each page once it is no longer needed, the final run's included.</li>
+    <li>Drop every guard you take. After the sort, no page it touched may still be pinned.</li>
+    <li>Limit returns at most <code>Limit</code> tuples, resets its count in <code>Init</code>, and stops calling its child once it has them.</li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u6-08-sort-key">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-08-sort-key-cb">
+        <label for="u6-08-sort-key-cb">Implement GenerateSortKey: evaluate each ORDER BY expression on the tuple, in order.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which method of an expression evaluates it on one tuple, and which schema does it need? Should the key hold the expressions or their values?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Make a <code>SortKey</code> with capacity <code>len(orderBys)</code> and append <code>ob.Expr.Evaluate(&amp;t, schema)</code> for each item. NULL results stay in the key; the comparator handles them.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>for _, ob := range orderBys {
+	key = append(key, ob.Expr.Evaluate(&amp;t, schema))
+}</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-08-less">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-08-less-cb">
+        <label for="u6-08-less-cb">Implement TupleComparator.Less: walk the ORDER BY items, resolve each item's direction and NULL placement, and let the first item whose values differ decide.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>For one item, what are the four cases of "is a's value NULL, is b's value NULL"? Which of them decide, and which move on to the next item? How does DESC change the answer for two non-NULL values but not for the NULL cases?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>For each item <em>i</em>: <code>desc</code> is <code>ob.Type == common.OrderByDesc</code>; <code>nullsFirst</code> is true for <code>OrderByNullsFirst</code>, false for <code>OrderByNullsLast</code>, and <code>!desc</code> for the default. Both NULL: continue. Only <code>a</code>'s NULL: return <code>nullsFirst</code>. Only <code>b</code>'s: return <code>!nullsFirst</code>. Equal values (<code>CompareEquals</code> is <code>CmpTrue</code>): continue. Otherwise compute <code>less</code> with <code>CompareLessThan</code> and return it, inverted for DESC. After the loop, return false.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>case an:
+	return nullsFirst
+case bn:
+	return !nullsFirst</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: keys and comparator</span>
+          <p>Run <code>go test -race -run '^TestSort(Comparator|GenerateSortKey)' ./execution/</code>. It runs <code>TestSortComparatorAscDesc</code>, <code>ComparatorNullPlacement</code> (the seven combinations in the table), <code>ComparatorSeveralKeys</code> (<code>ORDER BY a DESC, b ASC NULLS LAST</code>) and <code>GenerateSortKey</code>. Success prints <code>ok  	intro_to_db/execution</code>. A wrong default shows both directions of the comparison, for example <code>Default Default: NULL and 5: Less(a, b) = false, Less(b, a) = true, want true and false</code>.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-08-page">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-08-page-cb">
+        <label for="u6-08-page-cb">Design IntermediateResultPage as a view over a page's bytes, with methods to initialize an empty page, append a tuple if it fits, and read the tuples back in order.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>What must the header record so that a writer knows where the free space starts and a reader knows when to stop? How many bytes does a tuple take once serialized? What does a fresh page from <code>NewPage</code> contain, and why must the writer initialize the header explicitly?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Give the struct one field, <code>data []byte</code>, and a constructor over a guard's bytes. With the layout above: <code>init</code> writes count 0 and used 8; <code>insertTuple(t)</code> computes 4 + <code>t.Len()</code>, returns false if that would pass <code>len(data)</code>, otherwise calls <code>t.SerializeTo(data[used:])</code> and updates both header fields; a reader method takes an offset and returns the tuple there (<code>table.DeserializeTuple</code>) and the offset after it. Also add a check that a tuple fits on an empty page at all, so the sort can report an error instead of looping.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>t.SerializeTo(p.data[used:]) // 4-byte length, then the tuple's bytes
+binary.LittleEndian.PutUint32(p.data[4:], uint32(used+4+t.Len()))</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-08-iterator">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-08-iterator-cb">
+        <label for="u6-08-iterator-cb">Implement the run iterator (Begin, IsEnd, Tuple, Next, Close) so that it walks a run page by page while holding a read guard on one page at a time.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>What does the iterator need to remember: which page of the run, which tuple on it, where the next tuple starts? When it moves to the next page, what happens to the guard on the old one? What should <code>Begin</code> return for a run with no tuples?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Fields: the page index in <code>run.pages</code> (equal to <code>len(pages)</code> at the end), the current <code>*bufferpool.ReadPageGuard</code> and page view, the tuple's index on the page, the current tuple and the offset of the next one. A helper "load page <em>i</em>" drops the old guard, takes <code>run.bpm.ReadPage(pages[i], bufferpool.AccessUnknown)</code>, skips empty pages, and reads the first tuple. <code>Begin</code> loads page 0; <code>IsEnd</code> compares the page index with the page count; <code>Next</code> reads the next tuple or loads the next page; <code>Close</code> drops the guard if there is one, and is safe to call twice.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>func (it *MergeSortRunIterator) Close() {
+	if it.guard != nil {
+		it.guard.Drop()
+		it.guard = nil</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-08-pass0">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-08-pass0-cb">
+        <label for="u6-08-pass0-cb">Start Init with pass 0: initialize the child, collect one page's worth of sort entries at a time, sort them in memory, and write each group to a new page as a one-page run.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>How do you know, before writing anything, that the collected tuples fill exactly one page? Which page operations does a run writer need, and when does it drop its guard? What should <code>Init</code> do first if a previous run of the executor left a final run behind?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Release anything the last run left (close the output iterator, delete the final run's pages), then <code>e.child.Init()</code>. Keep a byte count starting at the header size. For each child tuple: if it can't fit on an empty page, return an error; if adding it would pass the page size, flush. Otherwise append <code>SortEntry{Key: GenerateSortKey(t, e.plan.OrderBys, schema), Tuple: t}</code> and add its size. To flush, sort the entries with <code>sort.SliceStable</code> and <code>e.cmp.Less</code>, write them with a small run writer (one that takes a new page from <code>NewPage</code>, write-guards and initializes it, appends until full, and records the page IDs), and add the resulting <code>MergeSortRun</code> to a list. Flush once more at the end.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>sort.SliceStable(entries, func(i, j int) bool {
+	return e.cmp.Less(entries[i], entries[j])
+})</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-08-merge">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-08-merge-cb">
+        <label for="u6-08-merge-cb">Finish Init with the merge passes: merge runs two at a time into new runs, carry an odd run over, and delete the pages of every run that has been merged, until one run is left.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>The iterators hold tuples, but the comparator wants sort keys: where do the keys come from during a merge? In what order must you close iterators and delete pages? What is left at the end for zero runs, for one run?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>While more than one run is left, build the next pass's list: for <em>i</em> in steps of <code>MergeSortWays</code>, a lone last run is appended unchanged; otherwise open an iterator on each run (deferring or arranging their <code>Close</code>), compute each current tuple's key with <code>GenerateSortKey</code>, and repeatedly append the tuple whose key is <code>Less</code> to a run writer and advance that iterator, recomputing its key. Close both iterators, close the writer, delete both input runs' pages with <code>DeletePage</code> (an error if it returns false), and append the merged run. When one run is left, keep it as the final run and open the output iterator on it.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>if best &lt; 0 || e.cmp.Less(SortEntry{Key: keys[i]}, SortEntry{Key: keys[best]}) {
+	best = i
+}</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-08-next">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-08-next-cb">
+        <label for="u6-08-next-cb">Write Next: emit the final run's tuples in batches, and when the run is exhausted, close the iterator and delete the final run's pages.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>What does <code>Next</code> return for an empty input, where there is no final run? When exactly is the final run no longer needed: when the last tuple has been handed out, or on the call after? What must a second <code>Init</code> in the middle of the output undo?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Clear the slices. If there is no output iterator, return false. Append <code>Tuple()</code> and a zero RID, then <code>Next()</code>, while the batch has room and the iterator is not at the end. If it is at the end now, call the same release helper <code>Init</code> uses: close the iterator, set it to <code>nil</code>, delete the final run's pages and forget them. Return whether the batch is non-empty.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>for len(*tuples) &lt; batchSize &amp;&amp; !e.out.IsEnd() {
+	*tuples = append(*tuples, e.out.Tuple())
+	*rids = append(*rids, common.RID{})
+	e.out.Next()
+}</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: the external merge sort</span>
+          <p>Run <code>go test -race -run '^TestSort(Empty|OnePage|LargeVarcharSmallPool|ReInit)$' ./execution/</code>. It runs <code>TestSortEmpty</code>, <code>OnePage</code> (seven rows with NULLs under two ORDER BYs), <code>LargeVarcharSmallPool</code> (50,000 rows with a VARCHAR key through 16 frames: order, pages written to disk, every page deleted, no pins) and <code>ReInit</code> (three full runs, then an <code>Init</code> in the middle of the output). Success prints <code>ok  	intro_to_db/execution</code> in a few seconds. A sort that keeps its runs in memory fails with "the sort allocated no page", and one that leaks pages with the "was not deleted by the end" message above.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-08-limit">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-08-limit-cb">
+        <label for="u6-08-limit-cb">Implement LimitExecutor: reset a counter in Init, and in Next pass through at most the remaining number of the child's tuples, returning false without calling the child once the limit is reached.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>How many tuples may the next batch hold, given <code>batchSize</code> and what has already been returned? What should <code>LIMIT 0</code> do on the first call? Can you let the child fill your output slices directly?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Add an <code>emitted</code> field. <code>Init</code> zeroes it and returns <code>e.child.Init()</code>. <code>Next</code> clears the slices, computes <code>left := e.plan.Limit - e.emitted</code>, returns false if <code>left &lt;= 0</code>, and otherwise calls <code>e.child.Next(tuples, rids, min(batchSize, left))</code>, passing its false or error through. Truncate to <code>left</code> as a guard, add the batch's length to <code>emitted</code>, and return whether it is non-empty.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>left := e.plan.Limit - e.emitted
+if left &lt;= 0 {
+	return false, nil
+}</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: Limit</span>
+          <p>Run <code>go test -race -run '^TestSortLimit' ./execution/</code>. It runs the six Limit tests (their names share the stage prefix): <code>FewerRows</code>, <code>MoreRows</code>, <code>Zero</code>, <code>AcrossBatches</code> (47 of 200 rows with batch size 10, and 40 of 200), <code>ReInit</code> and <code>OverSort</code> (<code>ORDER BY a DESC LIMIT 3</code> over your sort). Success prints <code>ok  	intro_to_db/execution</code>.</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage 10, P3.7</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestSort' -timeout 300s ./...</code></pre>
+    <p>It runs the fourteen executor tests in <code>execution</code> (eight sort tests and six Limit tests) and <code>TestSortSQL</code> in <code>sqllogictest</code>, whose subtests run <code>p3.16-sort-limit.slt</code> (limits, sorts with explicit NULL placement and expression keys, a 100,000-row mock table, and two records marked <code>+ensure:hash_join</code>, which need stage 9), <code>p3.18-integration-1.slt</code> and <code>p3.19-integration-2.slt</code> (shortest paths and multi-step queries over a graph, using every executor so far). Success prints, with every other package at <code>ok</code> and <code>[no tests to run]</code> (or <code>[no test files]</code>):</p>
+<pre><code>ok  	intro_to_db/execution	2.970s
+ok  	intro_to_db/sqllogictest	2.670s</code></pre>
+    <p>On the starter the executor tests fail at their stubs (<code>Default: 1 and 2: panic: TODO(P3): TupleComparator.Less not implemented</code>, <code>sorting no rows: panic: TODO(P3): ExternalMergeSortExecutor.Init not implemented</code>, <code>limit: panic: TODO(P3): LimitExecutor.Init not implemented</code>), and each <code>.slt</code> file at its first sort or limit, such as <code>p3.16-sort-limit.slt:6: unexpected error: internal error (panic): TODO(P3): LimitExecutor.Init not implemented</code>. A wrong order shows the file and line, the expected and actual rows and the plan. One file, with every record logged:</p>
+<pre><code>go test -race -run '^TestSortSQL$/p3.16' ./sqllogictest/
+go test -race -run '^TestSortSQL$/p3.16' -v ./sqllogictest/ -args -slt.verbose</code></pre>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why the sort pins at most three pages however large the pool is, why your sort's pass count ignores the pool size, where BusTub's default NULL order differs from DuckDB's, or which pages are still alive when a Limit stops reading the sort early. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: the CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/project3/">Project #3 writeup</a> (Task #4, External Merge Sort and Limit, and their hints); BusTub <code>src/include/execution/execution_common.h</code>, <code>src/execution/execution_common.cpp</code>, <code>src/include/storage/page/intermediate_result_page.h</code>, <code>src/include/execution/executors/external_merge_sort_executor.h</code>, <code>src/execution/external_merge_sort_executor.cpp</code>, <code>src/include/execution/executors/limit_executor.h</code> and <code>src/execution/limit_executor.cpp</code> at commit d49b823, and its <code>test/sql/p3.16-sort-limit.slt</code>, <code>p3.18-integration-1.slt</code> and <code>p3.19-integration-2.slt</code>; Lecture #11 slides 8 and 11–17; this course's <code>execution/execution_common.go</code>, <code>execution/intermediate_result_page.go</code>, <code>execution/external_merge_sort_executor.go</code>, <code>execution/limit_executor.go</code> and their tests.</p>
+
+  <div class="lesson-nav">
+    <a href="./u6-07-p3-hash-join.html">← P3.6 Hash Join and the NLJ→HashJoin Rule</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u6-09-p3-window-functions.html">Next: P3.8 Window Functions →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

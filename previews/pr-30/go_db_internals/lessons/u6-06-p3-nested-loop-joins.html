@@ -1,0 +1,404 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 6 · Lesson 6 · P3.5 Nested Loop and Nested Index Joins</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 6 · Lesson 6</p>
+  <h1>P3.5 Nested Loop and Nested Index Joins</h1>
+  <p class="subtitle">Implement inner and left nested loop joins that re-initialize the right child for every left tuple, treat a NULL predicate as false, pad unmatched left tuples with typed NULLs and resume across batch boundaries; then implement the nested index join, which probes the inner table's B+tree once per outer tuple.</p>
+
+  <p class="lede"><a href="./u5-03-nested-loop-and-sort-merge-joins.html">Unit 5, Lesson 3</a> costed the nested loop family on paper: the naïve join rescans the inner table for every outer tuple, and the index nested loop join replaces that scan with an index probe. BusTub plans every join as a nested loop join, and one pre-built optimizer rule turns some of them into index joins, so this lesson's two executors run every join query until the next lesson adds hash joins. The algorithms are short. The work is in the batch model: a join emits a variable number of tuples per input tuple, and its state must survive the end of a batch.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Unit 5, Lesson 3: R has M = 1,000 pages and m = 100,000 tuples; S has N = 500 pages. What does the naïve nested loop join with R as the outer table cost in I/Os?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That reads S once per page of R, which is the block nested loop join with one-page blocks: M + M × N.">501,000</li>
+      <li data-option="b" data-explain="The naïve join reads R once (M) and scans all of S for each of R's m tuples: 1,000 + 100,000 × 500 = 50,001,000.">50,001,000</li>
+      <li data-option="c" data-explain="Reading each table once is the cost of a hash join whose table fits in memory, not of a nested loop.">1,500</li>
+      <li data-option="d" data-explain="The outer table is read once, not once per inner page.">500,000,000</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 4, Lesson 3: your Project 2 B+tree already holds key 7, and <code>Insert(7, rid)</code> is called again. What happens?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The tree stores one value per key; it has no list of RIDs per key.">The new RID is added next to the old one.</li>
+      <li data-option="b" data-explain="Insert never overwrites an existing entry.">The old RID is replaced by the new one.</li>
+      <li data-option="c" data-explain="A duplicate is an ordinary outcome, reported through the return value.">Insert panics.</li>
+      <li data-option="d" data-explain="Keys are unique: Insert returns false and changes nothing, so one key maps to at most one RID.">Insert returns false and the tree is unchanged.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 5, Lesson 5: BusTub's execution engine loops <code>while (executor-&gt;Next(&amp;tuples, &amp;rids, BUSTUB_BATCH_SIZE))</code> and appends each batch to the result. What does that loop do with the tuples of a call that returns false?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The loop stops on false without looking at the batch.">It appends them, then stops.</li>
+      <li data-option="b" data-explain="Nothing retries the call; false ends the loop.">It retries the call until it returns true.</li>
+      <li data-option="c" data-explain="False ends the loop and its batch is ignored, so an executor's last, partly filled batch must come back with true, and the call after it returns false with nothing in it.">It ignores them.</li>
+      <li data-option="d" data-explain="The engine doesn't check the batch size; it only looks at the return value.">It reports an error if the batch isn't empty.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>How BusTub plans a join</h2>
+
+  <p>The writeup says the DBMS uses <code>NestedLoopJoinPlanNode</code> for all joins by default, whether the SQL says <code>FROM a, b WHERE …</code>, <code>INNER JOIN … ON</code> or <code>LEFT OUTER JOIN … ON</code>. The plan has two children, a <code>Predicate</code> and a <code>JoinType</code>, which is <code>common.JoinInner</code> or <code>common.JoinLeft</code> in every test. Its output schema is all the left child's columns followed by all the right child's columns. The shell shows one of CMU's test queries:</p>
+
+<pre><code>bustub&gt; explain (o) select * from test_simple_seq_1 s1 left join test_simple_seq_2 s2 on s1.col1 + 5 = s2.col1;
+=== OPTIMIZER ===
+NestedLoopJoin { type=Left, predicate=((#0.0+5)=#1.0) }
+  SeqScan { table=test_simple_seq_1 }
+  SeqScan { table=test_simple_seq_2 }</code></pre>
+
+  <p>In a join predicate, <code>#0.c</code> is column <em>c</em> of the left tuple and <code>#1.c</code> is column <em>c</em> of the right tuple. You evaluate it with <code>EvaluateJoin(&amp;left, leftSchema, &amp;right, rightSchema)</code>, which the writeup points to, and which returns a <code>types.Value</code> that can be true, false or NULL. A pair matches only when the value is true: NULL counts as false, exactly as in <code>FilterExecutor.matches</code>, which tests <code>!v.IsNull() &amp;&amp; v.AsBool()</code>. So the left row whose key is NULL never matches anything, not even a right row whose key is NULL.</p>
+
+  <p>Two rule lists decide what happens to the join next. The default list contains <code>NLJAsHashJoin</code>, whose starter version returns its input, so until Lesson 7 every join stays a nested loop join. Files that start with <code>set force_optimizer_starter_rule=yes</code> (<code>p3.10</code>, <code>p3.11</code> and <code>p3.13</code> among this lesson's) use the starter list, which contains the pre-built <code>NLJAsIndexJoin</code> instead. That rule is where the nested index join of the second half comes from.</p>
+
+  <h2>The nested loop join, one batch at a time</h2>
+
+  <p>The writeup asks for "the simple nested loop join algorithm from class": for each tuple in the outer table, consider each tuple in the inner table and emit the ones that satisfy the join predicate. BusTub says left and right where the lecture says outer and inner. In pseudocode:</p>
+
+<pre><code>for each left tuple l:
+    re-initialize the right child
+    for each right tuple r:
+        if predicate(l, r) is true: emit (l, r)
+    if l is a left join's tuple and matched nothing: emit (l, NULLs)</code></pre>
+
+  <p>The right child is an executor, not a table, and the only way to read an executor again is to call its <code>Init</code>. Re-initializing it for every left tuple is what makes this the naïve join of Lecture #12; reading the right side once into memory and looping over the copy would be a different algorithm, and the tests forbid it. <code>TestNestedLoopJoinReinitializesRight</code> counts the right child's <code>Init</code> calls and fails unless there is at least one per left tuple.</p>
+
+  <p>CMU's <code>.slt</code> files check the same thing with the record option <code>+ensure:nlj_init_check</code>. It wraps both children of every nested loop join in an <code>InitCheckExecutor</code> that counts calls, and after the query the engine compares the right child's <code>Init</code> count with the number of batches the left child returned. When the right side was initialized too rarely, the query fails with BusTub's assertion text:</p>
+
+<pre><code>nlj check failed, are you initializing the right executor every time when there is a left tuple? (off-by-one is okay)</code></pre>
+
+  <p>Because that check counts left <em>batches</em>, a join over a small left table passes it even when the right child is read only once. An NLJ that buffered its right side in memory passed every <code>.slt</code> file of this stage, and only the unit test caught it:</p>
+
+<pre><code>--- FAIL: TestNestedLoopJoinReinitializesRight (0.00s)
+    nested_loop_join_executor_test.go:105: the right child was initialized 1 times for 7 left tuples: initialize it again for every left tuple
+    nested_loop_join_executor_test.go:116: ExecutionEngine.Execute with the NLJ check: Execute returned (false, nlj check failed, are you initializing the right executor every time when there is a left tuple? (off-by-one is okay)), want (true, nil)</code></pre>
+
+  <p>Re-initializing also has consequences one level down. Whatever sits under the right side gets <code>Init</code> many times: <code>p3.12-repeat-execute.slt</code> puts a sequential scan, an aggregation (Lesson 5's <code>Init</code> must start from an empty table) and an index scan there. And a join can be the right child of another join, so your own <code>Init</code> must reset all of the join's state as well as initializing both children.</p>
+
+  <h3>Keeping state across batches</h3>
+
+  <p>The loop above emits as it goes, but <code>Next</code> must stop when its batch holds <code>batchSize</code> tuples and continue in the next call from exactly that point. One left tuple can have more matches than fit in a batch, and one batch can hold the matches of several left tuples. The doc comment on <code>Next</code> puts it this way: keep enough state to pick up where the last call stopped. That state is:</p>
+  <ul>
+    <li>the left child's current batch and your position in it, plus whether the left child is exhausted;</li>
+    <li>the current left tuple, whether there is one, and whether it has matched any right tuple yet;</li>
+    <li>the right child's current batch and your position in it, plus whether the right child is exhausted for this left tuple.</li>
+  </ul>
+
+  <p>With those fields, <code>Next</code> is one loop that runs while the output batch has room. If there is no current left tuple, take the next one (fetching a new left batch when the current one is used up, and stopping when the left child is exhausted), re-initialize the right child, and reset the right-side state. If the right batch is used up, fetch the next one; if the right child is exhausted, the current left tuple is finished: pad it if it is a left join's tuple with no match, and clear it. Otherwise test the next right tuple against the predicate. The same pattern, a child's batch plus an offset into it, is what <code>FilterExecutor</code> keeps in <code>childTuples</code> and <code>childOffset</code>. <code>TestNestedLoopJoinAcrossBatches</code> joins 45 by 30 rows with batch sizes 20, 7 and 1, so an off-by-one at a batch boundary shows up as a missing or repeated row.</p>
+
+  <h3>Left joins and typed NULLs</h3>
+
+  <p>A left join keeps every left tuple. When the right child runs out and the current left tuple has matched nothing, the join emits it once, followed by one NULL per right column. Each NULL has the type of its column, <code>types.NewNullValue(rightSchema.Column(i).Type())</code>, so an INTEGER column prints <code>integer_null</code> and a VARCHAR column <code>varlen_null</code>. CMU's files compare those strings:</p>
+
+<pre><code>query rowsort +ensure:nlj_init_check
+select * from test_simple_seq_1 s1 left join test_simple_seq_2 s2 on s1.col1 + 5 = s2.col1;
+----
+0 5 15
+...
+5 integer_null integer_null</code></pre>
+
+  <p>An empty right child is the extreme case: an inner join returns nothing, and a left join returns every left tuple padded. An empty left child returns nothing for either join type.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=YIdIaPopfpk&amp;t=1169s">#12 Join Algorithms, "Nested loop joins" (19:29)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/12-joins.pdf#page=19">slides 15–25</a>: the naïve, block and index nested loop joins and their costs. Project 3 builds the first and the last.</p>
+
+  <h2>The nested index join</h2>
+
+  <p>The pre-built rule <code>NLJAsIndexJoin</code> (in the starter rule list only) rewrites a nested loop join when three things hold: the predicate is one equality between a left column and a right column, in either order; the right child is a <code>SeqScan</code>; and the scanned table has an index on that column. Then each left tuple's key can be looked up in the index instead of scanning the right table:</p>
+
+<pre><code>bustub&gt; set force_optimizer_starter_rule=yes;
+bustub&gt; create table t1(v1 int);
+bustub&gt; insert into t1 (select * from __mock_table_123);
+bustub&gt; create index t1_v1 on t1(v1);
+bustub&gt; explain (o,s) select * from test_simple_seq_2 t2 left join t1 on t1.v1 = t2.col1;
+=== OPTIMIZER ===
+NestedIndexJoin { type=Left, key_predicate=#0.0, index=t1_v1, index_table=t1 } | (t2.col1:INTEGER, t2.col2:INTEGER, t1.v1:INTEGER)
+  SeqScan { table=test_simple_seq_2 } | (t2.col1:INTEGER, t2.col2:INTEGER)</code></pre>
+
+  <p>The node has a single child, the outer side. The inner table is not a child at all: the plan names it with <code>InnerTableOID</code> and <code>IndexOID</code> and gives its schema as <code>InnerTableSchema</code>. <code>KeyPredicate</code> is the left side of the equality, rewritten to tuple index 0 because you evaluate it on the outer tuple alone, with <code>Evaluate(&amp;outer, childSchema)</code>. Anything else keeps the nested loop join: <code>on t1.v1 + 1 = t2.col1</code> is not a column on both sides, <code>t1 left join test_simple_seq_2 … on t1.v1 = t2.col1</code> has no index on its right table, and <code>on t1.v1 = t2.col1 and t2.col2 &gt; 10</code> is an AND, not one equality.</p>
+
+  <p>The writeup's hint gives the per-tuple work: fetch the tuple from the outer table, construct the index probe key by using <code>key_predicate</code>, and then look up the RID in the index to retrieve the corresponding tuple for the inner table. In this course's API:</p>
+  <ol>
+    <li>In <code>Init</code>, find the index and the table in the catalog: <code>Catalog().GetIndexByOID(plan.IndexOID)</code> gives an <code>*catalog.IndexInfo</code> with the <code>Index</code> and its <code>KeySchema</code>, and <code>GetTableByOID(plan.InnerTableOID)</code> gives the <code>*catalog.TableInfo</code> whose <code>Table</code> is the heap.</li>
+    <li>Evaluate the key predicate on the outer tuple. A NULL key matches nothing.</li>
+    <li>Build a one-column key tuple with <code>table.NewTuple([]types.Value{v}, indexInfo.KeySchema)</code> and call <code>Index.ScanKey(key)</code>. Keys are unique (the warm-up's B+tree rule), so it returns at most one RID.</li>
+    <li>Fetch the row with <code>Table.GetTuple(rid)</code>, which returns the tuple's meta and the tuple. Skip it if <code>meta.IsDeleted</code>: <code>TestNestedIndexJoinSkipsDeletedInner</code> marks a row deleted in the heap while its key is still in the index.</li>
+    <li>Emit the outer columns followed by the inner table's columns, or, for a left join with no live match, the outer columns followed by NULLs of <code>InnerTableSchema</code>'s column types.</li>
+  </ol>
+
+  <p>The test of the output layout compares types as well as strings: in <code>TestNestedIndexJoinOutputLayout</code> the outer row (5, 7) joins the inner row ("five", 5, NULL), and the test expects <code>INTEGER:5</code>, <code>INTEGER:7</code>, <code>VARCHAR:five</code>, <code>INTEGER:5</code>, <code>INTEGER:integer_null</code>. The writeup also promises that CMU will not test strange edge cases involving NULLs in indexes, and neither does this course beyond "a NULL probe key matches nothing".</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Even with at most one match per outer tuple, give the nested index join the same resumable shape as the nested loop join: the outer batch and a position in it, and the current outer tuple's matches with a position. Then a batch can end between any two output tuples. Holding the matches as a slice you reset with <code>s = s[:0]</code> reuses its backing array for the next outer tuple, so the probe loop doesn't allocate a new slice per tuple.</p>
+  </div>
+
+  <h3>Why p3.10 belongs to this stage</h3>
+
+  <p>CMU numbers the files 10 to 13 as one task, and the writeup says you should pass SQLLogicTests #7 to #13 at the end of Task #2. This course splits that task into two checkpoints, and <code>p3.10-simple-join.slt</code> has to wait for the second. After its first nested loop queries it creates <code>t1</code> with an index and runs the left join shown above under the starter rules, so the plan contains a <code>NestedIndexJoin</code>. With only the nested loop join written, p3.10 stops there:</p>
+
+<pre><code>--- FAIL: TestNestedIndexJoinSQL/p3.10-simple-join (0.04s)
+    stages_test.go:33: p3.10-simple-join.slt:54: unexpected error: internal error (panic): TODO(P3): NestedIndexJoinExecutor.Init not implemented
+        --- SQL
+        select * from test_simple_seq_2 t2 left join t1 on t1.v1 = t2.col1;</code></pre>
+
+  <p><code>p3.13-nested-index-join.slt</code> marks its queries <code>+ensure:index_join</code>, which fails with <code>NestedIndexJoin not found</code> unless the optimized plan contains one. The rule is pre-built, so this check passes as soon as the file's <code>CREATE INDEX</code> statements succeed.</p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">A left join on <code>l_id = r_id</code>. The left child holds (NULL, 40); the right child holds (2, 'b') and (NULL, 'n'). What does the join emit for the left tuple?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="NULL = 2 and NULL = NULL are both NULL, which counts as false, so the tuple matches nothing and the left join pads it once with NULLs of the right columns' types.">One row: <code>integer_null, 40, integer_null, varlen_null</code>.</li>
+      <li data-option="b" data-explain="The predicate NULL = NULL evaluates to NULL, not true, so the (NULL, 'n') row is not a match.">One row: <code>integer_null, 40, integer_null, n</code>.</li>
+      <li data-option="c" data-explain="A left join keeps every left tuple, matched or not.">Nothing.</li>
+      <li data-option="d" data-explain="Padding happens once per unmatched left tuple, after the whole right side has been tried, not once per failed pair.">Two padded rows, one per right tuple it failed to match.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">An NLJ initializes its right child only in <code>Init</code> and keeps its tuples in memory. With batches of 20, for which left table does <code>+ensure:nlj_init_check</code> fail? (The engine fails the query when the right child's Init count + 1 is less than the number of batches the left child returned.)</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Ten rows are one batch: 1 + 1 is not less than 1, so the check passes.">A left table of 10 rows.</li>
+      <li data-option="b" data-explain="Thirty rows are two batches (20 and 10): 1 + 1 is not less than 2, so the check passes, which is why only the unit test catches this bug on small tables.">A left table of 30 rows.</li>
+      <li data-option="c" data-explain="45 rows are three batches (20, 20, 5): 1 + 1 &lt; 3, so the check fails, the same message as TestNestedLoopJoinReinitializesRight's 45-row table.">A left table of 45 rows.</li>
+      <li data-option="d" data-explain="The check counts batches, so tables of up to 40 rows (two batches) pass it.">Every left table with more than one row.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">A nested loop join fills every batch it can. The left child has 3 rows, the right child 30, the predicate is TRUE, and the batch size is 20. What do the calls to <code>Next</code> return?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Matches of different left tuples can share a batch; a batch doesn't end with a left tuple.">Three batches of 30, then false.</li>
+      <li data-option="b" data-explain="90 pairs in batches of up to 20: four full batches, then 10 tuples, each with true; the sixth call returns false with an empty batch.">Four batches of 20 and one of 10, each with true, then false.</li>
+      <li data-option="c" data-explain="The last, partial batch must be returned with true; the engine ignores the batch of a call that returns false.">Four batches of 20 with true, then 10 tuples with false.</li>
+      <li data-option="d" data-explain="A batch never holds more than batchSize tuples.">One batch of 90, then false.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Under the starter rules, <code>t1</code> has an index on <code>v1</code> and <code>test_simple_seq_2</code> has none. Which query does <code>NLJAsIndexJoin</code> turn into a <code>NestedIndexJoin</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The right child is test_simple_seq_2, which has no index, so the rule leaves the nested loop join (the shell prints NestedLoopJoin { type=Left, predicate=(#0.0=#1.0) }).">select * from t1 left join test_simple_seq_2 t2 on t1.v1 = t2.col1</li>
+      <li data-option="b" data-explain="t1.v1 + 1 is an arithmetic expression, not a column, so the predicate is not column = column.">select * from test_simple_seq_2 t2 left join t1 on t1.v1 + 1 = t2.col1</li>
+      <li data-option="c" data-explain="The predicate is an AND of two comparisons; the rule only matches a single equality.">select * from test_simple_seq_2 t2 inner join t1 on t1.v1 = t2.col1 and t2.col2 &gt; 10</li>
+      <li data-option="d" data-explain="One column equality, in either order, with the indexed table t1 scanned on the right: the plan becomes NestedIndexJoin { type=Left, key_predicate=#0.0, index=t1_v1, index_table=t1 }.">select * from test_simple_seq_2 t2 left join t1 on t2.col1 = t1.v1</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">A nested index join has outer columns (l_id INTEGER, l_v INTEGER) and inner columns (name VARCHAR, id INTEGER, score INTEGER). It is a left join, and the outer row (1, 10) finds no key 1 in the index. What does it emit?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Outer columns first, then one NULL per inner column with that column's type: VARCHAR, INTEGER, INTEGER.">1, 10, varlen_null, integer_null, integer_null</li>
+      <li data-option="b" data-explain="The NULLs follow the inner schema's types, and the first inner column is a VARCHAR.">1, 10, integer_null, integer_null, integer_null</li>
+      <li data-option="c" data-explain="The output is the outer columns followed by the inner ones, never the other way round.">varlen_null, integer_null, integer_null, 1, 10</li>
+      <li data-option="d" data-explain="A left join keeps every outer row, padding the ones without a match.">Nothing, because the probe found no RID.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Build it: the nested loop join (stage 7)</h2>
+
+  <p>You edit <code>execution/nested_loop_join_executor.go</code>: <code>Init</code>, <code>Next</code> and the fields you add to <code>NestedLoopJoinExecutor</code>. Run commands from <code>go_db_internals/intro_to_db</code>. The rules, in plain words:</p>
+  <ul>
+    <li><code>Next</code> follows the batch contract: clear <code>*tuples</code> and <code>*rids</code> first, append up to <code>batchSize</code> tuples with one RID each (the zero <code>common.RID{}</code>, since joined tuples come from no table), return true for every non-empty batch including the last partial one, and false once the join is exhausted, on every later call too.</li>
+    <li>Return the children's errors; don't panic.</li>
+    <li>Re-initialize the right child for every left tuple. Don't keep the right side in memory.</li>
+    <li>A pair matches only when <code>EvaluateJoin</code> returns true; NULL is false.</li>
+    <li>Output tuples are the left columns followed by the right columns, built with <code>table.NewTuple(values, e.OutputSchema())</code>. A left join emits each unmatched left tuple once, padded with NULLs of the right columns' types.</li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u6-06-nlj-init">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-06-nlj-init-cb">
+        <label for="u6-06-nlj-init-cb">Add the fields that let Next resume, and write Init: initialize both children and reset every piece of join state.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>List what <code>Next</code> must remember between calls, for the left side and for the right side. If this join is itself the right child of another join, its <code>Init</code> runs many times: which of those fields would carry stale values into the next run?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Add the left batch (tuples and RIDs) with a position and a "left exhausted" flag; the current left tuple with a "have one" flag and a "matched" flag; the right batch with a position and a "right exhausted" flag. In <code>Init</code>, call <code>e.left.Init()</code> and <code>e.right.Init()</code>, returning their errors, then truncate the batches, zero the positions and clear the flags. The plans in the tests only carry <code>common.JoinInner</code> and <code>common.JoinLeft</code>; returning an error for any other type keeps a surprise loud.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>e.leftTuples, e.leftRIDs = e.leftTuples[:0], e.leftRIDs[:0]
+e.leftPos, e.leftDone = 0, false
+e.haveLeft = false</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-06-nlj-next">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-06-nlj-next-cb">
+        <label for="u6-06-nlj-next-cb">Write Next for the inner join: take left tuples one at a time, re-initialize the right child for each, keep the pairs the predicate accepts, and stop and resume at batch boundaries.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>The loop runs while the output batch has room. In each round, which of three situations are you in: no current left tuple, the right batch used up, or a right tuple waiting to be tested? What happens when the left child returns false: is the batch you have so far still returned?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Clear the output slices. Loop while <code>len(*tuples) &lt; batchSize</code>. If there is no current left tuple: when the left position has reached the end of the left batch, stop if the left child is exhausted, otherwise call <code>e.left.Next</code> (on false, mark it exhausted and stop); then take the tuple at the position, advance, mark it current and unmatched, call <code>e.right.Init()</code> and reset the right batch. If the right position has reached the end of the right batch, call <code>e.right.Next</code>: on true reset the position and continue; on false the left tuple is done, so clear "have one". Otherwise take the next right tuple, evaluate the predicate with <code>EvaluateJoin</code>, and on true mark the left tuple matched and append the combined tuple. After the loop, return <code>len(*tuples) &gt; 0</code>.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>v := pred.EvaluateJoin(&amp;e.cur, ls, r, rs)
+if v.IsNull() || !v.AsBool() {
+	continue // NULL counts as false
+}</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: inner joins</span>
+          <p>Run <code>go test -race -run '^TestNestedLoopJoin(Inner|EmptyLeft|ReinitializesRight|AcrossBatches)$' ./execution/</code>. It runs the inner join of five by five rows with duplicate and NULL keys, empty left children, the <code>Init</code> counts (directly, and through the factory and the engine with the NLJ check over two real tables), and the 45 by 30 cross product with batch sizes 20, 7 and 1. Success prints <code>ok  	intro_to_db/execution</code>.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-06-nlj-left">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-06-nlj-left-cb">
+        <label for="u6-06-nlj-left-cb">Add left-join padding: when the right child is exhausted and the current left tuple matched nothing, emit it once followed by typed NULLs.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>At which point of the loop do you know for sure that a left tuple has no match? What type must each NULL have, and where do you find it? What if the right child is empty from the start?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>In the branch where <code>e.right.Next</code> returns false, before clearing the current left tuple, check the join type and the "matched" flag; if it is a left join and nothing matched, append the left values followed by <code>types.NewNullValue(rs.Column(i).Type())</code> for each right column. A helper that combines a left tuple with a right tuple, or with NULLs when the right tuple is <code>nil</code>, serves both branches.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>for i := 0; i &lt; rs.ColumnCount(); i++ {
+	values = append(values, types.NewNullValue(rs.Column(i).Type()))
+}</code></pre></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage 7, nested loop join</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestNestedLoopJoin' -timeout 300s ./...</code></pre>
+    <p>It runs the eight executor tests in <code>execution</code> (<code>TestNestedLoopJoinInner</code>, <code>LeftPadding</code>, <code>NullPredicateIsFalse</code>, <code>EmptyRight</code>, <code>EmptyLeft</code>, <code>ReinitializesRight</code>, <code>AcrossBatches</code> and <code>TruePredicate</code>) and <code>TestNestedLoopJoinSQL</code> in <code>sqllogictest</code>, whose subtests run <code>p3.11-multi-way-join.slt</code> (inner, left and three-way joins, an empty right side) and <code>p3.12-repeat-execute.slt</code> (a scan, two aggregations and an index scan as right children). Success prints, with every other package at <code>ok</code> and <code>[no tests to run]</code> (or <code>[no test files]</code>):</p>
+<pre><code>ok  	intro_to_db/execution	1.084s
+ok  	intro_to_db/sqllogictest	1.999s</code></pre>
+    <p>On the starter every test fails at the stub, <code>inner join: panic: TODO(P3): NestedLoopJoinExecutor.Init not implemented</code>, and the SQL test at the first join, <code>p3.12-repeat-execute.slt:14: unexpected error: internal error (panic): TODO(P3): NestedLoopJoinExecutor.Init not implemented</code>. A missing padding shows the rows you returned and the rows wanted:</p>
+<pre><code>--- FAIL: TestNestedLoopJoinLeftPadding (0.00s)
+    nested_loop_join_executor_test.go:58: left join on l_id = r_id (unmatched rows padded with NULLs of the right columns' types) (any order):
+         got  ["2, 20, 2, b" "2, 20, 2, bb" "3, 30, 3, c" "2, 50, 2, b" "2, 50, 2, bb"]
+         want ["1, 10, integer_null, varlen_null" "2, 20, 2, b" "2, 20, 2, bb" "3, 30, 3, c" "integer_null, 40, integer_null, varlen_null" "2, 50, 2, b" "2, 50, 2, bb"]</code></pre>
+    <p>One file, with every record logged:</p>
+<pre><code>go test -race -run '^TestNestedLoopJoinSQL$/p3.11' ./sqllogictest/
+go test -race -run '^TestNestedLoopJoinSQL$/p3.11' -v ./sqllogictest/ -args -slt.verbose</code></pre>
+  </div>
+
+  <h2>Build it: the nested index join (stage 8)</h2>
+
+  <p>You edit <code>execution/nested_index_join_executor.go</code>. The batch contract and the error rule are the same as above. The rules that differ:</p>
+  <ul>
+    <li>The executor has one child, the outer side. The inner table and its index come from the catalog, by <code>plan.InnerTableOID</code> and <code>plan.IndexOID</code>.</li>
+    <li>The probe key is <code>plan.KeyPredicate</code> evaluated on the outer tuple. A NULL key matches nothing. Skip inner tuples whose meta says <code>IsDeleted</code>.</li>
+    <li>Output tuples are the outer columns followed by the inner table's columns (<code>plan.InnerTableSchema</code>). A left join pads an unmatched outer tuple with NULLs of those columns' types.</li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u6-06-nij-init">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-06-nij-init-cb">
+        <label for="u6-06-nij-init-cb">Write Init: look up the inner table and its index in the catalog, reset the outer-side state, and initialize the child.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which catalog lookups take an OID? What should <code>Init</code> do if one of them returns <code>nil</code>? Which state does <code>Next</code> need, given that an outer tuple produces zero or one output tuples here?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Get the catalog from <code>e.ExecutorContext().Catalog()</code>, then <code>GetTableByOID(e.plan.InnerTableOID)</code> and <code>GetIndexByOID(e.plan.IndexOID)</code>; store both, and return a <code>common.NewException</code> error if either is <code>nil</code>. Keep the same resumable state as the nested loop join for the outer side (batch, position, exhausted flag, current tuple), plus the current tuple's matches and a position in them. Reset all of it, then return <code>e.child.Init()</code>.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>cat := e.ExecutorContext().Catalog()
+e.innerTable = cat.GetTableByOID(e.plan.InnerTableOID)
+e.indexInfo = cat.GetIndexByOID(e.plan.IndexOID)</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u6-06-nij-next">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u6-06-nij-next-cb">
+        <label for="u6-06-nij-next-cb">Write Next: for each outer tuple, build the probe key, look it up in the index, fetch the live inner tuple, and emit the joined tuple or, for a left join, the padded one.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>What is the key's schema: the outer schema or the index's? Where is the outer tuple's value in the key predicate's tuple indexes? What does <code>GetTuple</code> return for a row that a delete marked, and what should the join do with it?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Write a lookup helper: evaluate <code>e.plan.KeyPredicate.Evaluate(&amp;outer, e.child.OutputSchema())</code>; return no matches if the value is NULL; otherwise build the key tuple over <code>e.indexInfo.KeySchema</code>, loop over <code>e.indexInfo.Index.ScanKey(key)</code>, call <code>e.innerTable.Table.GetTuple(rid)</code> and keep the tuples whose meta is not deleted. In <code>Next</code>, loop while the batch has room: take the next outer tuple (fetching outer batches as in the nested loop join), run the lookup, and either pad it (left join, no matches), skip it (inner join, no matches), or emit one joined tuple per match, keeping a position so a full batch can resume.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>key := table.NewTuple([]types.Value{v}, e.indexInfo.KeySchema)
+for _, rid := range e.indexInfo.Index.ScanKey(key) {
+	meta, t := e.innerTable.Table.GetTuple(rid)</code></pre></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage 8, nested index join</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestNestedIndexJoin' -timeout 300s ./...</code></pre>
+    <p>It runs the five executor tests in <code>execution</code> (<code>TestNestedIndexJoinInner</code>, <code>LeftPadding</code>, <code>OutputLayout</code>, <code>SkipsDeletedInner</code> and <code>ReInit</code>, which joins 50 outer rows three times) and <code>TestNestedIndexJoinSQL</code> in <code>sqllogictest</code>, whose subtests run <code>p3.10-simple-join.slt</code> (nested loop joins with the NLJ check, then the index join above) and <code>p3.13-nested-index-join.slt</code> (index joins on two tables with <code>+ensure:index_join</code>, inner and left). The index joins run your Project 2 B+tree; if a failure points into package <code>btree</code>, run <code>go test -race ./btree/</code> first. Success prints:</p>
+<pre><code>ok  	intro_to_db/execution	1.025s
+ok  	intro_to_db/sqllogictest	2.102s</code></pre>
+    <p>On the starter, the executor tests fail with <code>inner index join: panic: TODO(P3): NestedIndexJoinExecutor.Init not implemented</code>, and the SQL tests at the first index join, as shown above for <code>p3.10-simple-join.slt:54</code>. One file, with every record logged:</p>
+<pre><code>go test -race -run '^TestNestedIndexJoinSQL$/p3.13' ./sqllogictest/
+go test -race -run '^TestNestedIndexJoinSQL$/p3.13' -v ./sqllogictest/ -args -slt.verbose</code></pre>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why the NLJ check passes on small tables even when the right child is read once, why a left join pads after the right child is exhausted rather than after a failed pair, or why p3.10 needs the nested index join although it is called "simple join". Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: the CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/project3/">Project #3 writeup</a> (Task #2, NestedLoopJoin and NestedIndexJoin, and their hints); BusTub <code>src/include/execution/executors/nested_loop_join_executor.h</code>, <code>src/execution/nested_loop_join_executor.cpp</code>, <code>src/include/execution/executors/nested_index_join_executor.h</code>, <code>src/execution/nested_index_join_executor.cpp</code>, <code>src/optimizer/nlj_as_index_join.cpp</code>, <code>src/include/execution/executors/init_check_executor.h</code> and <code>src/include/execution/execution_engine.h</code> (<code>PerformChecks</code>) at commit d49b823, and its <code>test/sql/p3.10-simple-join.slt</code> to <code>p3.13-nested-index-join.slt</code>; Lecture #12 slides 15–25; this course's <code>execution/nested_loop_join_executor.go</code>, <code>execution/nested_index_join_executor.go</code>, <code>optimizer/nlj_as_index_join.go</code> and their tests.</p>
+
+  <div class="lesson-nav">
+    <a href="./u6-05-p3-aggregation.html">← P3.4 Aggregation</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u6-07-p3-hash-join.html">Next: P3.6 Hash Join and the NLJ→HashJoin Rule →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

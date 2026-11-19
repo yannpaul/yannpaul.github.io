@@ -1,0 +1,357 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 8 · Lesson 3 · P4.3 MVCC Sequential Scan</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 8 · Lesson 3</p>
+  <h1>P4.3 MVCC Sequential Scan</h1>
+  <p class="subtitle">Decide which version of a tuple a transaction can see from its read timestamp, temporary timestamps and its own writes, write <code>CollectUndoLogs</code> to gather exactly the undo logs that version needs, and rewrite your Project 3 sequential scan to return each tuple as the transaction's snapshot saw it.</p>
+
+  <p class="lede">With timestamps (P4.1) and reconstruction (P4.2) in place, a scan has everything it needs to read the past. For each tuple in the heap it asks one question: is the base version visible to me? If not, it walks the version chain until it finds the version that is, and rolls the base back to it. This is Task 2.2 of the writeup, and the first stage where your Project 3 executors change. It is also the first stage whose tests run SQL: BusTub's <code>ScanTest</code> builds version chains by hand and then runs <code>SELECT</code> through your scan, once for each of six transactions with different read timestamps.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 6, Lesson 2: the scan's <code>FilterPredicate</code> is <code>b &gt; 4</code>, and a row has <code>b</code> NULL. What does the scan do with it?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="NULL > 4 is NULL, and a WHERE clause keeps a row only when its predicate is true. The scan's test is !v.IsNull() && v.AsBool(), so NULL counts as false.">It skips the row, because the predicate evaluates to NULL and NULL counts as false.</li>
+      <li data-option="b" data-explain="A NULL result is not true, so the row is not returned.">It returns the row, because the predicate is not false.</li>
+      <li data-option="c" data-explain="Evaluate returns a NULL BOOLEAN value; nothing panics or errors.">It returns an error, because the comparison has a NULL operand.</li>
+      <li data-option="d" data-explain="The scan evaluates the predicate itself; MergeFilterScan put it there.">It passes the row up to a Filter node, which decides.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 7, Lesson 5: tuple A has versions with commit timestamps 1, 2, 3 and 4; B has 1, 3 and 4; C has 1, 2 and 4; D has one version, at 3. Which versions does a transaction with read timestamp 3 see?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Versions at 4 are newer than the read timestamp; the transaction must go back to the newest version at or below 3.">A4, B4, C4 and D3</li>
+      <li data-option="b" data-explain="D was created at 3, which is not after the read timestamp, so it is visible.">A3, B3 and C2, and no D</li>
+      <li data-option="c" data-explain="For each tuple, take the newest version at or below 3: A3, B3, C2 (C has no version at 3), and D3.">A3, B3, C2 and D3</li>
+      <li data-option="d" data-explain="C's newest version at or below 3 is C2; there is no C3.">A3, B3, C3 and D3</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Unit 2, Lesson 6: while one goroutine holds a <code>ReadPageGuard</code> on a page, what can other goroutines do with that page?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A read guard holds the frame's latch in read mode, which excludes writers until Drop.">Read it or write it; a read guard only pins the page.</li>
+      <li data-option="b" data-explain="The guard holds the frame's RWMutex in read mode, so other read guards can be taken at the same time, and a write guard waits until every read guard is dropped.">Take read guards on it too; a write guard waits until the read guard is dropped.</li>
+      <li data-option="c" data-explain="Read mode is shared; several goroutines can hold read guards on one page.">Nothing: the page is latched exclusively until <code>Drop</code>.</li>
+      <li data-option="d" data-explain="A pinned frame cannot be evicted; that is what the pin is for.">Evict it, since a read guard never dirties the page.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Which version a transaction sees</h2>
+
+  <p>Every tuple in the heap carries a timestamp in its <code>TupleMeta.Ts</code>. From P4.1 and Unit 7 you know the two kinds: a commit timestamp, below <code>TxnStartID</code>, for a version a committed transaction wrote, and a <strong>temporary timestamp</strong>, <code>TxnStartID</code> plus the writer's id, for a version an uncommitted transaction wrote. A transaction <code>txn</code> reading a base tuple is in one of the writeup's three cases:</p>
+  <ol>
+    <li>The base tuple's timestamp is at most <code>txn.ReadTs()</code>. The base is the version <code>txn</code> sees, and nothing needs undoing.</li>
+    <li>The base tuple's timestamp is <code>txn.TransactionTempTs()</code>: <code>txn</code> itself wrote it. A transaction sees its own writes, so this is the same as case 1. The writeup's example: a transaction with human-readable id 3 that scans a base tuple with timestamp <code>TXN_START_ID + 3</code> knows it was the most recent modifier.</li>
+    <li>Otherwise the base is newer than the snapshot: either committed after <code>txn</code> began, or written by another transaction that hasn't committed. Then <code>txn</code> walks the version chain and collects undo logs until it reaches the first one whose <code>Ts</code> is at most its read timestamp. If the chain ends first, the tuple did not exist at <code>txn</code>'s read timestamp, and the scan skips it.</li>
+  </ol>
+
+  <p>Case 3 needs no special test for another transaction's temporary timestamp. Every temporary timestamp is at least 2<sup>62</sup>, far above any read timestamp, so <code>ts &lt;= txn.ReadTs()</code> is false for it, and the chain walk starts. That is the point of putting temporary timestamps at the top of the number line. Only the equality check of case 2 has to look at the transaction's own id.</p>
+
+  <p>The writeup's example makes the cases concrete. To keep the numbers readable it uses 1000 for <code>TXN_START_ID</code>, so 1009 is txn9's temporary timestamp. txn9 has read timestamp 3 and has modified A, B and D; C was last committed at 4:</p>
+  <ul>
+    <li>txn9's own scan returns (A, 9), (B, 9), (C, 2) and (D, 9). A, B and D carry 1009, its own timestamp (case 2). C's timestamp 4 is above 3, so txn9 walks C's chain to the version at 2 (case 3).</li>
+    <li>A scan by another transaction with read timestamp 4 returns (A, 3), (B, 3) and (C, 4). A and B carry txn9's pending writes, so it walks their chains to the last version at or before 4. C at 4 is visible as it is. D carries 1009 and has no chain: txn9 inserted it, so for this reader D does not exist.</li>
+  </ul>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=tUFha9-DuSk&amp;t=723s">#20 Multi-Version Concurrency Control, "MVCC example" (12:03)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/20-multiversioning.pdf#page=6">slides 6–7</a>: a reader keeps reading the old version while a writer creates a new one, and a second writer runs into an uncommitted change. Temporary timestamps are how Project 4 marks that uncommitted change.</p>
+
+  <h2>CollectUndoLogs</h2>
+
+  <p>Case 3's walk is <code>CollectUndoLogs</code>, the second helper in <code>concurrency/execution_common.go</code>:</p>
+
+<pre><code>func CollectUndoLogs(rid common.RID, baseMeta table.TupleMeta, baseTuple table.Tuple, undoLink UndoLink,
+	txn *Transaction, txnMgr *TransactionManager) ([]UndoLog, bool)</code></pre>
+
+  <p>It returns the undo logs that <code>ReconstructTuple</code> needs to rebuild the version <code>txn</code> can see, newest first, or <code>false</code> if <code>txn</code> can see no version. Its doc comment gives the contract:</p>
+  <ul>
+    <li>If the base is visible to <code>txn</code> (case 1 or 2), the result is an empty list and <code>true</code>.</li>
+    <li>Otherwise it starts at <code>undoLink</code>, fetches each log with <code>txnMgr.GetUndoLogOptional</code>, appends it, and stops <em>after</em> the first log whose <code>Ts</code> is at most the read timestamp. That log is needed: it is the one that restores the visible version.</li>
+    <li>It returns <code>false</code> if the chain ends first (an invalid link), or reaches a log whose transaction no longer exists.</li>
+  </ul>
+
+  <p>The last rule anticipates stage 6. Garbage collection removes transactions whose undo logs no reader can need, and the writeup allows it to leave dangling links behind: a link to a removed transaction points below the watermark, and a correct scan never follows one, because it finds its version earlier in the chain. <code>GetUndoLogOptional</code> returns <code>false</code> for a missing transaction instead of panicking, so a mistake there shows up as a missing row rather than a crash.</p>
+
+  <p>BusTub's signature takes <code>std::optional&lt;UndoLink&gt;</code> and returns <code>std::optional&lt;std::vector&lt;UndoLog&gt;&gt;</code>. The Go port passes a plain <code>UndoLink</code>, with an invalid link meaning "no chain", because the type already has that sentinel and <code>GetTupleAndUndoLink</code> returns <code>InvalidUndoLink</code> for a tuple without one; the result becomes <code>([]UndoLog, bool)</code>.</p>
+
+  <p>BusTub's <code>CollectUndoLogTest</code> builds ten tuples and calls <code>CollectUndoLogs</code> for one transaction, <code>txn_to_inspect</code>, with read timestamp 2. A few of its cases, with the answer the test requires:</p>
+  <table>
+    <tr><th>Tuple</th><th>Base</th><th>Chain</th><th>Result at read ts 2</th></tr>
+    <tr><td>rid1</td><td>ts 2</td><td>a log at ts 1</td><td>empty list, <code>true</code>: the base is visible</td></tr>
+    <tr><td>rid2</td><td>ts 3</td><td>a log at ts 2, then one at ts 1</td><td>the first log only, <code>true</code>: it restores the version at 2</td></tr>
+    <tr><td>rid3</td><td>ts 3</td><td>none</td><td><code>false</code>: created after the snapshot</td></tr>
+    <tr><td>rid4</td><td>ts 4</td><td>a log at ts 3</td><td><code>false</code>: the chain ends above 2</td></tr>
+    <tr><td>rid7</td><td>txn_to_inspect's temporary ts</td><td>none</td><td>empty list, <code>true</code>: its own write</td></tr>
+    <tr><td>rid9</td><td>txn4's temporary ts</td><td>a log at ts 4, then one at ts 1</td><td>both logs, <code>true</code>: another writer's pending change</td></tr>
+  </table>
+
+  <h2>The MVCC sequential scan</h2>
+
+  <p>Your Project 3 <code>SeqScanExecutor.Next</code> read each tuple's meta and bytes from the iterator, skipped deleted tuples, and applied the filter. The MVCC version keeps the shape and replaces the middle. For each RID the iterator gives:</p>
+  <ol>
+    <li>Read the base tuple's meta, its bytes and its first undo link together, with <code>concurrency.GetTupleAndUndoLink(txnMgr, heap, rid)</code>.</li>
+    <li>Call <code>CollectUndoLogs</code> for the executor's transaction. If it returns <code>false</code>, skip the RID.</li>
+    <li>With no logs, the version is the base itself: skip it if the base meta says deleted. With logs, call <code>ReconstructTuple</code>, and skip the RID if it reports a deleted version.</li>
+    <li>Evaluate the <code>FilterPredicate</code>, if there is one, on the <em>reconstructed</em> tuple. A filter on the base tuple would select rows by values the transaction can't see.</li>
+    <li>Set the RID on the tuple (<code>ReconstructTuple</code> leaves it unset), and append the tuple and its RID to the batch.</li>
+  </ol>
+
+  <p>The transaction and the manager come from the executor context: <code>e.ExecutorContext().Transaction()</code> and <code>e.ExecutorContext().TransactionManager()</code>. Everything else stays as in Project 3: <code>Init</code> still makes the iterator with <code>MakeIterator</code>, so the stop point still protects an <code>UPDATE</code> above the scan from the Halloween problem, and the batch contract is unchanged. The iterator now only supplies positions: take <code>it.RID()</code>, advance, and read the tuple through <code>GetTupleAndUndoLink</code> instead of <code>it.GetTuple()</code>.</p>
+
+  <p>Why the combined read in step 1? <code>GetTupleAndUndoLink</code> (pre-built, in <code>transaction_manager_impl.go</code>) takes the page's read latch, reads meta and tuple, reads the undo link, and only then releases the latch. Writers change the tuple and its link together under the page's write latch, with <code>UpdateTupleAndUndoLink</code>, and from stage 9 on the tests run them while scans run. A scan that read the tuple with <code>heap.GetTuple</code> and the link with <code>GetUndoLink</code> separately could pair a new tuple with an old link, or the other way round, and then reconstruct a version that never existed. No test before stage 9 runs writers concurrently with a scan, so that scan would pass every test until then. Use the atomic helper from the start.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>Put the visibility steps 2 and 3 in a small function of their own, taking the schema, the RID, the meta, the tuple, the link, the transaction and the manager, and returning <code>(table.Tuple, bool)</code>. Stage 9's MVCC index scan needs exactly the same steps for each RID an index lookup returns, and both executors are in package <code>execution</code>, so an unexported helper in <code>seq_scan_executor.go</code> serves both. The index scan stays Project 3's until then, and so does the nested index join, which BusTub never makes MVCC-aware either.</p>
+  </div>
+
+  <h2>The ScanTest chains</h2>
+
+  <p>BusTub's <code>ScanTest</code> (<code>TestTxnScanVersionChain</code> here) creates <code>maintable(a integer, b double, c boolean)</code>, commits a series of helper transactions so that six readers, txn0 to txn5, get read timestamps 0 to 5, and then writes four tuples and their chains directly into the heap and the transaction manager. In the test's notation (read the arrows as "older version"):</p>
+
+<pre><code>record1: txn4 (val=1) -&gt; ts=1 in txn4 (val=2/prev_log_1)
+record2: ts=3 (val=3) -&gt; ts=2 in txn_store_3 (delete/prev_log_2) -&gt; ts=1 in txn_store_2 (val=4/prev_log_3)
+record3: ts=4 (delete) -&gt; ts=3 in txn_store_4 (val=5/prev_log_4)
+record4: txn3 (delete) -&gt; ts=2 in txn3 (val=6/prev_log_5) -&gt; ts=1 in txn_store_2 (val=7/prev_log_6)</code></pre>
+
+  <p>"txn4" as a base timestamp means txn4's temporary timestamp, and <code>val</code> is column <code>a</code>. Every reader runs <code>SELECT</code> on the table, and the test checks each answer:</p>
+  <table>
+    <tr><th>Reader</th><th>Read ts</th><th>Column <code>a</code> it sees</th></tr>
+    <tr><td>txn0</td><td>0</td><td>nothing: every chain ends above 0</td></tr>
+    <tr><td>txn1</td><td>1</td><td>2, 4, 7 (record3 did not exist yet)</td></tr>
+    <tr><td>txn2</td><td>2</td><td>2, 6 (record2 was deleted at 2)</td></tr>
+    <tr><td>txn3</td><td>3</td><td>2, 3, 5 (record4 is its own deletion)</td></tr>
+    <tr><td>txn4</td><td>4</td><td>1, 3, 6 (record1 is its own write; record3 was deleted at 4)</td></tr>
+    <tr><td>txn5</td><td>5</td><td>2, 3, 6 (record1 is txn4's pending write)</td></tr>
+  </table>
+
+  <p>BusTub's file checks txn0 and txn1 and leaves the other four to Gradescope's hidden cases; <code>TestTxnScanHiddenReads</code> checks them. <code>TestTxnScanFilterOnOldVersion</code> reruns txn1 with filters: <code>WHERE a = 2</code> must return record1's old version, and <code>WHERE a = 1</code> nothing, although the heap holds a 1. Your Project 3 scan gets these wrong in a telling way: it returns the newest live tuples, whatever the reader.</p>
+
+<pre><code>--- FAIL: TestTxnScanVersionChain (0.00s)
+    txn_scan_test.go:401: A: Verify txn0
+    txn_scan_test.go:402: query var=txn0 id=0 status=RUNNING read_ts=0 sql="SELECT * FROM maintable": ERROR: result mismatch
+        --- EXPECTED ---
+        &lt;empty table&gt;
+
+        --- ACTUAL ---
+        1, decimal_null, boolean_null
+        3, decimal_null, boolean_null</code></pre>
+
+  <p>Above that block, a failing test logs its step lines and a <code>TxnMgrDbg "before verify scan"</code> dump. For now the dump is the starter's reminder. The writeup recommends writing <code>TxnMgrDbg</code> once Task 2 is done, which is now; its checkpoint comes with stage 4 in <a href="./u8-04-p4-insert-commit.html">P4.4</a>, but nothing stops you from writing it first, and every later failure is easier to read with it.</p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">In <code>ScanTest</code>, record2's base is (3, NULL, NULL) at timestamp 3, its first undo log is a delete log with <code>Ts</code> 2, and the next is a full log (4, 4.0, true) with <code>Ts</code> 1. What does txn2, with read timestamp 2, see for record2?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The base's timestamp 3 is above the read timestamp 2, so the base is not visible.">(3, NULL, NULL), the base</li>
+      <li data-option="b" data-explain="The walk stops after the first log with Ts at most 2, which is the delete log; the log at 1 is for older readers such as txn1.">(4, 4.0, true)</li>
+      <li data-option="c" data-explain="CollectUndoLogs succeeds here: the delete log's Ts is 2, at or below the read timestamp. The tuple existed as a deletion.">An error, because a delete log has no columns to restore.</li>
+      <li data-option="d" data-explain="CollectUndoLogs returns the delete log alone, ReconstructTuple turns the tuple into a deletion, and the scan skips it. txn2's result is 2 and 6, without a 3 or a 4.">Nothing: at timestamp 2 the tuple was deleted.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Record4's base is a deletion marker stamped with txn3's temporary timestamp, with undo logs (6, NULL, NULL) at <code>Ts</code> 2 and <code>a</code> = 7 at <code>Ts</code> 1. What do txn3 (read timestamp 3) and txn4 (read timestamp 4) see?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="txn3 wrote the base, so the base is what it sees, and the base is a deletion. It doesn't walk the chain.">txn3 sees 6; txn4 sees nothing.</li>
+      <li data-option="b" data-explain="For txn3 the base carries its own temporary timestamp, so it sees its own deletion and skips the row. For txn4 that timestamp is another writer's, so it walks the chain and stops at the log with Ts 2, at or below 4: a = 6.">txn3 sees nothing; txn4 sees 6.</li>
+      <li data-option="c" data-explain="Neither reader may see the version at 1 while the version at 2 is at or below its read timestamp.">Both see 7.</li>
+      <li data-option="d" data-explain="Only txn3 sees its own pending write. For txn4 an uncommitted deletion is invisible, so the version before it counts.">Both see nothing, because the tuple is deleted.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">A base tuple carries another transaction's temporary timestamp and has no undo link: that transaction inserted it and hasn't committed. What does <code>CollectUndoLogs</code> return for a reader?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The temporary timestamp is above any read timestamp, so the base isn't visible; the chain is empty, so the walk ends without a visible version. This is D in the writeup's example: for the other reader it does not exist.">No logs and <code>false</code>: the tuple doesn't exist for this reader.</li>
+      <li data-option="b" data-explain="An empty list with true means the base is visible, which would expose an uncommitted insert.">An empty list and <code>true</code>: the base is the newest version.</li>
+      <li data-option="c" data-explain="Nothing waits in BusTub's MVCC; readers never block on writers.">It waits until the inserting transaction commits or aborts.</li>
+      <li data-option="d" data-explain="A missing chain is a normal case, not a programming error; the function reports it with false.">It panics, because a pending write must have an undo log.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Record1's base is (1, NULL, NULL) with txn4's temporary timestamp, and its only undo log sets <code>a</code> = 2 with <code>Ts</code> 1. txn1 (read timestamp 1) runs <code>SELECT a FROM maintable WHERE a = 1</code>. What does it get?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is what a scan returns if it filters the base tuple. txn1 can't see the base; it sees a = 2.">One row, 1, from record1's base.</li>
+      <li data-option="b" data-explain="The filter is a = 1; record1's version for txn1 has a = 2, which doesn't match.">One row, 2, from record1's old version.</li>
+      <li data-option="c" data-explain="txn1 sees a = 2 for record1, 4 for record2 and 7 for record4, and none of them is 1. TestTxnScanFilterOnOldVersion expects an empty result.">No rows.</li>
+      <li data-option="d" data-explain="Record4's version for txn1 has a = 7, which doesn't match a = 1 either.">One row, 7, from record4's oldest version.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">From <code>CollectUndoLogTest</code>: a tuple's base has timestamp 4, and its chain is one undo log with <code>Ts</code> 3 and an invalid <code>PrevVersion</code>. What does <code>CollectUndoLogs</code> return for a reader with read timestamp 2?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The base at 4 is newer than the read timestamp, so it isn't visible.">An empty list and <code>true</code>.</li>
+      <li data-option="b" data-explain="The log at 3 is still newer than 2, so it can't be the last log needed. The chain then ends.">The log at 3 and <code>true</code>.</li>
+      <li data-option="c" data-explain="A chain that ends above the read timestamp is reported with false, not a panic; it just means the tuple was created later.">It panics on the invalid link.</li>
+      <li data-option="d" data-explain="The walk collects the log at 3 (still above 2), reaches the invalid link, and stops without a version at or below 2. The tuple was created after the snapshot, and the test requires false.">No logs and <code>false</code>: the tuple did not exist at timestamp 2.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Build it: MVCC sequential scan (stage 3)</h2>
+
+  <p>You edit <code>concurrency/execution_common.go</code> (<code>CollectUndoLogs</code>) and your own <code>execution/seq_scan_executor.go</code> (<code>Next</code>, plus a helper). The rules, in plain words:</p>
+  <ul>
+    <li>A version stamped <code>ts</code> is visible to <code>txn</code> as it stands if <code>ts &lt;= txn.ReadTs()</code> or <code>ts == txn.TransactionTempTs()</code>. Another transaction's temporary timestamp is never visible.</li>
+    <li>If the base isn't visible, collect undo logs from its first link, newest first, up to and including the first log with <code>Ts</code> at most the read timestamp. A chain that ends first, or a log whose transaction is gone, means no visible version.</li>
+    <li>The scan reads meta, tuple and link atomically with <code>GetTupleAndUndoLink</code>, reconstructs the visible version, skips deletions and invisible tuples, and evaluates the filter on the reconstructed tuple.</li>
+    <li>Keep everything else from Project 3: the iterator made in <code>Init</code>, the batch contract, NULL filters counting as false.</li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u8-03-collect">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u8-03-collect-cb">
+        <label for="u8-03-collect-cb">Write CollectUndoLogs, with a small visibility helper for a single timestamp that the scan and later stages can share.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which two timestamps can a visible base carry? When the walk reaches a log with <code>Ts</code> at most the read timestamp, is that log part of the answer or not? What should happen when <code>GetUndoLogOptional</code> reports a missing transaction? Is the zero <code>UndoLink</code> invalid?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Write an unexported <code>isVisibleTs(ts, txn)</code> for the two visible cases. In <code>CollectUndoLogs</code>, return an empty, non-nil slice and <code>true</code> if the base's <code>Ts</code> is visible. Otherwise loop while the current link <code>IsValid()</code>: fetch the log (return <code>false</code> if it is missing), append it, return the slice and <code>true</code> if its <code>Ts</code> is at most the read timestamp, and otherwise move to its <code>PrevVersion</code>. After the loop, return <code>false</code>. The function never looks at <code>IsDeleted</code>; that is <code>ReconstructTuple</code>'s business.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>logs = append(logs, log) // append first, then test:
+if log.Ts &lt;= txn.ReadTs() {
+	return logs, true // this log restores the visible version
+}</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: CollectUndoLogs on its own</span>
+          <p>Run <code>go test -race -run '^TestTxnScanCollectUndoLog$' -timeout 300s ./txntest/</code>. BusTub's <code>CollectUndoLogTest</code> calls your <code>CollectUndoLogs</code> and <code>ReconstructTuple</code> directly on ten hand-built tuples, without the scan, so it passes before the executor is changed. A version that appends the log after the timestamp test (stopping one log early) fails at rid2:</p>
+<pre><code>    txn_scan_test.go:324: rid2 (ts 3, chain to ts 2)
+    txn_scan_test.go:324: tuple data mismatch: got (3, 3.000000, &lt;NULL&gt;); at column 0, actual value 3 != expected value 2</code></pre>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u8-03-visible">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u8-03-visible-cb">
+        <label for="u8-03-visible-cb">In seq_scan_executor.go, write a helper that returns the version of one tuple a transaction can see, or false if there is none.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>When <code>CollectUndoLogs</code> returns an empty list, do you need <code>ReconstructTuple</code> at all? What decides then whether the row exists? And when it returns logs, which function decides?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Take the schema, RID, base meta, base tuple, first link, transaction and manager. Call <code>CollectUndoLogs</code>; on <code>false</code>, return <code>false</code>. With no logs, return the base tuple and <code>!meta.IsDeleted</code>. Otherwise return what <code>ReconstructTuple</code> returns for the table's schema. Stage 9's index scan calls this helper too.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>if len(logs) == 0 {
+	return t, !meta.IsDeleted // the base itself is the visible version
+}</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u8-03-next">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u8-03-next-cb">
+        <label for="u8-03-next-cb">Rewrite Next: read each RID's tuple and link atomically, get the visible version, filter it, set its RID, and add it to the batch.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which part of your Project 3 loop stays, and which part does the visibility helper replace? Which tuple does the filter see? What RID does a reconstructed tuple carry?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Get the transaction and manager from the executor context once per call. In the loop, take the RID from the iterator and advance it, then read meta, tuple and link with <code>concurrency.GetTupleAndUndoLink</code>. Pass them to your helper and <code>continue</code> on <code>false</code>. Your Project 3 <code>IsDeleted</code> check goes away, since the helper handles deletions. Then apply the filter exactly as before, but to the tuple the helper returned. Call <code>SetRID</code> on it and append it with the RID.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>meta, t, link, _ := concurrency.GetTupleAndUndoLink(txnMgr, heap, rid)
+t, ok := visibleVersion(schema, rid, meta, t, link, txn, txnMgr)
+if !ok { continue }</code></pre></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage P4.3</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestTxnScan' -timeout 300s ./...</code></pre>
+    <p>It runs the four stage 3 tests in <code>txntest</code>: <code>TestTxnScanCollectUndoLog</code> and <code>TestTxnScanVersionChain</code> (BusTub's <code>CollectUndoLogTest</code> and <code>ScanTest</code>), <code>TestTxnScanHiddenReads</code> (the readers txn2 to txn5 of the table above) and <code>TestTxnScanFilterOnOldVersion</code>. They need stages 1 and 2: the setup checks every read and commit timestamp it creates. Success prints <code>ok  	intro_to_db/txntest</code>, and every other package shows <code>ok</code> with <code>[no tests to run]</code> (or <code>[no test files]</code>).</p>
+    <p>With stages 1 and 2 done and the scan still Project 3's, <code>CollectUndoLogTest</code> stops at the stub, and the SQL tests get the newest data:</p>
+<pre><code>--- FAIL: TestTxnScanHiddenReads (0.02s)
+    txn_extra_test.go:214: C: Verify txn2
+    txn_extra_test.go:215: query var=txn2 id=4 status=RUNNING read_ts=2 sql="SELECT a FROM maintable": ERROR: result mismatch
+        --- EXPECTED ---
+        2
+        6
+
+        --- ACTUAL ---
+        1
+        3
+...
+--- FAIL: TestTxnScanCollectUndoLog (0.00s)
+    txn_scan_test.go:310: CollectUndoLogs(rid page_id: 0 slot_num: 0): panic: TODO(P4): CollectUndoLogs not implemented
+                at concurrency.CollectUndoLogs (concurrency/execution_common.go:121)
+                at txntest.(*scanSetup).collect.func1 (txntest/txn_scan_test.go:203)</code></pre>
+    <p>A scan that evaluates the filter on the base tuple instead of the reconstructed one passes three of the four tests and fails only this one:</p>
+<pre><code>--- FAIL: TestTxnScanFilterOnOldVersion (0.01s)
+    txn_extra_test.go:229: query var=txn1 id=2 status=RUNNING read_ts=1 sql="SELECT a FROM maintable WHERE a = 2": ERROR: result mismatch
+        --- EXPECTED ---
+        2
+
+        --- ACTUAL ---
+        &lt;empty table&gt;</code></pre>
+    <p>Add <code>-v</code> to see every reader's query line, for example <code>go test -race -run '^TestTxnScanHiddenReads$' -v ./txntest/</code>.</p>
+  </div>
+
+  <h2>Project 3 must keep passing</h2>
+
+  <p>Your sequential scan is under every Project 3 test that reads a table, so rerun them all now:</p>
+
+<pre><code>go test -race -count=1 ./...</code></pre>
+
+  <p>Every package except <code>txntest</code> must print <code>ok</code>: <code>execution</code>, <code>optimizer</code> and <code>sqllogictest</code> hold Project 3's tests, and the B+tree and buffer pool packages are still there too. <code>txntest</code> prints <code>FAIL</code> for the tests of stages 4 to 11, which you haven't done yet; that is expected until the end of the project. To hide them while you check Project 3, add <code>-skip '^TestTxn'</code>.</p>
+
+  <p>The Project 3 tests pass without any special case in your scan. Their executor tests run one transaction that never commits, with read timestamp 0, and put tuples in the heap with <code>Ts</code> 0, so every base tuple is visible and no chain exists. The <code>.slt</code> files run each statement in an auto-commit transaction, and until stage 4 your insert still writes <code>Ts</code> 0, which every reader sees. If a Project 3 test fails now, the scan's Project 3 behaviour changed: a lost filter, a batch returned without its last partial part, or an iterator made somewhere other than <code>Init</code>.</p>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why a transaction's own temporary timestamp is visible but another's never is, why <code>CollectUndoLogs</code> keeps the log at or below the read timestamp, why the filter must see the reconstructed tuple, or what could go wrong with reading the tuple and its undo link separately. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: the CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/project4/">Project #4 writeup</a> (Task #2.2 Sequential Scan (Tuple Retrieval), its examples, and the TxnMgrDbg section of Task #3; Task #3.5 on dangling undo links); Lecture #20 slides 6–7; BusTub at commit d49b823: <code>src/include/execution/execution_common.h</code>, <code>src/execution/execution_common.cpp</code>, <code>src/execution/seq_scan_executor.cpp</code>, <code>src/concurrency/transaction_manager_impl.cpp</code> and <code>test/txn/txn_scan_test.cpp</code>; this course's <code>concurrency/execution_common.go</code>, <code>concurrency/transaction_manager_impl.go</code>, <code>execution/seq_scan_executor.go</code>, <code>execution/executor_context.go</code>, <code>txntest/txn_scan_test.go</code> and <code>txntest/txn_extra_test.go</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u8-02-p4-tuple-reconstruction.html">← P4.2 Tuple Reconstruction</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u8-04-p4-insert-commit.html">Next: P4.4 Insert and Commit →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

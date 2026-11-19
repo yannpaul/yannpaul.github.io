@@ -1,0 +1,263 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 5 · Lesson 6 · Parallel Query Execution</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 5 · Lesson 6</p>
+  <h1>Parallel Query Execution</h1>
+  <p class="subtitle">Compare the process models a DBMS can use for its workers, tell inter-query from intra-query parallelism, and place the intra-operator, inter-operator and bushy forms of parallelism, with their exchange operators, on a query plan.</p>
+
+  <p class="lede">Lesson 5 assumed that one worker runs each query. Real systems run many tasks at the same time to use all their cores and disks. Lecture #14 (CMU's "Query Execution II") asks three questions: how a DBMS organizes its workers, how it splits work across them within and between queries, and how it spreads data over several storage devices so the disks can keep up. BusTub implements none of this, so the lesson is theory for the course, though the Go tools that would build it are ones you already know.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 5, Lesson 4: in Lecture #12's example (M = 1,000 pages, N = 500 pages), a Grace hash join without recursive partitioning costs 4,500 I/Os. How do they split between its two phases?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="This swaps the phases. Partitioning reads and writes both tables; probing only reads the buckets back.">Partition 1,500, probe 3,000</li>
+      <li data-option="b" data-explain="The partitions are written to disk, so the probe phase has to read them back.">Partition 4,500, probe 0, because the probe happens in memory</li>
+      <li data-option="c" data-explain="Slide 43: the partition phase reads and writes both tables, 2(M + N) = 3,000; the probe phase reads both tables' buckets once, M + N = 1,500.">Partition 3,000, probe 1,500</li>
+      <li data-option="d" data-explain="Build and probe are the simple hash join's phase names. Grace hash join partitions both tables first.">Build 1,000, probe 3,500</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 3, Lesson 7: a thread finds a test-and-set spin latch already held. Who decides what the thread does next, compared with a blocking OS mutex?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The loop around test_and_set is the DBMS's own code, so it decides whether to retry, yield or abort. With a blocking mutex, the OS decides when the thread sleeps and wakes.">With the spin latch the DBMS decides (retry, yield or abort); with a blocking mutex the operating system does.</li>
+      <li data-option="b" data-explain="This reverses them: a blocking mutex hands the waiting thread to the OS scheduler.">With the spin latch the operating system decides; with a blocking mutex the DBMS does.</li>
+      <li data-option="c" data-explain="A spin latch never involves the OS: the thread keeps executing the DBMS's loop.">In both cases the operating system decides, because both are built on atomic instructions.</li>
+      <li data-option="d" data-explain="The CPU executes the atomic instruction, but what happens after it fails is up to the code around it or to the OS.">In both cases the CPU decides, because compare-and-swap is a hardware instruction.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 5, Lesson 2: an external hashing aggregate runs with B = 100 buffer pages. How many partitions does phase #1 create, and how does phase #2 build each partition's hash table?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="One buffer has to hold the input page, and rehashing with h1 would send every key of a partition to the same place.">100 partitions; phase #2 rehashes each partition with h1 again.</li>
+      <li data-option="b" data-explain="The B − 2 split belongs to the block nested loop join, and phase #2 hashes; it doesn't sort.">98 partitions; phase #2 sorts each partition.</li>
+      <li data-option="c" data-explain="Partitions hold disjoint sets of keys, so there is nothing to merge across them.">99 partitions; phase #2 merges the partitions like a merge sort.</li>
+      <li data-option="d" data-explain="Slide 29: B − 1 buffers for the partitions and 1 for the input. Slide 31: each partition gets an in-memory table built with a second hash function h2, different from h1.">99 partitions; phase #2 rehashes each partition with a second hash function h2 ≠ h1.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Parallel and distributed DBMSs</h2>
+
+  <p>A DBMS spreads a database over several resources for three reasons: to handle data sets that don't fit on one machine, to get more performance from parallel processing, and for redundancy and fault tolerance. The resources can be computational (CPU cores, sockets, GPUs, more machines) or storage (disks, memory). Lecture #14 separates two kinds of system:</p>
+  <ul>
+    <li>In a <strong>parallel DBMS</strong>, the resources are physically close to each other and talk over a high-speed interconnect. Communication is assumed to be cheap and reliable.</li>
+    <li>In a <strong>distributed DBMS</strong>, the resources can be far apart, even in different data centers, and talk over a slower interconnect. Communication costs and failures can't be ignored.</li>
+  </ul>
+  <p>Either way, the application sees a single logical database, and a SQL query must return the same result as on a single-node DBMS. This lesson is about parallel systems; distributed databases come later in the course.</p>
+
+  <h2>Process models</h2>
+
+  <p>A DBMS's <strong>process model</strong> defines how the system is built to support concurrent requests. A <strong>worker</strong> is the component that executes tasks on behalf of a client and returns the results. Slide 8 lists three models.</p>
+
+  <p><strong>Process per worker.</strong> Each worker is a separate OS process. A dispatcher receives a new connection and hands it to one of the worker processes, and the application then talks to that worker directly. The OS schedules the workers, which the notes say reduces the DBMS's control over execution. Global data structures live in shared memory so that every process can use them. The advantage is fault isolation: a process crash doesn't take down the entire system. IBM DB2, Postgres and Oracle work this way. The notes explain why: when they were written, pthreads were not yet the standard threading model, and <code>fork()</code> behaved more consistently across operating systems than threads did.</p>
+
+  <p><strong>Thread per worker.</strong> One process runs many worker threads, and the DBMS (mostly) manages its own scheduling, with or without a dispatcher thread. Slide 13 lists two advantages: less overhead per context switch, and no shared memory to manage. The cost is that a thread crash may kill the entire system. Microsoft SQL Server and MySQL work this way, and the notes say DB2 and Oracle have added support for it (the slide dates Oracle's to 2014). Slide 8 calls it the most common model.</p>
+
+  <p><strong>Embedded DBMS.</strong> The DBMS runs in the same address space as the application, which is (primarily) responsible for threads and scheduling. Slide 11's examples are BerkeleyDB, SQLite, RocksDB and LevelDB; the notes add DuckDB, which you ran from Python in Unit 0.</p>
+
+  <p>Whatever the model, slide 12 says the DBMS has to decide for each plan where, when and how to run it: how many tasks and CPU cores to use, which core each task runs on, and where each task stores its output. "The DBMS nearly always knows more than the OS", which is the same argument Unit 2 made for the buffer pool and the disk scheduler.</p>
+
+  <p>Slide 13 adds a warning: the thread per worker model "does not mean that the DBMS supports intra-query parallelism". The process model says how workers are organized. Whether one query can use several of them is a separate design choice, covered next.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=Kzf1hGjtZOU&amp;t=495s">#14 Query Execution II, "Database process models" (8:15)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/14-queryexecution2.pdf#page=7">slides 7–10</a>: workers, the dispatcher, and the process per worker and thread per worker models.</p>
+
+  <h2>Inter-query and intra-query parallelism</h2>
+
+  <p>Parallel execution means running several tasks at once to improve hardware utilization. The tasks don't have to belong to the same query, and the high-level approaches are the same whether the DBMS is multi-threaded, multi-process or multi-node. There are two:</p>
+  <ul>
+    <li><strong>Inter-query parallelism</strong> runs different queries at the same time, which raises overall throughput. Most DBMSs admit queries first come, first served. Read-only queries need almost no explicit coordination, since the buffer pool handles most of the sharing. Queries that update the database at the same time are tricky to get right; that is concurrency control, from Lecture #17 on.</li>
+    <li><strong>Intra-query parallelism</strong> runs the operators of a single query in parallel. The notes say it decreases latency for long-running queries. The lecture describes it as producers and consumers: each operator produces data for the operator above it and consumes data from the one below.</li>
+  </ul>
+
+  <p>There are parallel versions of every operator. They either let several threads access a central data structure or use partitioning to divide the work. Slide 18 lists three forms of intra-query parallelism, which can be combined: intra-operator (horizontal), the most common; inter-operator (vertical), less common; and bushy, found in higher-end systems.</p>
+
+  <h2>Intra-operator parallelism and exchange operators</h2>
+
+  <p>Lesson 4's Grace hash join is already set up for parallel work. After the partition phase, bucket <em>i</em> of R can only join with bucket <em>i</em> of S, so a separate worker can join each pair of buckets.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L14-parallel-grace-hash-join-p20.png" alt="Table R(id, name) on the left and S(id, value, cdate) on the right, each passed through hash function h1. In the middle, two columns of buckets, HT_R and HT_S, numbered 0, 1, 2 down to max. Each row of buckets has a worker gear icon numbered 1, 2, 3 up to n, and row 0 is outlined in red." loading="lazy">
+    <figcaption>Parallel Grace hash join: one worker per pair of buckets, because no tuple in bucket 0 of R can match a tuple in any other bucket of S (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/14-queryexecution2.pdf#page=20">Lecture #14, slide 17</a>).</figcaption>
+  </figure>
+
+  <p><strong>Intra-operator parallelism</strong> generalizes this. Each operator is split into independent instances that perform the same function on different subsets of the data. To combine or split the instances' streams, the DBMS inserts an <strong>exchange operator</strong> into the plan. PostgreSQL calls its exchange operators Gather. An exchange can combine its inputs in any order or merge them on a sort key.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L14-intra-operator-exchange-p31.png" alt="Right: the query SELECT A.id, B.value FROM A JOIN B ON A.id = B.id WHERE A.value &lt; 99 AND B.value &gt; 100 and its logical plan, a projection over a join of filtered A and filtered B, with the join outlined in red. Left: the parallel plan. Fragments A1, A2 and A3 each run on worker 1, 2 or 3 through a filter into a Build HT box; their outputs meet in an Exchange operator that feeds the join. Fragments B1, B2 and B3 each run on a worker through a filter into a Probe HT box that feeds the join. Three projection instances sit above the join, and a final Exchange at the top combines them." loading="lazy">
+    <figcaption>Three workers scan, filter and build from their own fragments of A, and an exchange gathers the build before any probe starts. Three more workers probe with fragments of B, and a last exchange gathers the three projections' output into one stream (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/14-queryexecution2.pdf#page=31">Lecture #14, slide 20</a>).</figcaption>
+  </figure>
+
+  <p>Slide 21 names three kinds of exchange, after Craig Freedman:</p>
+  <ul>
+    <li><strong>Gather</strong> combines the results of several workers into a single output stream. The notes say it is the most common type.</li>
+    <li><strong>Distribute</strong> splits a single input stream into several output streams.</li>
+    <li><strong>Repartition</strong> shuffles several input streams across several output streams. The notes put it as taking inputs partitioned one way and redistributing them another way. Some DBMSs, such as Google BigQuery, repartition after every pipeline.</li>
+  </ul>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=Kzf1hGjtZOU&amp;t=1898s">#14 Query Execution II, "Parallel grace hash join" (31:38)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/14-queryexecution2.pdf#page=19">slides 17–21</a>: one worker per bucket pair, then the exchange operator, the parallel hash join build and the three exchange types (the next chapter, "The exchange operator", starts at 33:32).</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>The lecture names no language, but the exchange types map onto Go concurrency patterns you already know. This mapping is mine, not CMU's. A gather is fan-in: each worker goroutine sends its tuples on one shared channel, and a <code>sync.WaitGroup</code> (or an <code>errgroup.Group</code>, if a worker can fail) closes the channel after the last worker returns, so the consumer's <code>for … range</code> loop ends. A distribute is fan-out: one producer feeds several worker channels. A repartition gives every producer the full set of output channels and picks one per tuple by hashing its key, which is the partition phase of a Grace hash join done by many producers at once.</p>
+  </div>
+
+  <h2>Inter-operator and bushy parallelism</h2>
+
+  <p><strong>Inter-operator parallelism</strong>, also called vertical or <strong>pipelined parallelism</strong>, runs different operators of the plan at the same time and overlaps them, so data is pipelined from one stage to the next without being materialized. Exchange operators are still needed to combine intermediate results. Slide 23's example is <code>SELECT SLOW_UDF(B.value) FROM A JOIN B …</code>, where the projection calls a slow user-defined function.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L14-inter-operator-p35.png" alt="Two stacked boxes, each with a worker gear. Worker 1, a join symbol: for r1 in outer: for r2 in inner: emit(r1 join r2). An arrow up to worker 2, a projection symbol: for r in incoming: emit(π(r)), with an hourglass speech bubble. Right: the query SELECT SLOW_UDF(B.value) FROM A JOIN B ON A.id = B.id WHERE A.value &lt; 99 AND B.value &gt; 100, and its plan with the projection and the join each outlined in red." loading="lazy">
+    <figcaption>Worker 1 keeps joining while worker 2 runs the slow projection on the tuples worker 1 has already emitted. The hourglass marks the slow projection (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/14-queryexecution2.pdf#page=35">Lecture #14, slide 23</a>).</figcaption>
+  </figure>
+
+  <p>The notes add that this approach is widely used in stream processing systems, which run a query continuously over a stream of incoming tuples.</p>
+
+  <p><strong>Bushy parallelism</strong> is a hybrid of the two: workers execute several operators from different segments of the plan at the same time, and exchange operators combine the segments' results.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L14-bushy-p40.png" alt="Right: SELECT * FROM A JOIN B JOIN C JOIN D and its bushy plan, a join of (A join B) with (C join D). Left: worker 1 computes A join B and worker 2 computes C join D, each feeding an Exchange operator. The outputs of both exchanges cross over to two upper joins run by workers 3 and 4, and a final Exchange at the top combines their results." loading="lazy">
+    <figcaption>A four-table join as a bushy plan. Workers 1 and 2 compute A ⋈ B and C ⋈ D at the same time, exchanges pass both results up to the joins on workers 3 and 4, and a last exchange combines their output (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/14-queryexecution2.pdf#page=40">Lecture #14, slide 25</a>).</figcaption>
+  </figure>
+
+  <p class="sidenote">The notes' caption for this figure says "a 4-way JOIN on three tables". The query joins four tables, A, B, C and D.</p>
+
+  <h2>I/O parallelism</h2>
+
+  <p>More workers don't help if the disk is always the bottleneck. Slide 26 adds that they can make performance worse, when workers access different segments of the same disk at the same time. <strong>I/O parallelism</strong> splits the DBMS across several storage devices to improve disk bandwidth. The options slide 27 lists are several disks per database, one database per disk, one relation per disk, and one relation split across several disks. Some DBMSs support this natively, such as PostgreSQL's tablespaces; others need an administrator to set it up outside the DBMS.</p>
+
+  <p><strong>Multi-disk parallelism</strong> stores data across several disks for performance and durability. With hardware support, an I/O controller makes several physical devices look like one logical device, as RAID does:</p>
+  <ul>
+    <li>Striping (RAID 0) puts consecutive pages on different disks, so neighbouring pages can be read from different disks at the same time.</li>
+    <li>Mirroring (RAID 1) puts a copy of every page on every disk.</li>
+  </ul>
+
+  <figure class="slide">
+    <img src="../assets/slides/L14-raid0-striping-p44.png" alt="A file of 6 pages (logical view): pages 1 to 6 in a row. Under the heading Striping (RAID 0), three disks: the first holds pages 1 and 4, the second pages 2 and 5, the third pages 3 and 6. Caption: Physical layout of pages across disks." loading="lazy">
+    <figcaption>Striping: page 1 on disk 1, page 2 on disk 2, page 3 on disk 3, then around again with pages 4 to 6. The slide's next build shows mirroring, with page 1 on all three disks, then page 2 (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/14-queryexecution2.pdf#page=44">Lecture #14, slide 28</a>).</figcaption>
+  </figure>
+
+  <p>RAID is transparent to the DBMS. The notes draw the consequence: since the DBMS can't see the separate devices, it can't assign workers to them. <strong>Database partitioning</strong> is the alternative the DBMS can see. Some DBMSs let you choose the disk location of each database, and the buffer pool manager maps each page to its location; that is easy at the file-system level if each database lives in its own directory. The recovery log may still be shared if transactions can update several databases. Going further, <strong>partitioning</strong> splits a single logical table into disjoint physical segments that are stored and managed separately, ideally without the application noticing. The course returns to it with distributed databases.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=Kzf1hGjtZOU&amp;t=2952s">#14 Query Execution II, "I/O parallelism techniques" (49:12)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/14-queryexecution2.pdf#page=42">slides 27–30</a>: the placement options, RAID striping and mirroring, and database and table partitioning.</p>
+
+  <h2>Why it's hard, and where BusTub stands</h2>
+
+  <p>The lecture closes by saying that (almost) every major DBMS supports parallel execution, and that it is hard to get right because of coordination overhead, scheduling, concurrency issues and resource contention. BusTub attempts none of it: nothing in its execution code implements exchange operators or intra-query parallelism, and Project 3's executors each pull from their children on the calling thread, as in Lesson 5.</p>
+
+  <h2>Work it out</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u5l6-raid-layout">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u5l6-raid-layout-cb">
+        <label for="u5l6-raid-layout-cb">A 9-page file is stored on three disks in the slide's layout. Which disk holds page 7 under striping, which disks hold it under mirroring, and how many disks does a full scan of the file read from in each case?</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Striping deals pages out to the disks in turn; mirroring copies each page everywhere.</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Under striping, page <em>i</em> goes to disk ((<em>i</em> − 1) mod 3) + 1, which matches the figure for pages 1 to 6. Under mirroring, any disk can serve any page.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>Striping: page 7 is on <strong>disk 1</strong> (with pages 1 and 4), and a full scan reads three pages from each of the three disks. Mirroring: page 7 is on <strong>all three</strong> disks, and a scan could read from any or all of them. Either way the DBMS sees one logical device and can't choose.</p></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="callout"><!-- homework-box -->
+    <p class="callout-label">The homework behind these questions</p>
+    <p>The questions marked HW4 come from CMU's Homework #4: <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw4-clean.pdf#page=6">Question 2</a>, with the original figures. Work each one out on paper first, then click the option you got. The quiz tells you at once whether it matches CMU's official answer, and explains why. To compare your working step by step, open the official solutions for <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw4-sols.pdf#page=6">Question 2</a>.</p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">HW4 Q2(d): compare process per worker with thread per worker. Which statement is true?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="This is HW4's statement, which the official solution marks False: process per worker gives better isolation, but the OS does its scheduling.">Process per worker gives both better fault isolation and better scheduling control.</li>
+      <li data-option="b" data-explain="Slide 9: a process crash doesn't take down the entire system, but the processes rely on the OS dispatcher. Slide 10: with threads, the DBMS (mostly) manages its own scheduling. This is the official solution's explanation.">Process per worker gives better fault isolation; thread per worker gives the DBMS finer control over scheduling.</li>
+      <li data-option="c" data-explain="This reverses both properties. A thread crash may kill the entire system.">Thread per worker gives better fault isolation; process per worker gives finer scheduling control.</li>
+      <li data-option="d" data-explain="Slide 13 lists real differences: threads have less overhead per context switch and no shared memory to manage.">The two models are equivalent in fault isolation and scheduling and differ only in memory use.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">HW4 Q2(e): can intra-query parallelism improve the performance of OLAP queries that run complex operations over large data sets?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Many short queries are what inter-query parallelism serves. Intra-query parallelism targets one long query.">No, intra-query parallelism only helps OLTP workloads with many short queries.</li>
+      <li data-option="b" data-explain="An exchange combines or splits streams; the fragments below it run in parallel.">No, because exchange operators serialize all the work.</li>
+      <li data-option="c" data-explain="Running several different queries at once is inter-query parallelism.">Yes, but only by running several different queries at the same time.</li>
+      <li data-option="d" data-explain="Slide 16: intra-query parallelism improves the performance of a single query by executing its operators in parallel, and the notes say it decreases latency for long-running queries. HW4's official answer is True.">Yes: executing one query's operators in parallel reduces that query's latency.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">A DBMS uses the thread per worker model. What can you conclude about intra-query parallelism?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Slide 13: the thread per worker model does not mean that the DBMS supports intra-query parallelism. The process model and the execution parallelism are separate choices.">Nothing: the process model doesn't say whether one query can use several workers.</li>
+      <li data-option="b" data-explain="The process model says how workers are organized, not how many of them one query uses.">The DBMS supports it, because every query gets several threads.</li>
+      <li data-option="c" data-explain="Thread per worker DBMSs can also run a query's operators in parallel; the model just doesn't imply that they do.">The DBMS can't support it, because one thread runs one query.</li>
+      <li data-option="d" data-explain="Lecture #14 ties no form of intra-query parallelism to a process model.">The DBMS supports only inter-operator (pipelined) parallelism.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Three workers each scan and filter one fragment of a table. Which exchange type combines their output into the single stream the next operator reads?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Distribute goes the other way: it splits a single input stream into several output streams.">Distribute</li>
+      <li data-option="b" data-explain="Repartition takes several input streams and shuffles them across several output streams, not into one.">Repartition</li>
+      <li data-option="c" data-explain="Slide 21: Gather combines the results from multiple workers into a single output stream. The notes call it the most common type, and PostgreSQL names its exchange operators after it.">Gather</li>
+      <li data-option="d" data-explain="Lecture #14 doesn't name a broadcast exchange; its three types are gather, distribute and repartition.">Broadcast</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">In <code>SELECT SLOW_UDF(B.value) FROM A JOIN B …</code>, worker 1 runs the join and streams each result tuple to worker 2, which applies SLOW_UDF while worker 1 keeps joining. Which kind of parallelism is this?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Only one query is running here.">Inter-query parallelism</li>
+      <li data-option="b" data-explain="Slide 22: operations are overlapped to pipeline data from one stage to the next without materialization, also called pipelined parallelism. Slide 23 is this exact example.">Inter-operator (vertical, pipelined) parallelism</li>
+      <li data-option="c" data-explain="Intra-operator parallelism would run several instances of the same operator on different subsets of the data.">Intra-operator (horizontal) parallelism</li>
+      <li data-option="d" data-explain="I/O parallelism spreads data over storage devices; this is about two operators running at once.">I/O parallelism</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why thread per worker gives the DBMS scheduling control but costs it fault isolation, how an exchange operator differs from an ordinary operator, or why RAID stops the DBMS from assigning workers to disks. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 Lecture #14 <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/14-queryexecution2.pdf">slides</a> 3–31 and <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/14-queryexecution2.pdf">notes</a> (sections 1–6); Homework #4 Question 2(d) and (e) and the <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw4-sols.pdf">official solutions</a>; BusTub <code>src/execution/</code> at commit d49b823; Lectures #10, #11 and #12 (warm-up); the Go documentation for <code>sync</code> and <code>golang.org/x/sync/errgroup</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u5-05-processing-models-and-access-methods.html">← Query Execution: Processing Models and Access Methods</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u5-07-query-optimization-rules-and-search.html">Next: Query Optimization I: Rewrite Rules and Plan Search →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

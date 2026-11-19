@@ -1,0 +1,411 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 0 · Lesson 2 · Modern SQL</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 0 · Lesson 2</p>
+  <h1>Modern SQL</h1>
+  <p class="subtitle">Write and predict the results of SQL queries that aggregate and group, join, nest subqueries, use lateral joins and CTEs, and rank rows with window functions, running each one in DuckDB.</p>
+
+  <p class="lede">Lesson 1's relational algebra spells out the steps of a computation; SQL states the answer and leaves the steps to the DBMS. Lecture #02 covers the parts of modern SQL that go beyond a single <code>SELECT … WHERE</code>: aggregation and grouping, nested and lateral queries, common table expressions and window functions. Most of them appear in CMU's Homework #1, which the next two lessons solve, and several return in Unit 6 as executors you'll write in Go: aggregation, joins, sorting, limits and window functions.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Which Go package of <code>intro_to_db</code> will hold the query executors you write for CMU's Project 3?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="bufferpool/ is Project 1: it caches disk pages in memory frames and decides which page to evict."><code>bufferpool/</code></li>
+      <li data-option="b" data-explain="btree/ is Project 2, the B+tree index stored in buffer-pool pages."><code>btree/</code></li>
+      <li data-option="c" data-explain="execution/ is Project 3 (Units 5–6): executors such as scans, joins, aggregation and sort, plus optimizer rules."><code>execution/</code></li>
+      <li data-option="d" data-explain="concurrency/ is Project 4 (Units 7–8): multi-version concurrency control."><code>concurrency/</code></li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">R = {(a1, 101), (a2, 102), (a3, 103)} and S = {(a3, 103), (a4, 104), (a5, 105)}. What is S − R?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="These are the tuples of S that don't appear in R. In SQL: (SELECT * FROM S) EXCEPT (SELECT * FROM R).">{(a4, 104), (a5, 105)}</li>
+      <li data-option="b" data-explain="That is R − S, the example on slide 39. Difference is not commutative.">{(a1, 101), (a2, 102)}</li>
+      <li data-option="c" data-explain="That is R ∩ S, the tuples in both inputs.">{(a3, 103)}</li>
+      <li data-option="d" data-explain="These are the tuples in exactly one of the two relations, which is not a single operator from the lecture.">{(a1, 101), (a2, 102), (a4, 104), (a5, 105)}</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Which part of a SQL query plays the role of relational algebra's select operator, σ?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The SELECT list chooses and derives output attributes, which is projection (Π).">The <code>SELECT</code> list</li>
+      <li data-option="b" data-explain="FROM names the input relations. A comma-separated list there is a product (×) until a predicate filters it.">The <code>FROM</code> clause</li>
+      <li data-option="c" data-explain="ORDER BY is sorting (τ), one of the extra operators the lecture lists.">The <code>ORDER BY</code> clause</li>
+      <li data-option="d" data-explain="σ keeps the tuples that satisfy a predicate, which is what WHERE does. Its name, select, invites confusion with SQL's SELECT list.">The <code>WHERE</code> clause</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Run along in DuckDB</h2>
+
+  <p>CMU uses <strong>DuckDB</strong> for Homework #1 and describes it as a full-featured DBMS. A DuckDB database lives in a single file, which the <code>duckdb</code> command opens. Install it with Homebrew:</p>
+
+<pre><code>brew install duckdb</code></pre>
+
+  <p>Save the lecture's example database as <code>school.sql</code>:</p>
+
+<pre><code>CREATE TABLE student (
+  sid   INT PRIMARY KEY,
+  name  VARCHAR(16),
+  login VARCHAR(32) UNIQUE,
+  age   SMALLINT,
+  gpa   DOUBLE
+);
+CREATE TABLE course (
+  cid  VARCHAR(32) PRIMARY KEY,
+  name VARCHAR(32) NOT NULL
+);
+CREATE TABLE enrolled (
+  sid   INT REFERENCES student (sid),
+  cid   VARCHAR(32) REFERENCES course (cid),
+  grade CHAR(1)
+);
+INSERT INTO student VALUES
+  (53666, 'RZA', 'rza@cs', 56, 4.0),
+  (53688, 'Taylor', 'swift@cs', 35, 3.9),
+  (53655, 'Tupac', 'shakur@cs', 25, 3.5);
+INSERT INTO course VALUES
+  ('15-445', 'Database Systems'),
+  ('15-721', 'Advanced Database Systems'),
+  ('15-826', 'Data Mining'),
+  ('15-799', 'Special Topics in Databases');
+INSERT INTO enrolled VALUES
+  (53666, '15-445', 'C'),
+  (53688, '15-721', 'A'),
+  (53688, '15-826', 'B'),
+  (53655, '15-445', 'B'),
+  (53666, '15-721', 'C');</code></pre>
+
+  <p>Then create the database file from the script, and open an interactive shell on it:</p>
+
+<pre><code>duckdb school.db &lt; school.sql    # creates school.db and runs the script
+duckdb school.db                  # interactive prompt; end each statement with ; and press Ctrl-D to leave</code></pre>
+
+  <p>Type <code>SHOW TABLES;</code> at the prompt to confirm you have <code>course</code>, <code>enrolled</code> and <code>student</code>. The script is the DDL from the lecture notes with one change: <code>gpa</code> is <code>DOUBLE</code> rather than <code>FLOAT</code>, for a reason the HAVING section explains. Lesson 3 covers the DuckDB shell in more detail.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L02-example-database-p12.png" alt="Three tables. student has columns sid, name, login, age and gpa, with rows 53666 RZA rza@cs 56 4.0, 53688 Taylor swift@cs 35 3.9, and 53655 Tupac shakur@cs 25 3.5. course has cid and name: 15-445 Database Systems, 15-721 Advanced Database Systems, 15-826 Data Mining, 15-799 Special Topics in Databases. enrolled has sid, cid and grade: 53666 15-445 C, 53688 15-721 A, 53688 15-826 B, 53655 15-445 B, 53666 15-721 C." loading="lazy">
+    <figcaption>Notice two facts the examples depend on: nobody is enrolled in 15-799, and students 53666 and 53688 each take two courses. The student table also has an <code>age</code> column, which its header line leaves out (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/02-modernsql.pdf#page=12">Lecture #02, slide 9</a>).</figcaption>
+  </figure>
+
+  <h2>SQL in brief</h2>
+
+  <p>IBM created its first relational query language, SQUARE, in 1971, then SEQUEL in 1972 for its System R prototype. SQL became an ANSI standard in 1986 and an ISO standard in 1987. The current standard is SQL:2023, and SQL-92 is the minimum a system must support to claim that it supports SQL. The language has three classes of commands:</p>
+  <ul>
+    <li><strong>DML</strong> (data manipulation language): <code>SELECT</code>, <code>INSERT</code>, <code>UPDATE</code>, <code>DELETE</code>.</li>
+    <li><strong>DDL</strong> (data definition language): schema definitions for tables, indexes, views and other objects.</li>
+    <li><strong>DCL</strong> (data control language): security and access control.</li>
+  </ul>
+
+  <p>Unlike the relational algebra of Lesson 1, SQL is based on bags, not sets. A <strong>bag</strong> (or multiset) is an unordered collection that allows duplicates. Removing duplicates costs work, so SQL keeps them unless you ask for <code>DISTINCT</code>.</p>
+
+  <h2>Aggregates</h2>
+
+  <p>An <strong>aggregate function</strong> returns a single value from a bag of tuples: <code>AVG</code>, <code>MIN</code>, <code>MAX</code>, <code>SUM</code> and <code>COUNT</code>. Aggregates can (almost) only appear in the <code>SELECT</code> output list, and one <code>SELECT</code> can hold several:</p>
+
+<pre><code>SELECT COUNT(*) AS cnt, MIN(gpa) AS lo, MAX(gpa) AS hi
+  FROM student WHERE login LIKE '%@cs';          -- 3 | 3.5 | 4.0</code></pre>
+
+  <ul>
+    <li><code>COUNT(col)</code> counts the values in <code>col</code>. A NULL is not a value, so it is skipped. <code>COUNT(*)</code> counts rows, NULLs or not. Slide 11 shows <code>COUNT(login)</code>, <code>COUNT(*)</code>, <code>COUNT(1)</code> and <code>COUNT(1+1+1)</code> all returning 3, but only because the <code>WHERE</code> clause has already removed every NULL login: <code>LIKE</code> applied to NULL is never true.</li>
+    <li><code>COUNT</code>, <code>SUM</code> and <code>AVG</code> accept <code>DISTINCT</code>, as in <code>COUNT(DISTINCT login)</code>, which counts each distinct value once.</li>
+    <li>Over zero rows, <code>COUNT</code> returns 0, while <code>AVG</code>, <code>SUM</code>, <code>MIN</code> and <code>MAX</code> return NULL.</li>
+  </ul>
+
+  <p>Mixing an aggregate with an ordinary column is undefined, because there is no single <code>cid</code> to report next to one average:</p>
+
+<pre><code>SELECT AVG(s.gpa), e.cid
+  FROM enrolled AS e JOIN student AS s ON e.sid = s.sid;</code></pre>
+
+  <p>DuckDB rejects it: <code>Binder Error: column "cid" must appear in the GROUP BY clause or must be part of an aggregate function.</code> Most systems raise an error like this, but SQLite silently picks an arbitrary <code>cid</code>, which produces plausible-looking wrong answers. If an arbitrary value really is what you want, SQL:2023's <code>ANY_VALUE(e.cid)</code> says so explicitly.</p>
+
+  <h2>GROUP BY and HAVING</h2>
+
+  <p><code>GROUP BY</code> projects tuples into subsets and computes the aggregates once per subset. The rule that fixes the error above: every non-aggregated column in the <code>SELECT</code> list must appear in the <code>GROUP BY</code> clause.</p>
+
+<pre><code>SELECT AVG(s.gpa), e.cid
+  FROM enrolled AS e JOIN student AS s ON e.sid = s.sid
+ GROUP BY e.cid
+ ORDER BY e.cid;          -- 3.75 | 15-445,  3.95 | 15-721,  3.9 | 15-826</code></pre>
+
+  <figure class="slide">
+    <img src="../assets/slides/L02-group-by-p21.png" alt="The query SELECT AVG(s.gpa), e.cid FROM enrolled AS e JOIN student AS s ON e.sid = s.sid GROUP BY e.cid. On the left, six joined tuples with columns e.sid, s.sid, s.gpa and e.cid, colour-coded by course: two for 15-721 (gpa 2.25 and 2.70), three for 15-826 (2.75, 3.90, 3.50) and one for 15-445 (1.89). An arrow leads to three output rows, one per colour: 2.46 for 15-721, 3.39 for 15-826 and 1.89 for 15-445." loading="lazy">
+    <figcaption>Each coloured group of joined tuples becomes one output row. The slide uses its own sample data, and two of its averages are slightly off: computed from its inputs, they are 2.475 for 15-721 and 3.383 for 15-826 (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/02-modernsql.pdf#page=21">Lecture #02, slide 13</a>).</figcaption>
+  </figure>
+
+  <p><code>HAVING</code> filters the groups after aggregation, "like a <code>WHERE</code> clause for a <code>GROUP BY</code>." <code>WHERE</code> runs earlier, on individual tuples before any group exists, so it can't test an aggregate: putting <code>AVG(s.gpa) &gt; 3.9</code> in the <code>WHERE</code> clause fails in DuckDB with <code>WHERE clause cannot contain aggregates!</code>. Slide 15 keeps the courses whose average GPA is above 3.9:</p>
+
+<pre><code>SELECT AVG(s.gpa) AS avg_gpa, e.cid
+  FROM enrolled AS e, student AS s
+ WHERE e.sid = s.sid
+ GROUP BY e.cid
+HAVING AVG(s.gpa) &gt; 3.9;</code></pre>
+
+  <p>Many systems, DuckDB included, also accept the alias, <code>HAVING avg_gpa &gt; 3.9</code>. The notes point out that this is not standard SQL; the standard form repeats the aggregate, as above.</p>
+
+  <p><strong>Grouping sets</strong> compute several groupings in one query instead of combining separate <code>GROUP BY</code> queries with <code>UNION ALL</code>, so the DBMS scans the data once. On the example database, <code>GROUP BY GROUPING SETS ((c.name, e.grade), (c.name), ())</code> returns nine rows: five per course and grade, three per course, and one grand total of 5. NULL marks each column that a row rolls up.</p>
+
+  <div class="callout bad">
+    <p class="callout-label">Pitfall: FLOAT in DuckDB</p>
+    <p>The lecture notes declare <code>gpa FLOAT</code>. In DuckDB, <code>FLOAT</code> is a 4-byte floating-point type, so 3.9 is stored as 3.9000000953674316, and the HAVING query above also returns 15-826. With <code>DOUBLE</code>, as in <code>school.sql</code>, it returns 15-721 alone. When an answer hinges on an exact comparison, check the column types.</p>
+  </div>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=O5gU9NQjCAs&amp;t=851s">#02 Modern SQL, "Aggregation basics" (14:11)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/02-modernsql.pdf#page=13">slides 10–15</a>: aggregates, the undefined-column problem, GROUP BY, grouping sets and HAVING, worked on the example database.</p>
+
+  <h2>Strings, ordering and limits</h2>
+
+  <ul>
+    <li>SQL-92 strings are case-sensitive and take single quotes only. Systems differ: MySQL is case-insensitive and also accepts double quotes. In DuckDB, double quotes name an identifier, so <code>WHERE name = "Tupac"</code> fails with <code>Referenced column "Tupac" not found</code>, and <code>name = 'tupac'</code> matches nothing.</li>
+    <li>In a <code>LIKE</code> pattern, <code>%</code> matches any substring, including the empty one, and <code>_</code> matches exactly one character: <code>login LIKE '%@c_'</code> matches all three students.</li>
+    <li>String functions such as <code>SUBSTRING</code>, <code>UPPER</code> and <code>LOWER</code> work in both the output and predicates. The standard concatenation operator is <code>||</code> (MSSQL uses <code>+</code> and MySQL <code>CONCAT()</code>): <code>WHERE login = LOWER(name) || '@cs'</code> returns RZA. Date and time functions exist too, but their syntax varies wildly between systems.</li>
+    <li><code>ORDER BY col [ASC|DESC]</code> sorts the output; <code>ASC</code> is the default. Extra sort keys break ties, and any expression can be a sort key.</li>
+    <li><code>LIMIT n OFFSET m</code> is the common syntax, and DuckDB uses it. The standard spelling is <code>FETCH FIRST n ROWS ONLY</code> with <code>OFFSET n ROWS</code>; DuckDB accepts that too, but rejects the standard's <code>FETCH FIRST n ROWS WITH TIES</code>. Without an <code>ORDER BY</code>, a limited query may return different tuples on each run, because relations have no order.</li>
+  </ul>
+
+<pre><code>SELECT sid, name, gpa FROM student
+ ORDER BY gpa DESC LIMIT 2;        -- 53666 RZA 4.0, then 53688 Taylor 3.9</code></pre>
+
+  <p>A query can also store its result in a table instead of returning it. The SQL-92 form <code>SELECT DISTINCT cid INTO CourseIds FROM enrolled</code> fails in DuckDB (<code>SELECT INTO not supported!</code>), but <code>CREATE TABLE CourseIds AS SELECT DISTINCT cid FROM enrolled;</code> works. To add rows to a table that already exists, use <code>INSERT INTO CourseIds (SELECT DISTINCT cid FROM enrolled);</code>. The query's columns must match the table's in number and type; their names can differ. You'll need <code>INSERT … SELECT</code> for the homework's last question.</p>
+
+  <h2>Joins</h2>
+
+  <p>Lesson 1's join is written in the <code>FROM</code> clause, usually with an explicit condition:</p>
+
+<pre><code>SELECT s.name, e.cid
+  FROM student AS s JOIN enrolled AS e ON s.sid = e.sid;</code></pre>
+
+  <p>This returns five rows, one per <code>enrolled</code> tuple: RZA and Taylor appear twice each, because each has two matching enrollments. <code>AS</code> gives each table a short alias for the rest of the query.</p>
+
+  <p>The comma form, <code>FROM student AS s, enrolled AS e WHERE s.sid = e.sid</code>, returns the same five rows. The notes call it legacy implicit join syntax and recommend writing explicit joins. Without the <code>WHERE</code> predicate it is the product: 3 × 5 = 15 rows.</p>
+
+  <p>Because SQL keeps duplicates, <code>SELECT s.name</code> from that join gives RZA, RZA, Taylor, Taylor, Tupac, and <code>SELECT DISTINCT s.name</code> gives the three names once each. Whenever one side has several matching rows, the join repeats the other side's columns, so decide whether you want those repeats.</p>
+
+  <h2>Nested queries</h2>
+
+  <p>A <strong>nested query</strong> (or subquery) is a query inside another query. The <em>inner</em> query can appear almost anywhere in the <em>outer</em> one: in the <code>SELECT</code> list, in <code>FROM</code>, or in <code>WHERE</code>. The inner query can reference the outer query's attributes, but not the other way round. Nested queries are often difficult to optimize.</p>
+
+<pre><code>-- names of the students enrolled in 15-445: RZA, Tupac
+SELECT name FROM student
+ WHERE sid IN (SELECT sid FROM enrolled WHERE cid = '15-445');
+
+-- a subquery in the SELECT list, evaluated for each enrolled row
+SELECT sid, (SELECT name FROM student AS s WHERE s.sid = e.sid) AS name
+  FROM enrolled AS e;</code></pre>
+
+  <p>Four operators connect a predicate to a subquery's result:</p>
+  <ul>
+    <li><code>ALL</code>: the expression must be true for every row of the subquery.</li>
+    <li><code>ANY</code>: it must be true for at least one row.</li>
+    <li><code>IN</code>: equivalent to <code>= ANY()</code>.</li>
+    <li><code>EXISTS</code>: true if the subquery returns at least one row.</li>
+  </ul>
+
+  <p>Slide 26 finds the student with the highest id among those enrolled in at least one course, in several equivalent ways. All of them return 53688, Taylor:</p>
+
+<pre><code>SELECT sid, name FROM student
+ WHERE sid = (SELECT MAX(sid) FROM enrolled);
+
+SELECT student.sid, name
+  FROM student
+  JOIN (SELECT MAX(sid) AS sid FROM enrolled) AS max_e
+    ON student.sid = max_e.sid;</code></pre>
+
+  <p>The second form joins with a <em>derived table</em>: a subquery in <code>FROM</code>, given a name with <code>AS</code>. A subquery that references the outer query's attributes is a <strong>correlated subquery</strong>. Conceptually it is re-evaluated for each outer tuple:</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L02-correlated-not-exists-p52.png" alt="The query SELECT * FROM course WHERE NOT EXISTS (SELECT * FROM enrolled WHERE course.cid = enrolled.cid). The inner reference course.cid is boxed, with an arrow pointing to course in the outer FROM clause. The result is one row: 15-799, Special Topics in Databases." loading="lazy">
+    <figcaption>The inner query's <code>course.cid</code> refers to the outer query's current course, so the inner query runs once per course; only 15-799 has no enrolled tuples (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/02-modernsql.pdf#page=52">Lecture #02, slide 27</a>).</figcaption>
+  </figure>
+
+  <div class="callout bad">
+    <p class="callout-label">Pitfall</p>
+    <p>Drop the correlation predicate and the subquery no longer depends on the outer row. <code>NOT EXISTS (SELECT * FROM enrolled)</code> is false for every course, so the query returns nothing; <code>EXISTS (SELECT * FROM enrolled)</code> is true for every course and returns all four.</p>
+  </div>
+
+  <h2>Lateral joins</h2>
+
+  <p>An ordinary subquery in <code>FROM</code> can't see the other tables in the same <code>FROM</code> clause. <code>LATERAL</code> lifts that restriction: a <strong>lateral</strong> subquery can reference attributes of the <code>FROM</code> items that precede it. The lecture compares it to a for loop that runs another query for each tuple:</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L02-lateral-for-loop-p53.png" alt="Text: The LATERAL operator allows a nested query to reference attributes in other nested queries that precede it, like a for loop that invokes another query for each tuple in a table. The query SELECT * FROM (SELECT 1 AS x) AS t1, LATERAL (SELECT t1.x+1 AS y) AS t2 returns one row, t1.x = 1 and t2.y = 2. Beside it is the Python loop: for x in [1]: for y in [x+1]: print(x, y)." loading="lazy">
+    <figcaption>The lateral subquery uses <code>t1.x</code> from the item before it, just as the inner loop uses the outer loop's variable (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/02-modernsql.pdf#page=53">Lecture #02, slide 28</a>).</figcaption>
+  </figure>
+
+  <p>Slide 29 uses two lateral subqueries to compute, for each course, the number of enrolled students and their average GPA:</p>
+
+<pre><code>SELECT * FROM course AS c,
+  LATERAL (SELECT COUNT(*) AS cnt FROM enrolled
+            WHERE enrolled.cid = c.cid) AS t1,
+  LATERAL (SELECT AVG(gpa) AS avg FROM student AS s
+             JOIN enrolled AS e ON s.sid = e.sid
+            WHERE e.cid = c.cid) AS t2
+ ORDER BY cnt ASC;</code></pre>
+
+  <p>Run it and look at the row for 15-799; a question at the end of the lesson asks about it. The lecture notes print this query without the comma before the first <code>LATERAL</code>, and DuckDB rejects that version with a syntax error.</p>
+
+  <p>A lateral subquery with <code>ORDER BY … LIMIT 1</code> picks one tuple per outer tuple, for example each course's best-GPA student:</p>
+
+<pre><code>SELECT c.cid, best.name, best.gpa
+  FROM course AS c,
+       LATERAL (SELECT s.name, s.gpa
+                  FROM enrolled AS e JOIN student AS s ON s.sid = e.sid
+                 WHERE e.cid = c.cid
+                 ORDER BY s.gpa DESC, s.name
+                 LIMIT 1) AS best
+ ORDER BY c.cid;
+-- 15-445 | RZA | 4.0
+-- 15-721 | RZA | 4.0
+-- 15-826 | Taylor | 3.9</code></pre>
+
+  <p>15-799 is missing from this output. Its subquery returns zero rows, and pairing a tuple with zero rows produces nothing, just as R × S is empty when S is empty.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=O5gU9NQjCAs&amp;t=2842s">#02 Modern SQL, "Nested subqueries" (47:22)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/02-modernsql.pdf#page=37">slides 23–29</a>: nested queries with IN, ANY, ALL and EXISTS, the highest-id example, correlated NOT EXISTS, and lateral joins.</p>
+
+  <h2>Common table expressions</h2>
+
+  <p>A <strong>common table expression (CTE)</strong> gives a name to a temporary result that the rest of the same query can reference: in the notes' words, a temporary table scoped to a single query. CTEs are an alternative to nested queries, views and explicit temporary tables. You can name the output columns before <code>AS</code>, and one <code>WITH</code> can declare several CTEs, separated by commas:</p>
+
+<pre><code>WITH cteName (col1, col2) AS (
+  SELECT 1, 2
+)
+SELECT col1 + col2 FROM cteName;                        -- 3
+
+WITH maxCTE (maxId) AS (SELECT MAX(sid) FROM enrolled)
+SELECT name FROM student AS s
+  JOIN maxCTE ON s.sid = maxCTE.maxId;                  -- Taylor</code></pre>
+
+  <p>In the homework, CTEs let you compute a long answer one named step at a time and combine the steps at the end.</p>
+
+  <p>With <code>WITH RECURSIVE</code>, a CTE can reference itself. The notes point out that this makes SQL provably Turing-complete. Their example counts from 1 to 10:</p>
+
+<pre><code>WITH RECURSIVE cteSource (counter) AS (
+  (SELECT 1)
+  UNION
+  (SELECT counter + 1 FROM cteSource WHERE counter &lt; 10)
+)
+SELECT * FROM cteSource;</code></pre>
+
+  <h2>Window functions</h2>
+
+  <p>A <strong>window function</strong> performs a calculation across a set of tuples related to the current tuple, without collapsing them into a single output tuple, which is how SQL supports running totals, ranks and moving averages. The syntax is <code>FUNC-NAME(…) OVER (…)</code>, and the function can be:</p>
+  <ul>
+    <li>any aggregate function from earlier in this lesson;</li>
+    <li><code>ROW_NUMBER()</code>, the number of the current row;</li>
+    <li><code>RANK()</code>, the order position of the current row. Tied rows share a rank and the next rank is skipped (1, 2, 2, 4), whereas <code>ROW_NUMBER()</code> never repeats (1, 2, 3, 4).</li>
+  </ul>
+
+  <p>The <code>OVER</code> clause says how to group tuples for the computation. <code>PARTITION BY</code> specifies the groups, and an <code>ORDER BY</code> inside <code>OVER</code> sorts the entries within each group:</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L02-window-partition-by-p68.png" alt="The query SELECT cid, sid, ROW_NUMBER() OVER (PARTITION BY cid) FROM enrolled ORDER BY cid, and its five output rows, colour-coded by course: 15-445 with sids 53666 and 53655 numbered 1 and 2; 15-721 with 53688 and 53666 numbered 1 and 2; 15-826 with 53688 numbered 1." loading="lazy">
+    <figcaption>The numbering restarts at 1 in each partition, and all five rows survive, unlike with <code>GROUP BY</code>. Without an <code>ORDER BY</code> inside <code>OVER</code>, the order in which each partition is numbered is unspecified; the notes recommend adding one for deterministic results (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/02-modernsql.pdf#page=68">Lecture #02, slide 36</a>).</figcaption>
+  </figure>
+
+  <p>The notes describe the conceptual execution in four steps: partition the table, sort each partition (if there is an <code>ORDER BY</code>), build a window of related records for each record, and compute the output for each window. Slide 38 uses <code>RANK()</code> to find the student with the second-highest grade in each course:</p>
+
+<pre><code>SELECT * FROM (
+  SELECT *, RANK() OVER (PARTITION BY cid
+                         ORDER BY grade ASC) AS rank
+    FROM enrolled) AS ranking
+ WHERE ranking.rank = 2;</code></pre>
+
+  <p>The sort is ascending because the grades are letters: A sorts before B, so the best grade comes first. The rank is computed in a derived table and filtered outside it because a window function can't appear in <code>WHERE</code>: DuckDB rejects that with <code>WHERE clause cannot contain window functions!</code>. Unit 6 has you implement window functions as a Go executor for Project 3.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">In Go terms</span>
+    <p><code>GROUP BY cid</code> is like folding the rows into a <code>map[string]stats</code> keyed by course and emitting one row per key. <code>AVG(gpa) OVER (PARTITION BY cid)</code> computes the same per-course value but writes it back onto every original row, so five rows go in and five rows come out.</p>
+  </div>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=O5gU9NQjCAs&amp;t=3530s">#02 Modern SQL, "Table expressions" (58:50)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/02-modernsql.pdf#page=60">slides 30–38</a>: common table expressions, recursive CTEs, and window functions with PARTITION BY, ORDER BY and RANK.</p>
+
+  <h2>One statement per answer</h2>
+
+  <p>The lecture closes with advice: "You should (almost) always strive to compute your answer as a single SQL statement." It follows from Lesson 1: a single declarative statement hands the DBMS the whole problem, so it can choose the steps for all of it. Homework #1 enforces the advice, since every answer must be a single statement.</p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">s2(sid, login) holds (1, 'rza@cs'), (2, NULL), (3, 'swift@cs') and (4, 'swift@cs'). What does <code>SELECT COUNT(*), COUNT(login), COUNT(DISTINCT login) FROM s2;</code> return?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="COUNT(login) counts values, and the NULL isn't a value. DISTINCT then also merges the two 'swift@cs' entries.">4, 4, 3</li>
+      <li data-option="b" data-explain="COUNT(*) counts all 4 rows. COUNT(login) skips the NULL, giving 3. COUNT(DISTINCT login) counts {'rza@cs', 'swift@cs'}, giving 2.">4, 3, 2</li>
+      <li data-option="c" data-explain="COUNT(*) counts every row, including the one whose login is NULL.">3, 3, 2</li>
+      <li data-option="d" data-explain="NULL isn't counted as a distinct value, and the two 'swift@cs' entries count once.">4, 3, 3</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">On the example database, with <code>gpa</code> stored as <code>DOUBLE</code>, which rows does this query return? <code>SELECT AVG(s.gpa) AS avg_gpa, e.cid FROM enrolled AS e, student AS s WHERE e.sid = s.sid GROUP BY e.cid HAVING AVG(s.gpa) &gt; 3.9;</code></p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="3.9 is not greater than 3.9, so 15-826 is filtered out. With gpa FLOAT, DuckDB would return this row, because a 4-byte float stores 3.9 as 3.9000000953674316.">(3.95, '15-721') and (3.9, '15-826')</li>
+      <li data-option="b" data-explain="These are all three groups before HAVING filters them.">(3.75, '15-445'), (3.95, '15-721') and (3.9, '15-826')</li>
+      <li data-option="c" data-explain="The group averages are 3.75 for 15-445, 3.95 for 15-721 and 3.9 for 15-826, and only 3.95 is greater than 3.9.">(3.95, '15-721') only</li>
+      <li data-option="d" data-explain="Repeating the aggregate is the standard-compliant form. Referencing the alias is the non-standard shortcut, which DuckDB also accepts.">An error, because HAVING must reference the alias avg_gpa</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">In slide 29's query (each course c, a lateral <code>COUNT(*) AS cnt</code> and a lateral <code>AVG(gpa) AS avg</code>), what are <code>cnt</code> and <code>avg</code> for 15-799, which has no enrolled students?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="COUNT(*) over zero rows is 0, not NULL.">cnt = NULL, avg = NULL</li>
+      <li data-option="b" data-explain="AVG has no values to average, so it returns NULL rather than 0.">cnt = 0, avg = 0</li>
+      <li data-option="c" data-explain="Each lateral subquery is an aggregate with no GROUP BY, so it returns exactly one row even when its input is empty, and the course row is kept. Only a subquery that can return zero rows, like the LIMIT 1 example, drops it.">The 15-799 row does not appear in the output.</li>
+      <li data-option="d" data-explain="COUNT(*) over zero rows is 0, and AVG over zero rows is NULL. Slide 29's result shows exactly that, and so does DuckDB.">cnt = 0, avg = NULL</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">On the example database, which rows does slide 38's query return? <code>SELECT * FROM (SELECT *, RANK() OVER (PARTITION BY cid ORDER BY grade ASC) AS rank FROM enrolled) AS ranking WHERE ranking.rank = 2;</code></p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Within each course, grades sort A, B, C, so rank 2 is the second-best grade. 15-445 has B then C, and 15-721 has A then C.">(53666, '15-445', 'C', 2) and (53666, '15-721', 'C', 2)</li>
+      <li data-option="b" data-explain="These are the rank-1 (best-grade) tuples of 15-445 and 15-721.">(53655, '15-445', 'B', 2) and (53688, '15-721', 'A', 2)</li>
+      <li data-option="c" data-explain="15-826 has a single enrolled student, so its only tuple has rank 1 and there is no rank-2 tuple.">(53666, '15-445', 'C', 2), (53666, '15-721', 'C', 2) and (53688, '15-826', 'B', 2)</li>
+      <li data-option="d" data-explain="15-826 has only one enrolled student, so it has no rank-2 tuple; the rank-2 tuples come from 15-445 and 15-721.">(53688, '15-826', 'B', 2) only</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">scores(name, pts) holds (A, 30), (B, 20), (C, 20) and (D, 10). For D, what are <code>RANK() OVER (ORDER BY pts DESC)</code> and <code>ROW_NUMBER() OVER (ORDER BY pts DESC, name)</code>?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="B and C tie at rank 2 and occupy positions 2 and 3, so D's order position, its rank, is 4.">RANK 3, ROW_NUMBER 4</li>
+      <li data-option="b" data-explain="ROW_NUMBER numbers rows consecutively, so D is row 4; and RANK skips 3 after the tie.">RANK 3, ROW_NUMBER 3</li>
+      <li data-option="c" data-explain="RANK gives 1, 2, 2, 4, skipping after the tie, and ROW_NUMBER gives 1, 2, 3, 4.">RANK 4, ROW_NUMBER 4</li>
+      <li data-option="d" data-explain="ROW_NUMBER never repeats or skips a number, so D is row 4.">RANK 4, ROW_NUMBER 3</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example: when a filter belongs in <code>WHERE</code> and when in <code>HAVING</code>, what makes a subquery correlated, what <code>LATERAL</code> adds to an ordinary subquery in <code>FROM</code>, or how <code>RANK()</code> and <code>ROW_NUMBER()</code> differ on ties. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 Lecture #02, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/02-modernsql.pdf">slides</a> and <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/02-modernsql.pdf">notes</a>. Query results and error messages are from DuckDB 1.5.6 on the example database above.</p>
+
+  <div class="lesson-nav">
+    <a href="./u0-01-relational-model.html">← The Relational Model &amp; Relational Algebra</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u0-03-hw1-part1.html">Next: HW1 Hands-On, Part 1: DuckDB, the Lahman Database, and Q1–Q3 →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
