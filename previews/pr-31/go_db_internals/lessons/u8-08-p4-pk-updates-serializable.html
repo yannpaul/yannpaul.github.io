@@ -1,0 +1,416 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 8 · Lesson 8 · P4.8 Primary-Key Updates and Serializable Verification</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 8 · Lesson 8</p>
+  <h1>P4.8 Primary-Key Updates and Serializable Verification</h1>
+  <p class="subtitle">Turn an update that changes a primary key into deletes followed by inserts, record what each serializable transaction scanned, and reject at commit any transaction whose scans a later commit changed; then run Projects 1 to 4 together under the race detector.</p>
+
+  <p class="lede">Two pieces are left. An update that changes a primary key can't happen in place, because the key's index entry would then lead to a row with a different key. And snapshot isolation, which everything so far implements, still allows write skew. The writeup closes both: Task 4.3 implements a key change "as a delete on the original key and an insert on the new key", and Task 4.4 adds the SERIALIZABLE level through OCC backward validation of each transaction's scan predicates. This lesson has two checkpoints, stage 10 and stage 11, and ends with the whole suite.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Unit 7, Lesson 5: in the marble example, Txn #1 turns every white marble black and Txn #2 every black marble white, both from the same snapshot. Why doesn't first-writer-wins stop them?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Both transactions write; neither is read-only. The rule doesn't fire for a different reason.">Because one of the two transactions is read-only.</li>
+      <li data-option="b" data-explain="Txn #1 writes only the white marbles and Txn #2 only the black ones. First-writer-wins compares writes with writes, so disjoint write sets never conflict, although each wrote what the other read.">Their write sets don't overlap, and the rule only compares writes with writes.</li>
+      <li data-option="c" data-explain="Under SI both transactions see the same committed snapshot; reading uncommitted data would be a different anomaly.">Each transaction reads the other's uncommitted writes.</li>
+      <li data-option="d" data-explain="The rule applies whatever the commit order; it is not about timestamps being equal.">Both transactions commit with the same commit timestamp.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 7, Lesson 3: under backward validation, a committing transaction T1 is checked against which transactions?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Checking against transactions that are still running is forward validation.">Every transaction that is still active.</li>
+      <li data-option="b" data-explain="A transaction that committed before T1 began can't have changed anything T1 read during its run; it isn't in the scope.">Every transaction that ever committed.</li>
+      <li data-option="c" data-explain="Start order is not what matters; the scope is defined by commits that happened while T1 ran.">The transactions that started after T1 started, committed or not.</li>
+      <li data-option="d" data-explain="Backward validation intersects T1's read and write sets with those of transactions that committed while T1 was running (slide 23's validation scope).">The transactions that committed while T1 was running.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 7, Lesson 4: what does the "re-execute scans" defence against phantoms keep for each transaction, and what does it do at commit?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The DBMS tracks the WHERE clause of every query (the scan set of every range query) and, at commit, re-runs just the scan part to see whether the result is the same.">The WHERE clause of every query it ran; at commit it re-runs the scans and compares the results.</li>
+      <li data-option="b" data-explain="Locks on key ranges in an index are index locking, a different approach.">A lock on each index key range it read; at commit it releases them.</li>
+      <li data-option="c" data-explain="Locking every page or the whole table is the &quot;lock everything&quot; approach.">A lock on every page of the table; at commit it releases them.</li>
+      <li data-option="d" data-explain="Copying the tuples it read would not show new rows that match the predicate, which is the point of the approach.">A copy of every tuple it read; at commit it compares the copies with the table.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Moving a primary key</h2>
+
+  <p>After stage 9, an update rewrites a tuple in place: same RID, new values, the old values in the undo log. That is right as long as the primary key stays the same. If it changes, the RID would hold a different key from the one its index entry names, and the index entry for the new key would point somewhere else. Your stage-9 code shows the result. After <code>UPDATE maintable SET col1 = col1 + 1</code> on keys 1 to 4, done in place, key 1's RID holds (2, 0), and the index entry for key 2 still leads to its old RID, which now holds (3, 0). The index scan reconstructs (3, 0), checks the filter <code>col1 = 2</code> on it, and returns nothing:</p>
+<pre><code>txn_index_test.go:206: ERROR: expect col1 = 2 to have 1 row, found 0 rows (txn2, read ts 4): &lt;empty table&gt;</code></pre>
+
+  <p>So a key change becomes a delete of the old row and an insert of the new one. The writeup's walk-through runs <code>UPDATE table SET col1 = col1 + 1</code> in order: "we delete all tuples that will be updated", then "we insert the updated tuple back to the table with new primary keys", then commit. The deletes must all come first. With one row at a time, the insert of the new key 2 would find key 2's row still live and report a unique violation, although the same statement is about to move that row to 3. <code>TestTxnPKUpdateSwap</code> runs <code>SET col1 = 5 - col1</code>, which exchanges keys 1 and 4 and keys 2 and 3, and passes only in this order.</p>
+
+  <p>The inserts are the insert executor's inserts, with everything stage 9 added: a key whose slot holds a deletion marker reuses that slot, and here most of those markers are the statement's own deletes. The delete half is your delete code: undo logs, the write set, conflicts, and Project 3's upkeep for any secondary index. On the reference, after the statement above:</p>
+<pre><code>RID=9/0 ts=5 &lt;del marker&gt; tuple=(1, 0)
+  txn4@0 (1, 0) ts=4
+RID=9/1 ts=5 tuple=(2, 0)
+  txn4@1 (2, 0) ts=4
+RID=9/2 ts=5 tuple=(3, 0)
+  txn4@2 (3, 0) ts=4
+RID=9/3 ts=5 tuple=(4, 0)
+  txn4@3 (4, 0) ts=4
+RID=9/4 ts=5 tuple=(5, 0)</code></pre>
+  <p>Keys 2 to 4 went back into their own slots (the transaction deleted them first, so its own deletion markers were reusable), key 1's slot stays a deletion marker, and key 5 is new. Each old slot has one undo log, as stage 5 requires: the delete created it, and the reinsert by the same transaction extended it. A reader that began before the update still finds keys 1 to 4 through the index, which <code>TestTxnPKUpdateReverify</code> checks.</p>
+
+  <p>Two smaller rules. The course's design takes the delete-then-insert path for every row of the statement as soon as any row's key changes; a statement that changes no key stays in place. And the count row is the number of rows the child produced, whichever path ran.</p>
+
+  <h2>What snapshot isolation still allows</h2>
+
+  <p>Unit 7, Lesson 5 ended with write skew: two transactions read overlapping data, each writes something the other read, and their write sets don't overlap, so first-writer-wins never fires. Lesson 4 added phantoms: rows inserted or deleted by another transaction that would have matched a scan. Under snapshot isolation, Project 4 allows both. The marble example runs as it is in the Go shell, on two rows of colour 0 and two of colour 1:</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L20-write-skew-p24.png" alt="On the left, four marbles: two black on top, two white below. Txn #1, change all white marbles to black, produces a group whose bottom two are now black, boxed in red. Txn #2, change all black marbles to white, produces a group whose top two are now white, boxed in red. Both arrows lead to the final state on the right: two white marbles on top and two black below." loading="lazy">
+    <figcaption>The two transactions write disjoint marbles, so snapshot isolation lets both commit and the colours swap. Under SERIALIZABLE the second commit must fail (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/20-multiversioning.pdf#page=24">Lecture #20, slide 9</a>).</figcaption>
+  </figure>
+
+<pre><code>bustub&gt; CREATE TABLE m(color int, id int primary key);
+bustub&gt; INSERT INTO m VALUES (0, 1), (0, 2), (1, 3), (1, 4);
+bustub&gt; set global_isolation_level=serializable;
+bustub&gt; BEGIN;
+begin txn txn_id=6 txn_real_id=4611686018427387910 read_ts=5 commit_ts=-1 status=RUNNING iso_lvl=SERIALIZABLE
+txn6&gt; UPDATE m SET color = 1 WHERE color = 0;
++-------------------------------+
+| __bustub_internal.update_rows |
++-------------------------------+
+| 2                             |
++-------------------------------+
+txn6&gt; \txn -1
+pause current txn txn_id=6 txn_real_id=4611686018427387910 read_ts=5 commit_ts=-1 status=RUNNING iso_lvl=SERIALIZABLE
+bustub&gt; BEGIN;
+begin txn txn_id=8 txn_real_id=4611686018427387912 read_ts=6 commit_ts=-1 status=RUNNING iso_lvl=SERIALIZABLE
+txn8&gt; UPDATE m SET color = 0 WHERE color = 1;
++-------------------------------+
+| __bustub_internal.update_rows |
++-------------------------------+
+| 2                             |
++-------------------------------+
+txn8&gt; COMMIT;
+txn committed, txn_id=8, status=COMMITTED, read_ts=6, commit_ts=8
+bustub&gt; \txn 6
+switch to new txn txn_id=6 txn_real_id=4611686018427387910 read_ts=5 commit_ts=-1 status=RUNNING iso_lvl=SERIALIZABLE
+txn6&gt; COMMIT;
+txn failed to commit, txn_id=6, status=ABORTED, read_ts=5, commit_ts=-1
+bustub&gt; SELECT * FROM m;
++---------+------+
+| m.color | m.id |
++---------+------+
+| 0       | 1    |
+| 0       | 2    |
+| 0       | 3    |
+| 0       | 4    |
++---------+------+</code></pre>
+  <p>(The output of <code>CREATE</code> and <code>INSERT</code> is cut.) <code>\txn -1</code> pauses txn6 and <code>\txn 6</code> resumes it. Each update wrote two rows, txn8 committed first, and txn6 failed at commit: every row has colour 0, the result of running txn8 alone, which is a serial order. On a stage 10 build both commit, and the colours swap.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=tUFha9-DuSk&amp;t=1442s">#20 Multi-Version Concurrency Control, "Write skew anomaly" (24:02)</a>, slide 9: the marble example and why snapshot isolation allows it.</p>
+
+  <h2>Verification at commit</h2>
+
+  <p>The writeup: "We use OCC backward validation for serializable verification. The verification method we talked about in the lecture only applies to a static database. In BusTub, you will need to consider newly-inserted and deleted records." Comparing read sets of RIDs can't catch a phantom, since a row that didn't exist was never read. So a transaction records what it asked for: "you will need to store the scan filter (aka. scan predicate) in the transaction each time the sequential scan executor or the index scan executor are called." That is Lesson 4's re-execute-scans idea, with the predicate tested against the changed rows instead of re-running the scan. A scan with no filter reads every row, so it records a predicate that is always true. Only SERIALIZABLE transactions need to record anything.</p>
+
+  <p>Then, when a serializable transaction commits (the shipped <code>Commit</code> already calls <code>verifyTxn</code> under the commit mutex, and aborts on false):</p>
+  <ol>
+    <li>"You do not need to verify a read-only transaction." No writes, nothing to check: a read-only transaction is serializable at its read timestamp.</li>
+    <li>Collect the <strong>conflict transactions</strong>: those that committed after this transaction's read timestamp. These are the transactions in backward validation's scope.</li>
+    <li>Collect every RID in their write sets.</li>
+    <li>For each such tuple, walk its version chain back to the version at this transaction's read timestamp and replay the changes one by one, newest first. For an insert, test the new tuple against this transaction's scan predicates on that table; for a delete, the deleted tuple; for an update, both the before image and the after image. Any match: verification fails.</li>
+  </ol>
+  <p>The writeup adds four edge cases, and each has a test:</p>
+  <ul>
+    <li>An insert followed by a delete in one transaction leaves a deletion marker, and "should be regarded as a no-op instead of a delete" (<code>TestTxnSerializablePhantoms/insert_then_delete</code>).</li>
+    <li>An update that sets a column to its old value still counts: "you should still process it as an identical update instead of ignoring it".</li>
+    <li>Two transactions that change X to Y and then Y back to X still conflict with a third that started before the first and commits after the second, because the replay sees both changes (<code>TestTxnSerializableRevertedUpdate</code>).</li>
+    <li>"If a transaction needs to be aborted in the commit phase, you should directly go through the abort logic to revert the changes, and set the transaction status to ABORTED instead of TAINTED." The shipped <code>Commit</code> calls your <code>Abort</code>, which does that (<code>TestTxnSerializableAbortedState</code>).</li>
+  </ul>
+
+  <p>A version with a temporary timestamp in a chain is not a committed change: it is another running transaction's write, or this transaction's own. Only versions with commit timestamps above the read timestamp are replayed. Two lock rules from earlier stages apply here too: <code>GetUndoLog</code> and <code>GetUndoLogOptional</code> take <code>TxnMapMu.RLock</code>, so collect the conflict transactions under <code>TxnMapMu</code>, release it, and only then walk chains; and <code>WriteSets()</code> and <code>ScanPredicates()</code> return the live maps, which is fine for a transaction that has committed and for the one being verified, and nobody else. The <code>concurrency</code> and <code>bustub</code> tests commit transactions with empty write sets on a manager with no catalog, so return before touching <code>m.Catalog</code> when there is nothing to check.</p>
+
+  <p>The writeup names the cost: "This verification method is inefficient because (1) only one transaction can enter the verification process (2) we loop over all write sets of possible-conflicting transactions and evaluate scan predicates on that." It suggests parallel verification or precision locking for the leaderboard, which the stretch lesson takes up.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=risHwKeWbBM&amp;t=3308s">#19 Timestamp Ordering Concurrency Control, "Scan re-execution" (55:08)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/20-multiversioning.pdf#page=94">slides 29–30</a>: the solutions to the phantom problem, and re-executing the scan part of each query at commit.</p>
+
+  <h2>A test that must not abort</h2>
+
+  <p>A verification that aborts every serializable writer whenever anything committed after it began would pass most of these tests: they check that a conflict aborts. <code>TestTxnSerializableDisjoint</code> checks the other direction. Rows (1, 100) and (1, 102) are in the table; <code>b</code> is the primary key. txn1 runs <code>UPDATE maintable SET a = 5 WHERE b = 100</code> and txn2 <code>UPDATE maintable SET a = 6 WHERE b = 102</code>, both serializable, both begun before either commits. txn1 commits first. txn2 then reads its own row and commits, and must succeed: txn1 is a conflict transaction, but its change to row 100, before image (1, 100) and after image (5, 100), matches neither of txn2's predicates, <code>b = 102</code>. A snapshot-isolation reader that began before both still sees the original two rows.</p>
+
+  <p>The test has an unusual property: it already passes after stage 10, because without verification both writers commit anyway. It fails on the starter only because of its snapshot read. Its job is to keep passing once your verification exists: the other tests check that conflicts abort, and this one checks that a transaction without a conflict commits. If it breaks during stage 11, your verification is too coarse: it probably tests predicates against the wrong table or against rows that didn't change, or it aborts on any conflict transaction without testing predicates.</p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">A table holds keys 1 to 4. One transaction runs <code>UPDATE t SET a = a + 1</code>, where <code>a</code> is the primary key, and commits. How many tuples does the table heap hold?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That would be an in-place update, which leaves the index pointing at the wrong rows.">4, all updated in place.</li>
+      <li data-option="b" data-explain="Deleted slots are reused by inserts of their own key, so no new tuple is needed for keys 2 to 4.">8: four deletion markers and four new tuples.</li>
+      <li data-option="c" data-explain="All four rows are deleted; the inserts of keys 2, 3 and 4 reuse those keys' own deletion markers, and only key 5 needs a new tuple. Key 1's slot stays a deletion marker.">5: keys 2 to 4 reuse their slots, key 5 is new, key 1's slot is a deletion marker.</li>
+      <li data-option="d" data-explain="Key 1's slot is never removed: the heap never physically deletes, and the index entry for key 1 keeps pointing at it.">4: key 1's slot is removed and key 5 takes its place.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Why must a primary-key update delete every affected row before inserting any new one?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Inserting key 2 while the row with key 2 is still live hits a live tuple at key 2's RID, a unique violation, although the same statement is about to move that row to 3.">Otherwise inserting a new key can hit a row with that key that the statement hasn't deleted yet.</li>
+      <li data-option="b" data-explain="The order of the writes doesn't change how many undo logs a transaction keeps: one per tuple either way.">Otherwise each tuple would get two undo logs from the same transaction.</li>
+      <li data-option="c" data-explain="The update is a pipeline breaker already: it has read all child rows before writing any. The order is about the unique check.">Otherwise the child scan would see the new rows again (the Halloween problem).</li>
+      <li data-option="d" data-explain="Snapshot readers never see uncommitted writes, whatever order the statement writes in.">Otherwise other transactions could see the new rows before the old ones are gone.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question"><code>TestTxnSerializableBasic</code>: rows (1, 100), (1, 101), (0, 102), (0, 103), with <code>b</code> the key. txn2 runs <code>UPDATE ... SET a = 0 WHERE a = 1</code>, txn3 <code>UPDATE ... SET a = 1 WHERE a = 0</code>; txn2 commits first. What makes txn3's verification fail?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="txn2 wrote rows 100 and 101, txn3 rows 102 and 103: the write sets are disjoint, which is why snapshot isolation alone lets both commit.">Both transactions wrote the same rows.</li>
+      <li data-option="b" data-explain="txn3's scan predicate is a = 0. txn2 is a conflict transaction, and the after images of its updates, (0, 100) and (0, 101), match it.">The after images of txn2's updates match txn3's predicate a = 0.</li>
+      <li data-option="c" data-explain="The before images, (1, 100) and (1, 101), have a = 1, so they don't match a = 0.">The before images of txn2's updates match txn3's predicate a = 0.</li>
+      <li data-option="d" data-explain="Verification compares txn3's predicates with committed changes, not with its own writes; txn3's own versions carry its temporary timestamp and are skipped.">txn3's own updates match its predicate a = 0.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">A <code>verifyTxn</code> tests only the after image of each change, never the before image (and a delete, which has no after image, not at all). Which of these conflicts does it still detect?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The deleted row is the before image; with no after image, this verification sees nothing. TestTxnSerializablePhantoms/delete catches it.">A committed delete of a row that matches the predicate.</li>
+      <li data-option="b" data-explain="The old value matched and the new one doesn't, so only the before image matches. TestTxnSerializableReadOnly's reader-writer catches this.">A committed update that changes a matching row into a non-matching one.</li>
+      <li data-option="c" data-explain="An insert followed by a delete in one transaction is not a conflict at all; there is nothing to detect.">An insert followed by a delete of a matching row in one transaction.</li>
+      <li data-option="d" data-explain="An insert's new tuple is its after image, so checking after images finds it.">A committed insert of a row that matches the predicate.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Which verification would make <code>TestTxnSerializableDisjoint</code> fail?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Skipping read-only transactions is what the writeup asks for; the two writers in the test aren't read-only, and the snapshot reader isn't serializable.">One that skips read-only transactions.</li>
+      <li data-option="b" data-explain="txn1 commits first, and nothing committed after its read timestamp, so it passes any verification; the test then needs txn2 to commit too.">One that verifies txn1 before txn2.</li>
+      <li data-option="c" data-explain="txn1 committed after txn2's read timestamp and wrote the same table, so this check aborts txn2, although txn1's change to row 100 matches neither of txn2's predicates (b = 102).">One that aborts a writer whenever a conflict transaction wrote to a table it scanned.</li>
+      <li data-option="d" data-explain="That is the correct test: (1, 100) and (5, 100) don't satisfy b = 102, so txn2 commits.">One that tests the before and after images of row 100 against txn2's predicates.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Build it: primary-key updates (stage P4.8a)</h2>
+
+  <p>You edit <code>execution/update_executor.go</code>. Run commands from <code>go_db_internals/intro_to_db</code>. The rules:</p>
+  <ul>
+    <li>Compute every target tuple first, as you already do (the update is a pipeline breaker).</li>
+    <li>If any row's primary key differs from its target's, delete every affected row, as the delete executor does, and then insert every target, as the insert executor does, including the unique check and slot reuse. Otherwise update in place as in stage 9.</li>
+    <li>Any conflict or violation along the way taints the transaction and fails the statement. The count row is the number of child rows.</li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u8-08-pk-changes">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u8-08-pk-changes-cb">
+        <label for="u8-08-pk-changes-cb">Detect whether the statement changes the primary key of any row it updates.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>You have each row's old tuple and its target. How do you get the primary-key part of each, for a composite key too? Does <code>SET col2 = col2 + 10</code> on a table keyed by <code>col1</code> ever need this path?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Find the index with <code>IsPrimaryKey</code> among the table's indexes. For each pair, build both keys with <code>KeyFromTuple</code> and compare them by content. One difference is enough to switch the whole statement to delete-then-insert. A table without a primary key never switches.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>oldKey := olds[i].KeyFromTuple(schema, pk.KeySchema, pk.Index.KeyAttrs())
+newKey := targets[i].KeyFromTuple(schema, pk.KeySchema, pk.Index.KeyAttrs())
+if !table.IsTupleContentEqual(oldKey, newKey) {</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u8-08-delete-insert">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u8-08-delete-insert-cb">
+        <label for="u8-08-delete-insert-cb">On a key change, delete every affected row first, then insert every target through the insert executor's per-tuple code.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which code already deletes one row with an undo log, a conflict check and an atomic write? Which code already inserts one tuple with the unique check and slot reuse? How can the update executor call the insert executor's helper without a child executor of its own? What happens to secondary-index entries of the deleted rows?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Loop over the RIDs and delete each one with the shared write function from stage 9, doing Project 3's upkeep for any non-primary index. Then loop over the targets and call the per-tuple insert helper you wrote in stage 8; it lives in package <code>execution</code>, so the update executor can build a small <code>InsertExecutor</code> value with the table info and indexes it already has, or you can make the helper a plain function. Return the first error unchanged. Emit the count row on both paths.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>for _, rid := range oldRIDs { // all deletes first ...
+	if err := deleteRow(rid); err != nil {
+		return false, err
+	}
+}
+for _, t := range targets { // ... then all inserts</code></pre></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage P4.8a</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestTxnPKUpdate' -timeout 300s ./...</code></pre>
+    <p>It runs five tests: BusTub's <code>TestTxnPKUpdateBasic</code> (<code>UpdatePrimaryKeyTest</code>: <code>col1 = col1 + 1</code>, then <code>col1 = col1 - 2</code>, checked by sequential and index scans), and the extras <code>TestTxnPKUpdateReverify</code> (an older snapshot still sees keys 1 to 4), <code>TestTxnPKUpdateSwap</code> (<code>col1 = 5 - col1</code>), <code>TestTxnPKUpdateConflict</code> (while A moves key 1 to 11, B's insert of 11 and B's update of row 1 are tainted) and <code>TestTxnPKUpdateAbort</code> (aborting a key move brings the old keys back). Success prints <code>ok  	intro_to_db/txntest</code>, in about a second; the other packages print <code>ok</code> with <code>[no tests to run]</code> or <code>[no test files]</code>.</p>
+    <p>An in-place key update fails four tests on an index lookup, for example <code>TestTxnPKUpdateBasic</code> with <code>ERROR: expect col1 = 2 to have 1 row, found 0 rows (txn2, read ts 4): &lt;empty table&gt;</code>. <code>TestTxnPKUpdateConflict</code> fails with <code>sql "INSERT INTO maintable VALUES (11, 5)" in txn_b1 should not execute successfully: there should be a write-write conflict</code>: A's in-place update never created an index entry for 11, so B's insert of 11 found nothing in the way. Then rerun Project 3's tests:</p>
+<pre><code>go test -race -count=1 ./...</code></pre>
+    <p>Every package must print <code>ok</code> except <code>intro_to_db/txntest</code>, which still fails the tests of stage 11.</p>
+  </div>
+
+  <h2>Build it: serializable verification (stage P4.8b)</h2>
+
+  <p>You edit <code>execution/seq_scan_executor.go</code>, <code>execution/index_scan_executor.go</code> and <code>concurrency/transaction_manager.go</code> (<code>verifyTxn</code>). The rules:</p>
+  <ul>
+    <li>A scan run by a SERIALIZABLE transaction records its filter as a scan predicate on its table, or a predicate that is always true when it has no filter.</li>
+    <li>At commit, a serializable transaction with writes fails verification if a change committed after its read timestamp touches a row one of its predicates selects: the new tuple of an insert, the old tuple of a delete, either image of an update. An insert and a delete of one tuple by one transaction are no change.</li>
+    <li>Read-only transactions, and transactions with nothing recorded, pass.</li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u8-08-predicates">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u8-08-predicates-cb">
+        <label for="u8-08-predicates-cb">Make both scan executors record a scan predicate for serializable transactions when they start.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Where does a scan know its table and its filter, and is that method called once per scan? An <code>UPDATE ... WHERE b = 100</code> also reads through a scan: does its predicate need recording? What does a scan without a filter read?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>In each executor's <code>Init</code>, after finding the table, check the context's transaction: if its <code>IsolationLevel()</code> is <code>concurrency.Serializable</code>, append the plan's <code>FilterPredicate</code> for the table's OID with <code>AppendScanPredicate</code>. A nil filter becomes a constant TRUE expression. Put this in one helper that both executors call.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>if pred == nil {
+	pred = expressions.NewConstantValueExpression(types.NewBooleanValue(true))
+}
+txn.AppendScanPredicate(oid, pred)</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u8-08-conflicts">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u8-08-conflicts-cb">
+        <label for="u8-08-conflicts-cb">In verifyTxn, skip read-only transactions, collect the conflict transactions, and gather the RIDs they wrote in the tables this transaction scanned.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which transactions can have changed what this one read: those still running, those that committed before it began, or those that committed after its read timestamp? Which lock protects <code>TxnMap</code>, and which later calls in this function take that lock again? Does a write to a table this transaction never scanned matter?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Return true at once if the write set or the predicate map is empty. Under <code>TxnMapMu.RLock</code>, copy out the transactions whose state is committed and whose commit timestamp is above <code>txn.ReadTs()</code>, then release the lock. Their write sets can no longer change, so read them afterwards: build a set of RIDs per table OID, keeping only tables that have predicates. A RID written by several conflict transactions needs to be checked once, because the next step replays its whole chain.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>if other.TransactionState() == TxnCommitted &amp;&amp; other.CommitTs() &gt; txn.ReadTs() {
+	conflicts = append(conflicts, other)
+}</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u8-08-replay">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u8-08-replay-cb">
+        <label for="u8-08-replay-cb">For each gathered RID, replay its version chain from the newest version back to the one at the read timestamp, and fail if any committed change has an image that matches one of the table's predicates.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Each step of the chain is a pair of versions: the newer one and the one before it. Which of the two is the before image and which the after image, and what is each for an insert and for a delete? When do you stop walking? Which versions carry a temporary timestamp, and why aren't they committed history? What if a log's transaction was garbage collected?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Read the base with <code>GetTupleAndUndoLink</code>. While the current version's timestamp is above the read timestamp, build the next older version: with a link, fetch the log (<code>GetUndoLogOptional</code>), add it to the list of logs applied so far, and call <code>ReconstructTuple</code> on the base with that list; without a link, the older version is "did not exist". If the current version's timestamp is a commit timestamp (below <code>common.TxnStartID</code>), test whichever of the two versions exist against every predicate; a deletion has no image to test, so an insert-then-delete tests nothing. Step back and repeat. Evaluate a predicate on a tuple with the table's schema and treat NULL as false.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>v := pred.Evaluate(&amp;tuple, info.Schema)
+if !v.IsNull() &amp;&amp; v.AsBool() {
+	return false // a committed change touched a row we scanned
+}</code></pre></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage P4.8b</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestTxnSerializable' -timeout 300s ./...</code></pre>
+    <p>It runs seven tests: BusTub's <code>TestTxnSerializableBasic</code> (<code>SerializableTest</code>, the write skew above with four rows) and <code>TestTxnSerializableConcurrent</code> (<code>ConcurrentSerializableTest</code>: the same on 2000 rows, 10 trials, with the two commits racing on two goroutines, and exactly one may succeed), and the extras <code>TestTxnSerializableReadOnly</code>, <code>TestTxnSerializableDisjoint</code>, <code>TestTxnSerializablePhantoms</code> (subtests <code>insert</code>, <code>delete</code>, <code>insert_then_delete</code>), <code>TestTxnSerializableRevertedUpdate</code> and <code>TestTxnSerializableAbortedState</code>. Success prints <code>ok  	intro_to_db/txntest</code>, in about 5 seconds on the reference; the other packages print <code>ok</code> with <code>[no tests to run]</code> or <code>[no test files]</code>. Add <code>-short</code> after the regex for 3 trials of the concurrent test while you work.</p>
+    <p>Without verification, every test but the disjoint one fails: <code>ERROR: expect txn fail to commit, but committed: var=txn3 id=6 commit_ts=6</code>, and for the concurrent test <code>trial 1: 2 of the two conflicting serializable transactions committed, want exactly 1 (txn2 committed: true, txn3 committed: true)</code>. A verification that tests only after images fails <code>TestTxnSerializableReadOnly</code> (<code>ERROR: expect txn fail to commit, but committed: var=txn_reader_writer id=6 commit_ts=7</code>) and <code>TestTxnSerializablePhantoms/delete</code>. One way to hang the concurrent test is to hold <code>TxnMapMu</code> while the chain walk calls <code>GetUndoLogOptional</code>, which takes it again.</p>
+  </div>
+
+  <h2>The whole suite</h2>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: Projects 1 to 4</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run every package and every stage of every project, without the test cache:</p>
+<pre><code>go test -race -count=1 ./...</code></pre>
+    <p>This is Project 1's buffer pool, Project 2's B+tree, Project 3's executors and optimizer rules, with the two Project 3 unit tests that now accept MVCC storage, and all 61 Project 4 tests. On the reference solution, on a 4-core machine, it took about 26 seconds and printed:</p>
+<pre><code>ok  	intro_to_db/binder	1.263s
+ok  	intro_to_db/btree	25.684s
+ok  	intro_to_db/bufferpool	9.151s
+ok  	intro_to_db/bustub	1.138s
+ok  	intro_to_db/catalog	1.065s
+?   	intro_to_db/cmd/btree_printer	[no test files]
+ok  	intro_to_db/cmd/shell	1.038s
+ok  	intro_to_db/common	1.073s
+ok  	intro_to_db/concurrency	1.017s
+ok  	intro_to_db/execution	4.263s
+ok  	intro_to_db/execution/expressions	1.012s
+ok  	intro_to_db/execution/plans	1.016s
+ok  	intro_to_db/optimizer	1.038s
+ok  	intro_to_db/planner	1.313s
+ok  	intro_to_db/sqllogictest	5.795s
+ok  	intro_to_db/storage/disk	1.085s
+ok  	intro_to_db/storage/index	1.108s
+ok  	intro_to_db/storage/table	1.184s
+ok  	intro_to_db/txntest	12.718s
+ok  	intro_to_db/types	1.021s</code></pre>
+    <p>Run it a few times: the concurrent tests of stages 8, 9 and 11 can pass once by luck. If a Project 3 test fails now, the change that broke it is in one of the executors you edited in this unit; <code>-run</code> with that test's name and <code>-v</code> shows its plan and rows. When the whole suite passes repeatedly, Project 4 is complete: commit your branch. The optional stretch lesson that follows measures your MVCC under BusTub's T-NET benchmark.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why a key change has to delete every row before inserting any, why verification needs both images of an update, why an insert followed by a delete in one transaction is no change, or why <code>TestTxnSerializableDisjoint</code> passes before you write any verification. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: the CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/project4/">Project #4 writeup</a> (Task #4: 4.3 Primary Key Updates, 4.4 Serializable Verification); BusTub <code>src/concurrency/transaction_manager.cpp</code> (<code>VerifyTxn</code>, <code>Commit</code>), <code>src/execution/update_executor.cpp</code>, <code>src/execution/seq_scan_executor.cpp</code>, <code>src/execution/index_scan_executor.cpp</code>, <code>test/txn/txn_index_test.cpp</code> (<code>UpdatePrimaryKeyTest</code>) and <code>test/txn/txn_abort_serializable_test.cpp</code> (<code>TxnSerializableTest</code>) at commit d49b823; Lecture #19 slides 23 and 29–30; Lecture #20 slide 9; this course's <code>concurrency/transaction_manager.go</code>, <code>concurrency/transaction.go</code>, <code>txntest/txn_index_test.go</code>, <code>txntest/txn_serializable_test.go</code> and <code>txntest/txn_extra_test.go</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u8-07-p4-primary-key-index.html">← P4.7 Primary-Key Index</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u8-09-p4-stretch-tnet.html">Next: P4 Stretch: T-NET Benchmark →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

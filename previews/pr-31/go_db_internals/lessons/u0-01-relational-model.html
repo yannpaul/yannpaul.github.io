@@ -1,0 +1,331 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 0 · Lesson 1 · The Relational Model &amp; Relational Algebra</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 0 · Lesson 1</p>
+  <h1>The Relational Model &amp; Relational Algebra</h1>
+  <p class="subtitle">Explain what a DBMS adds over flat files, describe data with relations, keys and constraints, and evaluate the seven relational-algebra operators by hand.</p>
+
+  <p class="lede">The database you'll build in Go stores and queries <em>relations</em>, the data model that CMU's Lecture #01 introduces. Keeping data in plain files breaks down as soon as several programs share it or the machine crashes. Ted Codd's relational model fixes that by separating what the data means from how it's stored, and its relational algebra supplies the primitives a DBMS uses to process queries. You'll meet those operators again in Units 5–6, when you build the query executors.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">In this course's Go port, what replaces a C++ RAII page guard, whose destructor releases the page's pin when the guard goes out of scope?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is the mapping for std::promise&lt;bool&gt; and std::future, a one-shot signal that an I/O request finished.">A capacity-1 <code>chan bool</code> that signals when the guard is released.</li>
+      <li data-option="b" data-explain="That is how std::optional&lt;T&gt; translates: a value plus a flag saying whether it is present.">A <code>(T, bool)</code> pair returned by the buffer pool.</li>
+      <li data-option="c" data-explain="Latches (std::mutex, std::shared_mutex) become sync.Mutex and sync.RWMutex. They protect in-memory data structures; they don't release a pin when a scope ends.">A <code>sync.RWMutex</code> embedded in the guard.</li>
+      <li data-option="d" data-explain="Go has no destructors, so the release becomes an explicit Drop() method. Calling it with defer runs it however the function returns.">An explicit <code>Drop()</code> method, usually called as <code>defer guard.Drop()</code>.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Right after the checkout, you run <code>go test ./...</code> in <code>intro_to_db</code>. Which output means your setup is correct?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The starter code compiles, but every bufferpool method you'll implement is still a stub, so its tests fail.">Every package prints <code>ok</code>, because the starter code compiles.</li>
+      <li data-option="b" data-explain="The stubs return zero values or panic, so the bufferpool tests fail at once, while the pre-built packages pass. That FAIL is expected.">The pre-built packages print <code>ok</code> and <code>intro_to_db/bufferpool</code> prints <code>FAIL</code>.</li>
+      <li data-option="c" data-explain="The stubs have bodies that return zero values or panic, which is why go build ./... succeeds.">The build fails in <code>bufferpool</code>, because its methods have no bodies yet.</li>
+      <li data-option="d" data-explain="The stubs make the tests fail immediately rather than hang. The -race flag adds the race detector; it doesn't unblock anything.">The run hangs in <code>bufferpool</code> until you add <code>-race</code>.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>What goes wrong with flat files</h2>
+
+  <p>A <strong>database</strong> is an organized collection of inter-related data that models some aspect of the real world. The lecture's running example is a digital music store that tracks artists and the albums they released.</p>
+
+  <p>The simplest design is a <em>flat file</em>: one CSV file per entity, which the application parses itself. To find the year GZA went solo, the application reads every line of the artist file:</p>
+
+<pre><code>Artist(name, year, country)             for line in file.readlines():
+"Wu-Tang Clan",1992,"USA"                   record = parse(line)
+"Notorious BIG",1992,"USA"                  if record[0] == "GZA":
+"GZA",1990,"USA"                                print(int(record[1]))</code></pre>
+
+  <p>That works for one program and three rows. The lecture lists the questions it can't answer:</p>
+  <ul>
+    <li><strong>Data integrity.</strong> Is the artist's name spelled the same in every album entry? What stops someone from overwriting an album's year with an invalid string? What if an album has several artists? What happens to the albums when you delete their artist?</li>
+    <li><strong>Implementation.</strong> How do you find one record without reading the whole file? What if a second application, perhaps on another machine, needs the same data? What if two threads write the file at the same time?</li>
+    <li><strong>Durability.</strong> What if the machine crashes in the middle of an update? How do you replicate the data on several machines for high availability?</li>
+  </ul>
+
+  <p>Answering these questions is the job of a database system, and this course builds several of the answers: indexes for finding records (Units 3–4), concurrency control for simultaneous writers (Units 7–8), and logging and recovery for crashes (Unit 9).</p>
+
+  <h2>DBMS, data model, schema</h2>
+
+  <p>A <strong>database management system (DBMS)</strong> is software that lets applications store and analyze information in a database. A general-purpose DBMS supports the definition, creation, querying, update and administration of databases according to some data model. The lecture notes warn that people often confuse the two words: MySQL, Oracle, MongoDB and Snowflake are DBMSs, and each manages databases.</p>
+
+  <p>A <strong>data model</strong> is a collection of concepts for describing the data in a database: rules that define the types of things that could exist and how they relate. A <strong>schema</strong> describes one particular collection of data using a given data model. Without one, as the slide puts it, "you have random bits with no meaning." In Go terms, the data model is like the type system, which fixes what a struct can be, and a schema is like the struct types that one program declares.</p>
+
+  <p>The relational model is the data model of most DBMSs and of this course. The others on the lecture's list are key/value, graph, document, wide-column and array/vector models, plus legacy ones such as the hierarchical and network models.</p>
+
+  <h2>Codd's relational model</h2>
+
+  <p>In the late 1960s, DBMSs such as IDS, IMS and CODASYL made developers write queries as procedural code. The developer chose the access paths and the execution order based on what the database held at the time. When the data changed, the developer had to rewrite the query code. Slide 25 shows a CODASYL-style procedure that navigates record by record (<code>FIND ALBUM</code>, <code>FIND FIRST APPEARS WITHIN</code>, <code>REPEAT</code> … <code>FIND OWNER</code>) to list the artists on one mixtape. The slide's next build expresses the same request as a short SQL join.</p>
+
+  <p>Ted Codd at IBM Research noticed that people rewrote their DBMSs every time they wanted to change the physical layer. In 1969 he proposed the <strong>relational model</strong>, which defines three concepts:</p>
+  <ul>
+    <li><strong>Structure:</strong> relations and their contents, defined independently of their physical representation. Each relation has attributes, and each attribute has a domain of values.</li>
+    <li><strong>Integrity:</strong> the database's contents satisfy constraints. For example, a person's age can't be negative.</li>
+    <li><strong>Manipulation:</strong> a declarative API for accessing and modifying the contents through relations (sets). You specify the result you want, and the DBMS chooses how to compute it.</li>
+  </ul>
+
+  <p>The relational model provides <strong>data independence</strong>: it isolates applications from the low-level data representation. The DBMS lays out the data to suit its environment, the contents and the workload, and can re-optimize when any of those change, without breaking the applications.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L01-data-independence-p44.png" alt="Layer diagram. Several applications sit on external schemas (views, in SQL), which sit on one logical schema (schema and constraints, in SQL), which sits on the physical schema (pages, files, extents), which sits on database storage. A red arrow labelled Logical Data Independence points between the external and logical schemas; one labelled Physical Data Independence points between the logical and physical schemas." loading="lazy">
+    <figcaption>Notice where the two kinds of independence sit. Physical data independence lets the DBMS change pages, files and extents without touching the logical schema that queries use, and logical data independence lets the logical schema change underneath the views that applications use (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/01-relationalmodel.pdf#page=44">Lecture #01, slide 28</a>).</figcaption>
+  </figure>
+
+  <p>This course works in the bottom two boxes. Units 1–4 build the physical machinery (pages, files, the buffer pool and indexes), and physical data independence means that none of it changes the answer a query returns.</p>
+
+  <h2>Relations, tuples and NULL</h2>
+
+  <ul>
+    <li>A <strong>relation</strong> is an unordered set of tuples that share the same attributes and represent entities. Because it is unordered, the DBMS can store its tuples in any order it likes. The course uses <em>relation</em> and <em>table</em> interchangeably.</li>
+    <li>An <strong>attribute</strong> is a named component of a relation (a column), and its <strong>domain</strong> is the set of values it may take.</li>
+    <li>A <strong>tuple</strong> is a set of attribute values (a row). Values are normally atomic, or scalar; the notes add that modern systems also allow lists and nested structures.</li>
+    <li><strong>NULL</strong> is a special value that belongs to every domain, if the schema allows it. It means the attribute is undefined for that tuple.</li>
+    <li>An <strong>n-ary relation</strong> has n attributes; in table terms, n columns. <code>Artist(name, year, country)</code> is 3-ary.</li>
+  </ul>
+
+  <h2>Keys and constraints</h2>
+
+  <p>A relation's <strong>primary key</strong> uniquely identifies a single tuple. Some DBMSs create an internal primary key if a table doesn't define one. A DBMS can generate unique keys automatically through an <strong>identity column</strong>: <code>IDENTITY</code> in the SQL standard, <code>SEQUENCE</code> in PostgreSQL and Oracle, <code>AUTO_INCREMENT</code> in MySQL. Slide 30 gives <code>Artist</code> a synthetic <code>id</code> column with the values 101, 102 and 103.</p>
+
+  <p>A <strong>foreign key</strong> says that an attribute in one relation maps to a tuple in another. Usually its value equals the other relation's primary key. A first attempt stores the artist's id in an <code>artist</code> column of <code>Album</code>. That works until "St.Ides Mix Tape", which has three artists and only one cell to hold them. The fix is a cross-reference relation with one tuple per (artist, album) pair:</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L01-foreign-keys-p51.png" alt="Three tables. ArtistAlbum(artist_id, album_id) holds the rows (101, 11), (101, 22), (103, 22) and (102, 22). An arrow from artist_id points to Artist(id, name, year, country), with rows 101 Wu-Tang Clan, 102 Notorious BIG and 103 GZA. An arrow from album_id points to Album(id, name, year), with rows 11 Enter the Wu-Tang 1993, 22 St.Ides Mix Tape 1994 and 33 Liquid Swords 1995." loading="lazy">
+    <figcaption>Each ArtistAlbum column is a foreign key to another relation's primary key. Album 22 appears in three rows, once per artist, and Album no longer has an artist column (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/01-relationalmodel.pdf#page=51">Lecture #01, slide 31</a>).</figcaption>
+  </figure>
+
+  <p>A <strong>constraint</strong> is a user-defined condition that must hold for every instance of the database. It can check a single tuple or span relations, and the DBMS refuses any modification that would violate it. Unique-key and referential (foreign-key) constraints are the most common. SQL-92 also has global assertions (<code>CREATE ASSERTION</code>), but they are rarely used because they are too slow.</p>
+
+  <p>Here is the music-store schema in SQL DDL (data definition language), with the rows from the figure. <code>Artist</code> is slide 32's table, with its <code>NOT NULL</code> and <code>CHECK</code> constraints and the <code>id</code> key from slide 30; the other two tables follow slide 31. It runs unchanged in DuckDB, which you'll install in the next lesson:</p>
+
+<pre><code>CREATE TABLE Artist (
+  id      INT PRIMARY KEY,
+  name    VARCHAR NOT NULL,
+  year    INT,
+  country CHAR(60),
+  CHECK (year &gt; 1900)
+);
+CREATE TABLE Album (
+  id   INT PRIMARY KEY,
+  name VARCHAR NOT NULL,
+  year INT
+);
+CREATE TABLE ArtistAlbum (
+  artist_id INT REFERENCES Artist (id),
+  album_id  INT REFERENCES Album (id),
+  PRIMARY KEY (artist_id, album_id)
+);
+INSERT INTO Artist VALUES (101, 'Wu-Tang Clan', 1992, 'USA'),
+  (102, 'Notorious BIG', 1992, 'USA'), (103, 'GZA', 1990, 'USA');
+INSERT INTO Album VALUES (11, 'Enter the Wu-Tang', 1993),
+  (22, 'St.Ides Mix Tape', 1994), (33, 'Liquid Swords', 1995);
+INSERT INTO ArtistAlbum VALUES (101, 11), (101, 22), (103, 22), (102, 22);</code></pre>
+
+  <p>With those rows loaded, each of these statements is rejected. The messages are DuckDB 1.5's:</p>
+
+  <table>
+    <tr><th>Statement</th><th>Constraint it violates</th><th>DuckDB says</th></tr>
+    <tr><td><code>INSERT INTO Artist VALUES (105, 'Old Timer', 1850, 'USA');</code></td><td><code>CHECK (year &gt; 1900)</code></td><td><code>CHECK constraint failed on table Artist</code> …</td></tr>
+    <tr><td><code>INSERT INTO Artist VALUES (101, 'Dup', 1999, 'USA');</code></td><td>primary key</td><td><code>Duplicate key "id: 101" violates primary key constraint.</code></td></tr>
+    <tr><td><code>INSERT INTO ArtistAlbum VALUES (104, 11);</code></td><td>foreign key</td><td><code>Violates foreign key constraint because key "id: 104" does not exist in the referenced table</code></td></tr>
+    <tr><td><code>DELETE FROM Artist WHERE id = 103;</code></td><td>foreign key</td><td><code>… key "artist_id: 103" is still referenced by a foreign key in a different table.</code> …</td></tr>
+  </table>
+
+  <p>The last row answers one of the flat-file questions. With this schema, you can't delete an artist who still has albums, because the DBMS checks the reference for you.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=7NPIENPr-zk&amp;t=2727s">#01 Relational Model &amp; Algebra, "Data independence" (45:27)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/01-relationalmodel.pdf#page=43">slides 28–32</a>: data independence, relations and NULL, then primary keys, foreign keys and constraints on the music-store example.</p>
+
+  <h2>Procedural vs. declarative languages</h2>
+
+  <p>A <strong>data manipulation language (DML)</strong> is the API a DBMS exposes for storing and retrieving information. There are two styles:</p>
+  <ul>
+    <li><strong>Procedural:</strong> the query specifies the high-level strategy for finding the result, based on sets or bags. Slide 33 labels this style <em>relational algebra</em>. The notes' example is a loop that scans every record to count them.</li>
+    <li><strong>Non-procedural (declarative):</strong> the query says only what data is wanted, not how to find it. The slide labels this style <em>relational calculus</em>. The notes' example is <code>SELECT COUNT(*) FROM artist</code>.</li>
+  </ul>
+
+  <h2>Relational algebra</h2>
+
+  <p><strong>Relational algebra</strong> is a set of operations that retrieve and manipulate the tuples of relations. It is based on set algebra, so relations are unordered and hold no duplicates. Each operator takes one or more relations as input and outputs a new relation, so operators chain: the output of one is a valid input to the next, the way <code>f(g(x))</code> works when <code>f</code> and <code>g</code> take and return the same type. Seven operators form the core:</p>
+
+  <table>
+    <tr><th>Operator</th><th>Notation</th><th>Output</th><th>SQL spelling</th></tr>
+    <tr><td>Select</td><td>σ<sub>p</sub>(R)</td><td>the tuples of R that satisfy predicate p</td><td><code>WHERE p</code></td></tr>
+    <tr><td>Projection</td><td>Π<sub>A1,…,An</sub>(R)</td><td>only the listed (possibly derived) attributes</td><td>the <code>SELECT</code> list</td></tr>
+    <tr><td>Union</td><td>R ∪ S</td><td>tuples in either input or both, duplicates removed</td><td><code>UNION</code></td></tr>
+    <tr><td>Intersection</td><td>R ∩ S</td><td>tuples in both inputs</td><td><code>INTERSECT</code></td></tr>
+    <tr><td>Difference</td><td>R − S</td><td>tuples in R but not in S</td><td><code>EXCEPT</code></td></tr>
+    <tr><td>Product</td><td>R × S</td><td>every pairing of an R tuple with an S tuple</td><td><code>CROSS JOIN</code>, or <code>FROM R, S</code></td></tr>
+    <tr><td>Join</td><td>R ⋈ S</td><td>pairs that agree on the shared attributes</td><td><code>NATURAL JOIN</code>, <code>JOIN … USING</code>, <code>JOIN … ON</code></td></tr>
+  </table>
+
+  <h3>Select and projection</h3>
+
+  <p><strong>Select</strong> (σ) keeps the subset of tuples that satisfy a predicate. The predicate acts as a filter, and you can combine predicates with conjunctions (∧, and) and disjunctions (∨, or).</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L01-algebra-select-p56.png" alt="Relation R(a_id, b_id) with tuples (a1, 101), (a2, 102), (a2, 103) and (a3, 104). Sigma of a_id equals a2 applied to R gives (a2, 102) and (a2, 103). Sigma of a_id equals a2 and b_id greater than 102 gives only (a2, 103). Below is the SQL: SELECT * FROM R WHERE a_id = 'a2' AND b_id > 102." loading="lazy">
+    <figcaption>Adding a second predicate with ∧ narrows the result from two tuples to one, and the SQL equivalent of σ is the <code>WHERE</code> clause (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/01-relationalmodel.pdf#page=56">Lecture #01, slide 35</a>).</figcaption>
+  </figure>
+
+  <div class="callout bad">
+    <p class="callout-label">Pitfall</p>
+    <p>σ is called "select", but it is SQL's <code>WHERE</code> clause. SQL's <code>SELECT</code> list is the next operator, projection.</p>
+  </div>
+
+  <p><strong>Projection</strong> (Π) outputs tuples that contain only the specified attributes. It can reorder attributes, remove them, or compute derived attributes from them. Because operators chain, you can project the output of a select:</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L01-algebra-projection-p58.png" alt="Relation R(a_id, b_id) with tuples (a1, 101), (a2, 102), (a2, 103) and (a3, 104). Pi of b_id minus 100 and a_id, applied to sigma of a_id equals a2 of R, gives two tuples: (2, a2) and (3, a2). The SQL is SELECT b_id-100, a_id FROM R WHERE a_id = 'a2'." loading="lazy">
+    <figcaption>The projection derives a new attribute (b_id − 100) and puts it first; the inner σ runs before the outer Π shapes its output (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/01-relationalmodel.pdf#page=58">Lecture #01, slide 36</a>).</figcaption>
+  </figure>
+
+  <h3>Union, intersection and difference</h3>
+
+  <p>These three are the classic set operators. Both inputs must have the same attributes, matched by name. Slides 37–39 use two small relations:</p>
+
+  <table>
+    <tr><th>Relation</th><th>Tuples</th></tr>
+    <tr><td>R(a_id, b_id)</td><td>(a1, 101), (a2, 102), (a3, 103)</td></tr>
+    <tr><td>S(a_id, b_id)</td><td>(a3, 103), (a4, 104), (a5, 105)</td></tr>
+    <tr><td>R ∪ S</td><td>(a1, 101), (a2, 102), (a3, 103), (a4, 104), (a5, 105): five tuples, because (a3, 103) appears once</td></tr>
+    <tr><td>R ∩ S</td><td>(a3, 103)</td></tr>
+    <tr><td>R − S</td><td>(a1, 101), (a2, 102)</td></tr>
+  </table>
+
+  <p>Difference is not commutative: S − R is a different relation. Union eliminates duplicates because the algebra works on sets. SQL also has <code>UNION ALL</code>, which keeps duplicates and returns six rows here. The next lesson explains why SQL needs both.</p>
+
+  <h3>Product and join</h3>
+
+  <p><strong>Product</strong> (×), also called the Cartesian product, outputs every combination of one tuple from each input. The inputs don't need the same attributes, and the output keeps all of them:</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L01-algebra-product-p63.png" alt="R(a_id, b_id) with tuples a1 101, a2 102, a3 103, and S(a_id, b_id) with tuples a3 103, a4 104, a5 105. Their product R × S is a nine-row table with columns R.a_id, R.b_id, S.a_id, S.b_id, pairing each R tuple with each S tuple. The SQL is SELECT * FROM R CROSS JOIN S, or SELECT * FROM R, S." loading="lazy">
+    <figcaption>Three tuples times three tuples gives nine, and both inputs' attributes survive side by side, prefixed with the relation name (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/01-relationalmodel.pdf#page=63">Lecture #01, slide 40</a>).</figcaption>
+  </figure>
+
+  <p>A <strong>join</strong> (⋈) outputs the combinations of one tuple from each input that have common values for one or more attributes. The slide's join is the <strong>natural join</strong>: it matches on every attribute the two inputs share, and lists each shared attribute once. Here S gains a third attribute, <code>val</code>:</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L01-algebra-join-p66.png" alt="R(a_id, b_id) with tuples a1 101, a2 102, a3 103, and S(a_id, b_id, val) with tuples a3 103 XXX, a4 104 YYY, a5 105 ZZZ. R natural-join S is a single tuple: a_id a3, b_id 103, val XXX. Three SQL forms follow: SELECT * FROM R NATURAL JOIN S; SELECT * FROM R JOIN S USING (a_id, b_id); and SELECT * FROM R JOIN S ON R.a_id = S.a_id AND R.b_id = S.b_id." loading="lazy">
+    <figcaption>Only (a3, 103) appears in both inputs, so the join has one tuple, with the shared attributes listed once; all three SQL spellings express this join (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/01-relationalmodel.pdf#page=66">Lecture #01, slide 41</a>).</figcaption>
+  </figure>
+
+  <p>The three spellings find the same match but differ in their output columns. With <code>SELECT *</code>, <code>NATURAL JOIN</code> and <code>USING</code> merge the join columns into one copy each and return 3 columns. <code>ON</code> keeps both copies (<code>a_id, b_id, a_id, b_id, val</code>) and returns 5. That matters whenever output columns are compared by position, as CMU's homework grader does.</p>
+
+  <div class="callout bad">
+    <p class="callout-label">Pitfall</p>
+    <p><code>FROM R, S</code> on its own is the product R × S, not a join. It becomes a join only when a <code>WHERE</code> predicate such as <code>R.a_id = S.a_id</code> filters the pairs, so a forgotten predicate silently multiplies the row count.</p>
+  </div>
+
+  <p>The lecture also lists six extra operators without defining them: rename (ρ), assignment (R ← S), duplicate elimination (δ), aggregation (γ), sorting (τ) and division (R ÷ S). Three of them come back in the next lesson as SQL features: duplicate elimination as <code>DISTINCT</code>, aggregation as <code>GROUP BY</code> with aggregate functions, and sorting as <code>ORDER BY</code>.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=7NPIENPr-zk&amp;t=3523s">#01 Relational Model &amp; Algebra, "Basic relational operators" (58:43)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/01-relationalmodel.pdf#page=55">slides 34–43</a>: the seven operators worked on R and S, the extra operators, and why the algebra fixes an evaluation order.</p>
+
+  <h2>Why SQL is declarative</h2>
+
+  <p>An algebra expression fixes the order of its high-level steps. Compare two expressions:</p>
+  <ul>
+    <li>σ<sub>b_id=102</sub>(R ⋈ S) joins R and S, then filters the result.</li>
+    <li>R ⋈ (σ<sub>b_id=102</sub>(S)) filters S first, then joins what's left with R.</li>
+  </ul>
+
+  <p>The two always produce the same answer. But suppose S has 1 billion tuples and only one has <code>b_id = 102</code>. Then the second expression joins R with a single tuple, and it is significantly faster. A better approach is to state the answer you want ("the joined tuples of R and S where S.b_id equals 102") and let the DBMS decide the steps. Choosing those steps is called <em>query optimization</em>, and it returns in Unit 5.</p>
+
+  <p>That is why SQL, a declarative language, is the de facto standard, though the relational model itself doesn't depend on any query language. The flat-file loop from the start of this lesson becomes one statement that says nothing about files, parsing or scan order:</p>
+
+<pre><code>SELECT year FROM artists WHERE name = 'GZA';</code></pre>
+
+  <h2>Other data models in brief</h2>
+
+  <ul>
+    <li><strong>Document model.</strong> A collection of record documents, each a hierarchy of named field/value pairs. A field's value can be a scalar, an array of values, or another document. Modern systems use JSON; older ones used XML or custom object formats. The goal is to avoid the <em>object-relational impedance mismatch</em> by tightly coupling the program's objects and the database. Slide 47 contrasts the Artist ⋈ ArtistAlbum ⋈ Album join with a single JSON document for GZA that embeds his albums. The notes warn that the model still runs into many of the flat-file problems above.</li>
+    <li><strong>Vector model.</strong> One-dimensional arrays used for nearest-neighbor search, exact or approximate, typically for semantic search over embeddings produced by machine-learning models. These systems rely on specialized indexes such as HNSW and IVFFlat. Slide 50 concludes that the vector model is not a substantial deviation that needs a new DBMS architecture: every major DBMS now has vector indexes, built in or through extensions such as pgvector.</li>
+  </ul>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">R(a_id, b_id) = {(a1, 101), (a2, 102), (a2, 103), (a3, 104)}. What is σ<sub>a_id='a2' ∨ b_id&gt;103</sub>(R)?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is σ a_id='a2' ∧ b_id&gt;102 (R) from slide 35, a conjunction. This predicate uses a disjunction (∨).">{(a2, 103)}</li>
+      <li data-option="b" data-explain="That applies only the first predicate. (a3, 104) also qualifies, because 104 &gt; 103.">{(a2, 102), (a2, 103)}</li>
+      <li data-option="c" data-explain="With ∨ a tuple survives if it satisfies at least one predicate: both a2 tuples, plus (a3, 104) because 104 &gt; 103.">{(a2, 102), (a2, 103), (a3, 104)}</li>
+      <li data-option="d" data-explain="(a1, 101) satisfies neither predicate, so it is filtered out.">{(a1, 101), (a2, 102), (a2, 103), (a3, 104)}</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">R(a_id, b_id) = {(a1, 101), (a2, 102), (a3, 103)} and S(a_id, b_id, val) = {(a3, 103, XXX), (a4, 104, YYY), (a5, 105, ZZZ)}. Which statement is accurate?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A product doesn't merge same-named attributes. Its output has R.a_id, R.b_id, S.a_id, S.b_id and S.val: five attributes.">R × S has 9 tuples with 3 attributes; R ⋈ S has 1 tuple with 3 attributes.</li>
+      <li data-option="b" data-explain="Six tuples would be R and S stacked on top of each other, not a product. And only one R tuple has a matching S tuple.">R × S has 6 tuples with 5 attributes; R ⋈ S has 3 tuples with 3 attributes.</li>
+      <li data-option="c" data-explain="A product applies no matching condition at all: it pairs every R tuple with every S tuple.">R × S and R ⋈ S both have 1 tuple, because both match on a_id and b_id.</li>
+      <li data-option="d" data-explain="The product pairs every tuple (3 × 3 = 9) and keeps every attribute (2 + 3 = 5). The natural join keeps only the pair that agrees on a_id and b_id, listing the shared attributes once: (a3, 103, XXX).">R × S has 9 tuples with 5 attributes; R ⋈ S has 1 tuple with 3 attributes.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">With the same R and S, you run slide 41's three SQL spellings of R ⋈ S in DuckDB, each with <code>SELECT *</code>. Which statement is accurate?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="With ON, SELECT * lists both inputs' columns: a_id, b_id, a_id, b_id, val.">All three return one row with exactly 3 columns: a_id, b_id, val.</li>
+      <li data-option="b" data-explain="NATURAL and USING merge the join columns into one copy each; ON keeps both copies. DuckDB returns 3, 3 and 5 columns, one row each.">NATURAL JOIN and USING return one row with 3 columns; ON returns one row with 5.</li>
+      <li data-option="c" data-explain="This is a join, so only matching pairs are kept, and only (a3, 103) appears in both inputs.">The ON form returns 3 rows, because it also keeps R's unmatched tuples.</li>
+      <li data-option="d" data-explain="NATURAL JOIN matches on every attribute name the inputs share, here a_id and b_id, so it returns the single matching row.">NATURAL JOIN returns 9 rows, because without a USING list it behaves like a product.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Compare Q<sub>A</sub> = σ<sub>b_id=102</sub>(R ⋈ S) with Q<sub>B</sub> = R ⋈ (σ<sub>b_id=102</sub>(S)). Which statement matches the lecture?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="This is the notes' own example. The answers are identical, but filtering S first shrinks the join's input from a billion tuples to one.">They always give the same answer; with 1 billion S tuples, one of them with b_id = 102, Q<sub>B</sub> is far faster.</li>
+      <li data-option="b" data-explain="The notes state that the two expressions always produce the same answer. Only the amount of work differs.">They can give different answers when S holds many tuples with b_id = 102, so the order of σ and ⋈ matters.</li>
+      <li data-option="c" data-explain="Q_A joins every tuple of S before it filters, which is the expensive order in the notes' example.">Q<sub>A</sub> is always faster, because it runs the join once on the unfiltered data instead of filtering first.</li>
+      <li data-option="d" data-explain="Slide 43 says the opposite: relational algebra defines an ordering of the high-level steps. That is why SQL states only the result and lets the DBMS choose the steps.">Algebra expressions imply no order of evaluation, so a DBMS runs Q<sub>A</sub> and Q<sub>B</sub> with the same steps.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Slide 31's schema has Artist with ids {101, 102, 103}, Album with ids {11, 22, 33}, and ArtistAlbum(artist_id REFERENCES Artist(id), album_id REFERENCES Album(id)). Run alone against that state, which statement does the DBMS reject?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Both referenced keys exist. An artist may link to many albums and an album to many artists, which is why the cross-reference table exists.">INSERT INTO ArtistAlbum VALUES (103, 33);</li>
+      <li data-option="b" data-explain="This is a new album with an unused primary key, and Album has no foreign key to check.">INSERT INTO Album VALUES (44, 'New Album', 2000);</li>
+      <li data-option="c" data-explain="No Artist tuple has id 104, so the referential (foreign-key) constraint is violated. DuckDB reports that the key id: 104 does not exist in the referenced table.">INSERT INTO ArtistAlbum VALUES (104, 11);</li>
+      <li data-option="d" data-explain="This is a new artist with an unused primary key. Once it exists, ArtistAlbum rows that reference 104 become legal.">INSERT INTO Artist VALUES (104, 'New Artist', 2000, 'USA');</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example: why σ is SQL's <code>WHERE</code> rather than its <code>SELECT</code>, how a natural join differs from a product, or the difference between logical and physical data independence. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 Lecture #01, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/01-relationalmodel.pdf">slides</a> and <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/01-relationalmodel.pdf">notes</a>. Error messages and column counts are from DuckDB 1.5.6.</p>
+
+  <div class="lesson-nav">
+    <a href="./u0-00-setup.html">← Setup: Sparse Checkout, Go, and a Tour of the Code</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u0-02-modern-sql.html">Next: Modern SQL →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

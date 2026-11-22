@@ -1,0 +1,308 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 9 · Lesson 2 · Write-Ahead Logging and Logging Schemes</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 9 · Lesson 2</p>
+  <h1>Write-Ahead Logging and Logging Schemes</h1>
+  <p class="subtitle">Trace the write-ahead logging protocol through a schedule, saying which records it writes and what must reach disk before a page is written or a commit is acknowledged, and compare physical, logical and physiological log records.</p>
+
+  <p class="lede">Lesson 1 ended with your buffer pool behaving as STEAL + NO-FORCE, the combination whose recovery needs both undo and redo, with nothing on disk to provide either. Shadow paging avoided recovery work, but at every commit it wrote whole pages to random places on disk. A write-ahead log writes small records describing each change, sequentially, to a separate file, and it writes them before the pages they describe. That is enough to let the buffer pool steal and not force, which is what almost every DBMS does.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 1, Lesson 1: what does Lecture #03 say about random and sequential access on non-volatile storage?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The course makes no major distinction between SSDs and HDDs here; on both, random access is almost always the slower kind.">On SSDs the two cost the same, so a DBMS can ignore the difference.</li>
+      <li data-option="b" data-explain="Loading a whole block applies to every read from disk. It doesn't make sequential access the slower kind.">Sequential access is slower, because every read must load a whole block.</li>
+      <li data-option="c" data-explain="Random access is almost always slower than sequential access, so the DBMS tries to maximize sequential access, for example by reducing writes to random pages.">Random access is almost always slower, so the DBMS tries to maximize sequential access.</li>
+      <li data-option="d" data-explain="The lesson draws no such line between reads and writes. Writing sequentially into a buffer and doing the random writes later is a technique, not a property of the hardware.">Random access is slower only for reads, because writes are always buffered sequentially.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 1, Lesson 3: in a log-structured storage manager, what happens when the MemTable fills up?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The DBMS sorts the MemTable's contents by key and writes them out sequentially to disk as an SSTable, keeping only the latest value of each key.">Its contents are sorted by key and written sequentially to disk as a new SSTable.</li>
+      <li data-option="b" data-explain="Merging SSTables is compaction, a separate background step. A full MemTable becomes a new SSTable in Level #0.">It is merged in place into the existing SSTables of Level #0.</li>
+      <li data-option="c" data-explain="Log-structured storage never updates pages in place; SSTables are immutable.">Each record is written into the page on disk that already holds its key.</li>
+      <li data-option="d" data-explain="The MemTable holds the newest changes, which are in no SSTable yet. Discarding it would lose them.">It is discarded, because its records were already appended to the SSTables.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 8, Lesson 5: what does a Project 4 undo log (<code>concurrency.UndoLog</code>) hold?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="An undo log holds what a change replaced, not what it wrote. The new values are in the base tuple.">The new values a transaction wrote, so that they can be re-applied to the table after a crash.</li>
+      <li data-option="b" data-explain="Undo logs are per tuple and hold only the modified columns, laid out by a partial schema.">A copy of the whole page the tuple lives on, taken just before the update changed it.</li>
+      <li data-option="c" data-explain="Undo logs hold old column values, not statements.">The SQL statement that made the change, so that it can be reversed by running its inverse.</li>
+      <li data-option="d" data-explain="ModifiedFields marks the columns, Tuple holds their old values, Ts is the timestamp of the replaced version, and PrevVersion links to the next older log.">The replaced column values, the old version's timestamp, and a link to the next older undo log.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>From random page writes to a sequential log</h2>
+
+  <p>Slide 20 states shadow paging's problem: it makes the DBMS write to random, non-contiguous pages on disk. The DBMS needs a way to turn random writes into sequential ones, and it would be good not to write an entire page each time it changes. CouchDB appends its shadow pages to the end of the database file, which makes the writes sequential, but it still writes out whole pages.</p>
+
+  <p>A <strong>write-ahead log</strong> (WAL) solves both (slide 21). The DBMS keeps a log file, separate from the data files, that contains the changes transactions make to the database. The lecture assumes the log is on stable storage, and the log holds enough information to perform any undo and redo needed to restore the database. The rule that gives the log its name: the DBMS must write to disk the log records that correspond to a change to a database object before it can flush that object to disk.</p>
+
+  <p>The slide gives the buffer pool policy as STEAL + NO-FORCE. The notes explain the trade. STEAL lets dirty pages go to disk before commit, which removes NO-STEAL's memory limit. NO-FORCE means commit doesn't have to write every changed page. In exchange, recovery has to handle both undo, for rolled-back transactions whose changes reached disk, and redo, for committed transactions whose changes didn't.</p>
+
+  <h2>What each policy asks of the log</h2>
+
+  <p>Slide 22 puts the four combinations in a grid. NO-STEAL + FORCE is "Trivial"; STEAL + NO-FORCE is "Desired". The boxes around the grid say what each choice costs or requires. The two that border the "Desired" cell say what the log must provide: NO-FORCE needs a log flushed at commit for redo, and STEAL needs the old value in the log for undo.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L21-steal-force-matrix-p64.png" alt="A two-by-two grid with Steal (No, Yes) across the top and Force (No, Yes) down the side. The cell Steal=Yes, Force=No is labelled Desired; the cell Steal=No, Force=Yes is labelled Trivial. Boxes beside the grid: No-Force: To recover after a crash before a page is flushed to disk, flush summary/log @ commit for REDO. Force: On every update, flush the updated page to disk. Poor response time but enforces durability of committed txns. Boxes below: No-Steal: Low throughput but works for aborted txns. Steal: Flush unpinned dirty page even if updating txn is active. To ensure atomicity if a flushed page is modified by an uncommitted txn, record old value in log for UNDO." loading="lazy">
+    <figcaption>NO-FORCE requires redo information in the log, flushed at commit; STEAL requires the old value in the log for undo. STEAL here means flushing an unpinned dirty page while its transaction is still active (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/21-logging.pdf#page=64">Lecture #21, slide 22</a>).</figcaption>
+  </figure>
+
+  <p>Note the word "unpinned" in the Steal box. Stealing never takes a page that a thread is using right now. The pin count you maintained in Project 1 still decides which frames are candidates, and the WAL adds one step before a dirty candidate is written: its log records go to disk first.</p>
+
+  <h2>The WAL protocol</h2>
+
+  <p>Slide 23 gives the protocol in three rules:</p>
+  <ul>
+    <li>The DBMS stages all of a transaction's log records in volatile storage, usually backed by the buffer pool.</li>
+    <li>All log records pertaining to an updated page are written to non-volatile storage before the page itself is overwritten in non-volatile storage.</li>
+    <li>A transaction is not considered committed until all its log records have been written to stable storage.</li>
+  </ul>
+
+  <p>Slide 24 says what goes into the log. The DBMS writes a <code>&lt;BEGIN&gt;</code> record to mark each transaction's start. Every time a transaction changes an object, it appends a record with:</p>
+  <ul>
+    <li>the transaction id;</li>
+    <li>the object id;</li>
+    <li>the <strong>before value</strong>, used for undo;</li>
+    <li>the <strong>after value</strong>, used for redo.</li>
+  </ul>
+  <p>The notes add that records can also carry system-dependent data such as a timestamp or a checksum. When a transaction finishes, the DBMS appends a <code>&lt;COMMIT&gt;</code> record and makes sure all the transaction's log records are flushed before it acknowledges the commit to the application. The slide marks the before value as not necessary with append-only MVCC, and the notes give the reason: previous versions are already maintained by the system.</p>
+
+  <p>The rule constrains pages only loosely. The notes say the DBMS can write dirty pages to disk whenever it wants, as long as it is after flushing the corresponding log records. That is the warning on Lecture #04's slide 33 about background writing, now with its reason. Lesson 3 turns the rule into a comparison of two numbers that the buffer pool can check before every write.</p>
+
+  <h3>The example</h3>
+
+  <p>Slide 25 starts with A=1, B=5, C=7 on disk and in the buffer pool. T1 begins, writes A and B, and commits:</p>
+  <ul>
+    <li>BEGIN puts <code>&lt;T1 BEGIN&gt;</code> in the WAL buffer.</li>
+    <li>W(A) first appends <code>&lt;T1, A, 1, 8&gt;</code> (before value 1, after value 8) to the WAL buffer, and only then changes A to 8 in the buffer pool. The slide numbers the two steps 1 and 2.</li>
+    <li>W(B) appends <code>&lt;T1, B, 5, 9&gt;</code> and changes B to 9.</li>
+    <li>COMMIT appends <code>&lt;T1 COMMIT&gt;</code> and flushes the WAL buffer to disk. The slide's bubble says that the transaction's result is now safe to return to the application.</li>
+  </ul>
+  <p>The page is never written. Then the machine crashes.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L21-wal-example-p73.png" alt="Left: T1's schedule, BEGIN, W(A), W(B), a vertical ellipsis, COMMIT, with time running downward. Middle: a WAL Buffer box and a Buffer Pool box, each crossed out with a large red X. Right: a log file on disk, outlined in red, holding T1 BEGIN, T1 A 1 8, T1 B 5 9, T1 COMMIT, and below it the database on disk with A=1, B=5, C=7. A speech bubble: Everything we need to restore T1 is in the log!" loading="lazy">
+    <figcaption>After the crash, memory is gone and the database on disk still says A=1, B=5. The log on disk holds T1's after values, so recovery can redo the committed T1 (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/21-logging.pdf#page=73">Lecture #21, slide 25</a>).</figcaption>
+  </figure>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=CedEy54pe3g&amp;t=2681s">#21 Database Logging, "Write-ahead logging" (44:41)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/21-logging.pdf#page=62">slides 20–25</a>: why shadow paging's writes are a problem, the WAL definition and policy grid, the protocol, record contents, and the A/B example through the crash.</p>
+
+  <h2>Group commit</h2>
+
+  <p>Every commit waits for a log flush. Slide 26 says that flushing the log buffer every time a transaction commits will become a bottleneck. <strong>Group commit</strong> batches several log flushes into one to amortize the overhead: the DBMS flushes the buffer when it is full, or after a timeout, for example 5 ms.</p>
+
+  <p>In slide 27's example, T1 and T2 run at the same time and append their records to a set of WAL buffers. The first buffer fills up and is flushed. Both transactions then reach COMMIT and append their COMMIT records to the second buffer, and both wait, shown by hourglasses, until that buffer is flushed. One write makes both commits durable.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L21-group-commit-p85.png" alt="Left: two schedules, T1 with BEGIN, W(A), W(B) and T2 with BEGIN, W(C), W(D), each followed by an ellipsis, an hourglass and COMMIT. Middle: two WAL buffers; the top one is empty, and the bottom one holds T2 D 3 4, T1 COMMIT and T2 COMMIT, with red arrows from both COMMITs into it. A red arrow and an hourglass lead to the log on disk, which holds T1 BEGIN, T1 A 1 8, T1 B 5 9, T2 BEGIN, T2 C 1 2, T2 D 3 4, T1 COMMIT and T2 COMMIT." loading="lazy">
+    <figcaption>Each transaction still writes its own COMMIT record, and both wait until one flush carries the two records to disk (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/21-logging.pdf#page=85">Lecture #21, slide 27</a>).</figcaption>
+  </figure>
+
+  <p>The notes describe the timeout as enough time having passed since the previous flush. A transaction that commits just after a flush therefore waits for the next one.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=CedEy54pe3g&amp;t=3302s">#21 Database Logging, "Group commit optimization" (55:02)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/21-logging.pdf#page=74">slides 26–27</a>: why one flush per commit is a bottleneck, and the two-transaction example.</p>
+
+  <h2>Runtime speed against recovery speed</h2>
+
+  <p>Slide 29 compares the two common combinations twice. At runtime, STEAL + NO-FORCE is the fastest and NO-STEAL + FORCE the slowest. During recovery it is the other way round: STEAL + NO-FORCE is the slowest, because it needs undo and redo, and NO-STEAL + FORCE the fastest, with no undo and no redo.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L21-policy-tradeoffs-p87.png" alt="Title: Almost every DBMS uses NO-FORCE + STEAL. Two grids with Steal (No, Yes) across and Force (No, Yes) down. Runtime Performance: Steal=Yes, Force=No is Fastest in green; Steal=No, Force=Yes is Slowest in red; the other cells are dashes. Recovery Performance: Steal=Yes, Force=No is Slowest, with a bubble saying Undo + Redo; Steal=No, Force=Yes is Fastest, with a bubble saying No Undo + No Redo." loading="lazy">
+    <figcaption>The same two corners swap places between the grids. The title gives the industry's choice: runtime speed (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/21-logging.pdf#page=87">Lecture #21, slide 29</a>).</figcaption>
+  </figure>
+
+  <p>The notes say that almost every modern DBMS uses write-ahead logging, because it writes sequentially and has the fastest runtime performance, even though its recovery is slower than shadow paging's, since it has to replay the log.</p>
+
+  <p>Log-structured systems are no exception (slide 28). They have no dirty pages, because any page read from disk is immutable. But they buffer recent changes in the in-memory MemTable, and when it fills up it must be flushed, possibly with changes of uncommitted transactions in it. These DBMSs still keep a separate WAL, so they can recreate the MemTable after a crash. Unit 1, Lesson 3 pointed out that the log in "log-structured" is the table itself and has nothing to do with this one.</p>
+
+  <h2>Logging schemes</h2>
+
+  <p>A log record can describe a change at different levels (slide 30):</p>
+  <ul>
+    <li><strong>Physical logging</strong> records the byte-level changes made to a specific page, like a <code>git diff</code>.</li>
+    <li><strong>Logical logging</strong> records the high-level operations that transactions execute, such as the <code>UPDATE</code>, <code>DELETE</code> and <code>INSERT</code> queries themselves. The notes add that one such record isn't restricted to a single page.</li>
+    <li><strong>Physiological logging</strong> is the hybrid: physical to a page, logical within a page. It records byte-level changes for a single tuple, identified by page id and slot number, and doesn't specify how the page is organized.</li>
+  </ul>
+
+  <p>Slide 31 logs one statement, <code>UPDATE foo SET val = XYZ WHERE id = 1;</code>, all three ways.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L21-logging-schemes-p89.png" alt="The statement UPDATE foo SET val = XYZ WHERE id = 1 above three log listings. Physical: T1, Table=X, Page=99, Offset=1024, Before=ABC, After=XYZ, then a second record T1, Index=X_PKEY, Page=45, Offset=9, Key=(1,Record1); Page and Offset are boxed in red in both. Logical: one record, T1, Query=UPDATE foo SET val=XYZ WHERE id=1. Physiological: T1, Table=X, Page=99, Slot=1, Before=ABC, After=XYZ, then T1, Index=X_PKEY, IndexPage=45, Key=(1,Record1); Page and Slot, and IndexPage, are boxed in red." loading="lazy">
+    <figcaption>The physical and physiological logs each need a second record for the primary-key index's page; the logical log needs only the statement. The red boxes show how each scheme locates the change: page and byte offset, or page and slot (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/21-logging.pdf#page=89">Lecture #21, slide 31</a>).</figcaption>
+  </figure>
+
+  <p>Logical logging writes less data per record (slide 32), but recovery with it is hard:</p>
+  <ul>
+    <li>If the DBMS runs concurrent transactions at lower isolation levels, it is hard to determine which parts of the database a query had modified before the crash.</li>
+    <li>Recovery takes longer, because the DBMS re-executes every query in the log.</li>
+  </ul>
+
+  <p>Physiological logging is the most common approach (notes). Because a record names a slot rather than a byte offset, the notes say the DBMS can reorganize a page after the log record has been written to disk. That is the slotted page from Unit 1, Lesson 2: compaction moves a tuple's bytes within the page and updates its slot, so "page 99, slot 1" still names the same tuple.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=CedEy54pe3g&amp;t=3581s">#21 Database Logging, "Log record contents" (59:41)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/21-logging.pdf#page=86">slides 28–32</a>: log-structured systems, the runtime and recovery grids, and the three logging schemes with the <code>UPDATE</code> example.</p>
+
+  <h2>Change data capture</h2>
+
+  <p>The log is a complete, ordered record of every change, so it is useful beyond recovery. <strong>Change data capture</strong> (CDC) automatically propagates a database's changes to external systems to replicate and synchronize their contents (slide 33). The slide relates it to extract-transform-load (ETL) pipelines, and notes that some systems do it automatically while others need third-party tools. It lists three approaches: reading the WAL, triggers, and timestamps. The notes say the same log that ensures durability can feed replicas, data warehouses or microservices.</p>
+
+  <h2>Logging in BusTub and the Go port</h2>
+
+  <p>This unit has no project: neither BusTub nor the Go port has a working log manager, and you won't build one. BusTub at d49b823 still contains the outline of an old logging project, switched off:</p>
+  <ul>
+    <li><code>src/include/recovery/log_manager.h</code> describes a <code>LogManager</code> that "maintains a separate thread that is awakened whenever the log buffer is full or whenever a timeout happens", which is group commit. Its <code>persistent_lsn_</code> means that the log records "before and including the persistent lsn have been written to disk". In <code>log_manager.cpp</code>, <code>RunFlushThread</code> is empty and <code>AppendLogRecord</code> returns <code>INVALID_LSN</code>.</li>
+    <li>The comment on <code>RunFlushThread</code> says the buffer pool may also force a log flush, which "only happens when the flushed page has a larger LSN than persistent LSN". That is the WAL rule seen from the buffer pool: before writing a page, make sure its log records are on disk. LSNs (log sequence numbers) are Lesson 3's subject.</li>
+    <li><code>src/include/recovery/log_record.h</code> asks for a log record "for every write operation on the table page". Its <code>UPDATE</code> record holds the tuple's RID, the old tuple and the new tuple. A RID is a page id and a slot, so this is physiological logging.</li>
+    <li><code>src/include/common/config.h</code> defines <code>DISABLE_CHECKPOINT_MANAGER</code>, and <code>BustubInstance</code> sets <code>enable_logging</code> to false and never creates a <code>LogManager</code>.</li>
+  </ul>
+  <p>The Go port translated none of it. <code>storage/disk/file_manager.go</code> says the write-ahead log file and its methods are not translated because nothing in Project 1 uses them.</p>
+
+  <div class="callout">
+    <p class="callout-label">Project 4's undo logs are not a recovery log</p>
+    <p>The undo logs you built in Project 4 are versions, kept for readers that need an older snapshot. The Project 4 writeup says they are stored "within a transaction's in-memory workspace", and that "in a production system these logs would be persisted to disk, but this project does not require that for BusTub". They disappear in a crash, and nothing writes them before a page goes to disk, so they can't serve as a WAL's before values. Slide 24's remark that append-only MVCC makes the before value unnecessary relies on the system keeping the old versions; Project 4 keeps them only in memory.</p>
+  </div>
+
+  <h2>Work it out</h2>
+
+  <p>Decide each one on paper before opening the result.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u9l2-group-commit-wait">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u9l2-group-commit-wait-cb">
+        <label for="u9l2-group-commit-wait-cb">A DBMS uses group commit with a 5 ms timeout. T1 appends its COMMIT record 1 ms after the last flush, and the log buffer is far from full. When may the DBMS tell the application that T1 committed, and why not earlier?</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which event makes a transaction committed under the WAL protocol, and what triggers that event under group commit?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Slide 24: flush before acknowledging. Slide 26: flush when the buffer is full or on timeout. Find the first moment either can happen.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>Not before the next flush, at the latest about 4 ms later when the timeout fires (sooner if other transactions fill the buffer first). Until the COMMIT record is on stable storage, a crash would lose it, and T1 would have to be treated as uncommitted.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u9l2-compaction">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u9l2-compaction-cb">
+        <label for="u9l2-compaction-cb">After slide 31's records reach disk, the DBMS compacts page 99, and the tuple in slot 1 moves to a new byte offset. Which of the two table-page records, physical or physiological, still locates the tuple during recovery?</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>What does each record use to find the tuple inside page 99?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Recall what compaction changes on a slotted page (Unit 1, Lesson 2): the bytes' position, and which entry of the slot array.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>The <strong>physiological</strong> one. It names slot 1, and compaction updated slot 1 to the tuple's new offset. The physical record names offset 1024, which no longer holds the tuple. This is why the notes say physiological logging lets the DBMS reorganize pages after a record is on disk.</p></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="callout"><!-- homework-box -->
+    <p class="callout-label">The homework behind these questions</p>
+    <p>The questions marked HW6 come from CMU's Homework #6: <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw6-clean.pdf#page=5">Question 2</a>, with the original figures. Work each one out on paper first, then click the option you got. The quiz tells you at once whether it matches CMU's official answer, and explains why. To compare your working step by step, open the official solutions for <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw6-sols.pdf#page=6">Question 2</a>.</p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">HW6 Q2(c), true or false: "If the DBMS is using the STEAL and NO-FORCE policies, then a transaction is considered committed if all of the data pages that it modified have been written to non-volatile storage." Which statement matches the official answer?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Writing a transaction's pages at commit is FORCE. Under NO-FORCE the pages may stay in memory after the commit.">True: under NO-FORCE the DBMS writes a transaction's data pages at commit, and that write makes the commit durable.</li>
+      <li data-option="b" data-explain="Under STEAL, pages on disk can also hold uncommitted changes, so pages on disk say nothing about whether the transaction committed. The commit point is in the log.">True: once its pages are on disk, the transaction no longer needs its log records, so it counts as committed.</li>
+      <li data-option="c" data-explain="Slide 23: a transaction is not considered committed until all its log records have been written to stable storage. The official answer is False: it is committed when its WAL entries and its COMMIT record are flushed to disk.">False: it is committed once all its log records, through its COMMIT record, are on stable storage; its pages may still be only in memory.</li>
+      <li data-option="d" data-explain="The log buffer is volatile. Slide 24: the log records must be flushed before the DBMS acknowledges the commit.">False: it is committed as soon as its COMMIT record has been appended to the in-memory log buffer.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">HW6 Q2(h), true or false: "If the DBMS uses a physical logging scheme for its WAL, then it does not need to maintain additional WAL records for updates to indexes." Which statement matches the official answer?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Slide 31's physical log has a second record for Index=X_PKEY, Page=45. The official answer is False: there still need to be separate records for index updates, and only logical logging doesn't need them.">False: physical logging records byte changes per page, and the index entry lives on another page that needs its own record; only logical logging avoids that.</li>
+      <li data-option="b" data-explain="The table page's bytes say nothing about the index page's bytes. Physical recovery replays page changes; it doesn't rebuild indexes.">True: recovery can rebuild the index changes from the table page's byte changes.</li>
+      <li data-option="c" data-explain="Index pages are ordinary pages in the buffer pool and reach disk like any other page.">True: indexes live only in memory, so their changes never need a log record.</li>
+      <li data-option="d" data-explain="The logical record is the statement, and re-executing it updates the index as well. Slide 31's logical log has no index record.">False: physical logging needs index records, and so does logical logging, because a statement doesn't say which index pages changed.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Which ordering does the write-ahead logging protocol require?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="This is the reverse of the rule. A page written before its log records could hold an uncommitted change that nothing on disk can undo.">A dirty page is written to disk before its log records, so that the log never refers to data missing from disk.</li>
+      <li data-option="b" data-explain="The protocol only orders the two writes. Slide 26's flushes write the log buffer alone.">A page and its log records are written to disk in one atomic I/O.</li>
+      <li data-option="c" data-explain="Log records are flushed at commit (slide 24) and whenever the log buffer fills (slide 26). Under STEAL, pages can be written at any time after their log records.">Log records are written only at commit, and pages only at checkpoints.</li>
+      <li data-option="d" data-explain="Slide 23: all log records pertaining to an updated page are written to non-volatile storage before the page itself is overwritten in non-volatile storage.">All log records for a page are on non-volatile storage before the page overwrites its old version on disk.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">After slide 25's crash, the log on disk holds <code>&lt;T1 BEGIN&gt;</code>, <code>&lt;T1, A, 1, 8&gt;</code>, <code>&lt;T1, B, 5, 9&gt;</code> and <code>&lt;T1 COMMIT&gt;</code>, and the database on disk says A=1, B=5. Which values does recovery use, and for what?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Undo is for incomplete or aborted transactions. T1's COMMIT record is on disk, so T1 committed and must be durable.">The before values 1 and 5, to undo T1, because its pages never reached disk.</li>
+      <li data-option="b" data-explain="T1 committed (its COMMIT is on stable storage) and, under NO-FORCE, its pages never reached disk. Redo re-applies a committed transaction's effects using the after values (slide 24).">The after values 8 and 9, to redo T1, because it committed but its pages never reached disk.</li>
+      <li data-option="c" data-explain="Undoing T1 after redoing it would erase a committed transaction's changes, breaking durability.">Both: recovery redoes T1 with 8 and 9, then undoes it with 1 and 5.</li>
+      <li data-option="d" data-explain="The disk still has the old values. The application was told T1 committed, so A=8 and B=9 must be restored.">None: the COMMIT record already makes the on-disk values A=1 and B=5 correct.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">A DBMS keeps a write-ahead log but uses STEAL + FORCE. Which values must its update records carry for crash recovery?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Slide 22: STEAL needs the old value in the log for undo. Redo information is needed only under NO-FORCE; with FORCE every committed change is on disk before the commit.">Before values only: STEAL can put uncommitted changes on disk, while FORCE already wrote every committed one.</li>
+      <li data-option="b" data-explain="FORCE already wrote the committed pages, so there is nothing to replay. The risk under STEAL is an uncommitted change on disk.">After values only: FORCE writes pages at commit, so recovery only has to replay them from the log.</li>
+      <li data-option="c" data-explain="After values are for redo, which only NO-FORCE needs (slide 22). STEAL + NO-FORCE needs both; STEAL + FORCE doesn't.">Both before and after values, exactly as a DBMS using STEAL + NO-FORCE needs.</li>
+      <li data-option="d" data-explain="STEAL means a page on disk can hold an uncommitted change. Without the old value, recovery can't undo it.">Neither: with FORCE, the log needs only BEGIN and COMMIT records to decide what happened.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why the log must reach disk before the page but the page may reach disk any time after, why committing waits for a log flush but never for a page, or why physical and physiological logging need index records while logical logging doesn't. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 Lecture #21 <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/21-logging.pdf">slides</a> 20–33 and <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/21-logging.pdf">notes</a> (sections 6–7); Lecture #04 slide 33; Homework #6 Question 2, parts (c) and (h), and its <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw6-sols.pdf">official solutions</a>; the Project #4 writeup; BusTub <code>src/include/recovery/log_manager.h</code>, <code>src/recovery/log_manager.cpp</code>, <code>src/include/recovery/log_record.h</code>, <code>src/include/common/config.h</code> and <code>src/common/bustub_instance.cpp</code> at commit d49b823; the Go port's <code>storage/disk/file_manager.go</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u9-01-buffer-policies-shadow-paging.html">← Buffer Pool Policies and Shadow Paging</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u9-03-lsns-aborts-checkpoints.html">Next: Log Sequence Numbers, Aborts, and Checkpoints →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

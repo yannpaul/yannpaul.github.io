@@ -1,0 +1,380 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 5 · Lesson 8 · Query Optimization II: Statistics and Cardinality Estimation</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 5 · Lesson 8</p>
+  <h1>Query Optimization II: Statistics and Cardinality Estimation</h1>
+  <p class="subtitle">Estimate how many rows a filter or a join will produce from histograms, sketches and samples, using the uniformity, independence and containment assumptions, and recognize when those assumptions make the estimate wrong.</p>
+
+  <p class="lede">Lesson 7's cost-based optimizer picks the plan with the lowest estimated cost. Every cost formula from Lessons 1 to 4 needs the size of its inputs, and above the leaves those inputs are the outputs of other operators, which nobody has run yet. Lecture #16 is about how a DBMS estimates those sizes: what statistics it keeps, how it summarizes a column, and the formulas that turn summaries into row counts. BusTub keeps no statistics, so this lesson is theory, and it carries most of HW4: three parts of Question 2 and all of Question 3.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Unit 5, Lesson 6: which pairing of a process model with one of its properties is right?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Slide 11: in an embedded DBMS, the application is (primarily) responsible for threads and scheduling.">Embedded DBMS: the DBMS controls scheduling independently of the application.</li>
+      <li data-option="b" data-explain="Slide 9: each worker is a separate OS process, relies on the OS dispatcher, and shares global data structures through shared memory. IBM DB2, Postgres and Oracle are the examples.">Process per worker, as in Postgres: each worker is an OS process scheduled by the OS, with global data structures in shared memory.</li>
+      <li data-option="c" data-explain="Slide 10: a thread crash may kill the entire system. Crash isolation is the process model's advantage.">Thread per worker: a crashing worker can't take down the rest of the system.</li>
+      <li data-option="d" data-explain="The notes say the opposite: when DB2, Postgres and Oracle were written, pthreads had not yet become the standard, and fork() was better defined.">Process per worker: chosen because pthreads were the standard when those systems were written.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 3, Lesson 6: a Bloom filter lookup for key x returns true. What can the DBMS conclude?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A true answer can be a false positive: other keys may have set all of x's bits between them.">x is definitely in the set.</li>
+      <li data-option="b" data-explain="A false answer would mean that. A Bloom filter never gives a false negative, so true never means absent.">x is definitely not in the set.</li>
+      <li data-option="c" data-explain="A plain Bloom filter keeps bits, not counts; it can't say how many times x was inserted.">x was inserted exactly once.</li>
+      <li data-option="d" data-explain="If x had been inserted, all its bits would be 1, so true is consistent with x being present; but the bits may have been set by other keys, so the DBMS still has to check the real data.">x may be in the set, and the DBMS has to check the real data to be sure.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 5, Lesson 5: a page's zone map for column val says MIN = 100, MAX = 400, COUNT = 5. For which query must a scan still read the page?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="350 lies between MIN and MAX, so some tuples might qualify, and the zone map can't rule the page out.">SELECT * FROM table WHERE val &gt; 350</li>
+      <li data-option="b" data-explain="MAX = 400 is below 600, so no tuple can qualify. This is the slide's example of a skipped page.">SELECT * FROM table WHERE val &gt; 600</li>
+      <li data-option="c" data-explain="MIN = 100 is above 50, so no tuple can qualify.">SELECT * FROM table WHERE val &lt; 50</li>
+      <li data-option="d" data-explain="401 is above MAX, so no tuple can equal it.">SELECT * FROM table WHERE val = 401</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Cost models</h2>
+
+  <p>Slide 12 states the problem. We have cost formulas for each operator algorithm, but we also need the size of each operator's output, and that depends on its input. In the Emp/Dept plan from Lesson 7, every edge between operators is a "???".</p>
+
+  <p>A <strong>cost model</strong> predicts how a query plan will behave in a given database state. Its result is an internal cost, meaningful only for comparing one plan with another, and the DBMS needs a model because running every possible plan to find out is far too expensive. Slide 14 gives two kinds of cost:</p>
+  <ul>
+    <li><strong>Physical costs</strong> predict CPU cycles, I/O, cache misses, RAM use and network messages. They depend heavily on the hardware.</li>
+    <li><strong>Logical costs</strong> estimate the output size of each operator. They are independent of the operator's algorithm, and they need estimates of operator result sizes.</li>
+  </ul>
+
+  <p>PostgreSQL's cost model combines CPU and I/O costs, weighted by "magic" constant factors whose defaults assume a disk-resident database without much memory: processing a tuple in memory is 400× faster than reading a tuple from disk, and sequential I/O is 4× faster than random I/O.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=azTHRpzl10o&amp;t=1759s">#16 Query Planning &amp; Optimization II, "Cost models" (29:19)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/16-optimization2.pdf#page=38">slides 12–15</a>: why output sizes are needed, physical and logical costs, and PostgreSQL's constants.</p>
+
+  <h2>Statistics in the catalog</h2>
+
+  <p>The estimates come from <strong>statistics</strong>: auxiliary data structures the DBMS fills by scanning the database, so that the optimizer can approximate the data's contents. Each kind trades accuracy, efficiency, memory use, coverage, and the cost of building and maintaining it. Most DBMSs keep statistics in the internal catalog and refresh them through one or more triggers: periodic background tasks (PostgreSQL's autovacuum), maintenance schedules (Oracle), modification thresholds, or a manual command such as <code>ANALYZE</code> or <code>UPDATE STATISTICS</code>.</p>
+
+  <p>Most DBMSs build statistics for each column on its own. Some can also track groups of columns together, so they don't have to treat the columns as independent: SQL Server does this automatically for columns used together in an index, and otherwise a person names the columns. Db2 calls these column group statistics and Oracle calls them extended statistics. The Honda Accord example below shows why they matter.</p>
+
+  <p>Slide 19 lists four ways to summarize a column: <strong>histograms</strong> (most common), <strong>sketches</strong> (increasing usage), <strong>sampling</strong> (rare), and a trained ML model (experimental, very rare).</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=azTHRpzl10o&amp;t=2118s">#16 Query Planning &amp; Optimization II, "Statistics storage" (35:18)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/16-optimization2.pdf#page=43">slides 16–18</a>: what statistics trade off, where they live, how they are refreshed, and column-group statistics.</p>
+
+  <h2>Histograms</h2>
+
+  <p>A histogram keeps an occurrence count per value, or per range of values, in a column. Every example in this lesson uses the same column (call it age): values 1 to 15 with 45 tuples in total.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L16-histogram-p47.png" alt="A bar chart titled Histogram. The x axis, labelled Distinct values of attribute, runs from 1 to 15; the y axis, labelled # of occurrences, runs from 0 to 10. The bars read 1:2, 2:3, 3:4, 4:1, 5:2, 6:1, 7:3, 8:8, 9:4, 10:2, 11:0, 12:1, 13:2, 14:4, 15:8. A note says 15 keys × 32-bits = 60 bytes." loading="lazy">
+    <figcaption>The exact per-value histogram: 15 counts of 32 bits, 60 bytes. Values 8 and 15 are the heavy hitters with 8 tuples each, and 11 doesn't occur at all (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/16-optimization2.pdf#page=47">Lecture #16, slide 20</a>).</figcaption>
+  </figure>
+
+  <p>One count per distinct value is exact, but a column with millions of distinct values would need millions of counts. The notes put the problem this way: real data is often skewed, but storing every value is expensive. The cheaper histograms group values into buckets:</p>
+  <ul>
+    <li>An <strong>equi-width histogram</strong> keeps one count per group of values, and all buckets have the same width (the same number of values).</li>
+    <li>An <strong>equi-depth histogram</strong> varies the bucket widths so that every bucket holds roughly the same number of occurrences. Slide 22 says equi-depth histograms have been shown to have better worst-case and average error than equi-width ones.</li>
+    <li>An <strong>end-biased histogram</strong> with N buckets uses N − 1 buckets for the exact counts of the most frequent keys, and the last bucket, R, for the average frequency of all the remaining values.</li>
+  </ul>
+
+  <figure class="slide">
+    <img src="../assets/slides/L16-equi-width-p49.png" alt="Text: Maintain counts for a group of values instead of each unique key. All buckets have the same width (i.e., same # of value). A bar chart titled Equi-Width Histogram with five buckets labelled [1,3], [4,6[, [7,9], [10,12] and [13,15], with counts 9, 4, 15 (unlabelled, reaching the top of the axis), 3 and 14. A callout reads Bucket Ranges." loading="lazy">
+    <figcaption>Equi-width: five buckets of three values each, with counts 9, 4, 15, 3 and 14 (the second bucket, printed "[4,6[", is [4,6]). Value 8's eight tuples make [7,9] the tallest bucket (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/16-optimization2.pdf#page=49">Lecture #16, slide 21</a>).</figcaption>
+  </figure>
+
+  <figure class="slide">
+    <img src="../assets/slides/L16-equi-depth-p51.png" alt="Text: Vary the width of buckets so that the total number of occurrences for each bucket is roughly the same. Equi-depth histograms are shown to have better worst-case and average error than equi-width histograms. A bar chart titled Histogram (Quantiles) with buckets [1,5], [6,8], [9,13] and [14,15] holding 12, 12, 9 and 12." loading="lazy">
+    <figcaption>Equi-depth: [1,5] holds 12 tuples, [6,8] 12, [9,13] 9 and [14,15] 12. The bucket over 8 is only three values wide because 8 alone has 8 tuples, while the sparse middle [9,13] stretches over five (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/16-optimization2.pdf#page=51">Lecture #16, slide 22</a>).</figcaption>
+  </figure>
+
+  <figure class="slide">
+    <img src="../assets/slides/L16-end-biased-p54.png" alt="Text: Use N-1 buckets to store the exact count for the most frequent keys. The last bucket (R) stores the average frequency of all remaining values. A bar chart titled End-Biased Histogram (N=6) with bars for keys 8, 15, 3, 9 and 14 at 8, 8, 4, 4 and 4, and a red bar R at 1.7." loading="lazy">
+    <figcaption>End-biased with N = 6: exact counts for the five most frequent keys, and R = 1.7 for everything else. The other ten values hold 17 tuples between them, and 17 / 10 = 1.7 (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/16-optimization2.pdf#page=54">Lecture #16, slide 23</a>).</figcaption>
+  </figure>
+
+  <h2>Sketches</h2>
+
+  <p>Exact statistics are expensive to maintain. A <strong>sketch</strong> is a probabilistic data structure that gives an approximate answer with a known error bound. Slide 24 names one per question: frequent items (count-min sketch), count distinct (HyperLogLog), and quantiles (t-digest). Apache DataSketches and Google's ZetaSketch are open-source implementations.</p>
+
+  <p>A <strong>count-min sketch</strong> approximates how often each value occurs in a stream with a few hash functions and a two-dimensional array of counters, one row per hash function. Inserting a value adds 1 to one counter in every row, the counter its row's hash picks. To read a value's count, look at its counter in every row and take the <em>minimum</em>.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L16-count-min-p63.png" alt="Text: Probabilistic data structure that approximates frequency counts of elements in a data stream using hash functions and a multi-dimensional array of counters. Approximates answers with tunable accuracy and space trade-offs. A grid titled Count-Min Sketch with rows hash1 to hash4 and columns 0 to 7. The cells boxed in red are hash1 column 6 holding +2, hash2 column 4 holding +3, hash3 column 3 holding +6, and hash4 column 0 holding +3. Below: GET 'ODB' gives Min(2,3,6,3) = 2." loading="lazy">
+    <figcaption>'ODB' hashes to column 6, 4, 3 and 0 in the four rows. Other values have landed in some of those cells as well, so they hold 2, 3, 6 and 3, and the sketch answers with the smallest, 2 (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/16-optimization2.pdf#page=63">Lecture #16, slide 25</a>).</figcaption>
+  </figure>
+
+  <p>The minimum is the right answer because counters only grow: every insert of 'ODB' added 1 to each of its four counters, so each one is at least the true count. Collisions with other values can only push a counter higher, so the smallest counter is the tightest of four overestimates. It is the same one-sided error as Unit 3's Bloom filter: a Bloom filter can say "present" wrongly but never "absent" wrongly, and a count-min sketch can overcount but never undercount. More rows and columns buy accuracy with space.</p>
+
+  <p><strong>HyperLogLog</strong> estimates the number of distinct values in a multiset with a fixed array of m counters. To add a value, hash it; some of the hash's bits choose a counter, and the counter keeps the largest position of the leftmost 1-bit seen so far in the remaining bits. The estimate is the harmonic mean across the counters, corrected by a "fudge factor".</p>
+
+  <h2>Sampling</h2>
+
+  <p>Instead of summarizing a column ahead of time, the DBMS can execute the predicate on a random sample of the table and use the fraction that qualifies. The sample's size depends on the size of the table. Slide 27 gives two ways to keep one: maintain a read-only copy that is refreshed periodically, or sample the real tables, at the risk of reading several versions of the same logical tuple. The notes say a sample is refreshed when the changes to its table pass a threshold, such as 10% of the tuples.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L16-sampling-p72.png" alt="Text: Modern DBMSs also collect samples from tables to estimate selectivities. Update samples when the underlying tables changes significantly. The query SELECT AVG(age) FROM people WHERE age &gt; 50 over a people table of 1 billion tuples with columns id, name, age and status; rows 1001 Obama 64, 1003 Tupac 25 and 1005 DJ Cache 21 are marked with arrows. A Table Sample holds those three rows, with Obama's row outlined. To its left: sel(age&gt;50) = 1/3." loading="lazy">
+    <figcaption>Three sampled rows stand in for a billion: one of them has age over 50, so the estimate is sel(age &gt; 50) = 1/3 (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/16-optimization2.pdf#page=72">Lecture #16, slide 28</a>).</figcaption>
+  </figure>
+
+  <p>HW4's official solution compares the two main approaches. Histograms struggle with skewed data, because the bucket boundaries have to be right. A sample doesn't depend on predefined buckets, so it can estimate the selectivity of any predicate, provided the sample represents the data well. Sampling is slower than reading a histogram, though, and none of this depends on the column's data type. Slide 19 still marks histograms as the most common approach and sampling as rare.</p>
+
+  <h2>Selectivity of a filter</h2>
+
+  <p><strong>Cardinality estimation</strong> means estimating the number of rows an operator will produce. Slide 29 names the three estimates an optimizer must support: selection conditions (filters), join sizes, and distinct values. For each table R the DBMS keeps N<sub>R</sub>, the number of tuples in R, and V(A,R), the number of distinct values of attribute A. From those it derives the <strong>selection cardinality</strong> SC(A,R) = N<sub>R</sub> / V(A,R), the average number of tuples per value of A.</p>
+
+  <p>The <strong>selectivity</strong> sel(P) of a predicate P is the fraction of tuples that satisfy it, and the estimated output of a filter is N<sub>R</sub> × sel(P). For an equality, sel(A = constant) = occurrences / |R|. With the exact histogram, sel(age = 9) = 4/45 ≈ 0.089 (the slide truncates it to 0.088). The equi-depth histogram only knows that bucket [9,13] holds 9 tuples over 5 values, so it estimates (9/5)/45 ≈ 0.04, about half the true value, because 9 is a local peak inside its bucket. That estimate rests on the first assumption:</p>
+
+  <ul>
+    <li><strong>Uniform data:</strong> within a histogram bucket, values (except for the heavy hitters) are equally frequent.</li>
+  </ul>
+
+  <p class="sidenote">Selectivity is a fraction, so a predicate that matches few tuples has a <em>low</em> selectivity. HW4 Q2(b), quizzed in Lesson 5, calls OR predicates that "retrieve a few tuples" "high selectivity", the opposite usage. Saying a predicate is "highly selective" or "matches few tuples" avoids the clash.</p>
+
+  <p>The other single-predicate rules:</p>
+  <ul>
+    <li>A <strong>range</strong> adds the buckets fully inside the range to the matching share of the bucket the range starts in: sel(A ≥ a) = (#RANGE-ROWS + #EQ-ROWS) / |R|.</li>
+    <li>A <strong>negation</strong> is the complement: sel(not P) = 1 − sel(P). For sel(age ≠ 2), bucket [1,5] gives sel(age = 2) ≈ (12/5)/45 ≈ 0.053, so sel(age ≠ 2) ≈ 0.95. Slide 34 notes that selectivity behaves like a probability, and the formulas for combining predicates follow from that.</li>
+    <li>On a <strong>unique key</strong>, an equality matches at most one tuple. The notes call this the easy case, and HW4 uses it.</li>
+  </ul>
+
+  <figure class="slide">
+    <img src="../assets/slides/L16-range-selectivity-p82.png" alt="Text: Range Predicate: sel(A &gt;= a) = (#RANGE-ROWS + #EQ-ROWS) / |R|. Example: sel(age &gt;= 7) ≈ ((9+12) + (2 × (12/3))) / 45 ≈ 29 / 45 ≈ 0.6444. A warning: This assumes continuous distribution of values. The query SELECT * FROM people WHERE age &gt;= 7. An Equi-Depth Histogram with buckets [1,5] 12, [6,8] 12 outlined in red, [9,13] 9 and [14,15] 12." loading="lazy">
+    <figcaption>sel(age ≥ 7): buckets [9,13] and [14,15] count in full (9 + 12), and values 7 and 8 take two thirds of bucket [6,8], 2 × 12/3 = 8. That gives 29/45 ≈ 0.64; the exact histogram says 32/45 ≈ 0.71, because 8 holds 8 of the bucket's 12 tuples (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/16-optimization2.pdf#page=82">Lecture #16, slide 33</a>).</figcaption>
+  </figure>
+
+  <h2>Combining predicates</h2>
+
+  <p>For <code>WHERE age = 2 AND name LIKE 'A%'</code>, with sel(age = 2) ≈ 0.053 and sel(name LIKE 'A%') ≈ 0.1, the two attributes have their own distributions, and the optimizer needs a rule to combine them. That is the second assumption:</p>
+  <ul>
+    <li><strong>Independent predicates:</strong> the selectivity of a conjunction is the product of the predicates' selectivities.</li>
+  </ul>
+  <p>So sel(P1 ∧ P2) = sel(P1) × sel(P2) ≈ 0.053 × 0.1 ≈ 0.0053. A disjunction subtracts the overlap so that tuples matching both aren't counted twice: sel(P1 ∨ P2) ≈ sel(P1) + sel(P2) − sel(P1) × sel(P2) ≈ 0.053 + 0.1 − 0.0053 ≈ 0.1477, again assuming independence. Slide 37 adds that when there are several predicates, systems may diminish their weights to reduce underestimation.</p>
+
+  <p>Correlated columns break independence. Slide 39's example, from Guy Lohman: a database of cars with 10 makes and 100 models, queried with <code>WHERE make = 'Honda' AND model = 'Accord'</code>. Independence and uniformity give 1/10 × 1/100 = 0.001. But only Honda makes Accords, so the real selectivity is 1/100 = 0.01, ten times the estimate. Correlated predicates are underestimated, which is the problem column-group statistics address.</p>
+
+  <h2>Join size</h2>
+
+  <p>For a join, the question is how many tuples of S each tuple of R matches. The answer rests on the third assumption:</p>
+  <ul>
+    <li><strong>Containment:</strong> the domains of the join keys overlap so that every key in the inner relation also exists in the outer table.</li>
+  </ul>
+  <p>Take R ⋈ S on a shared attribute A that isn't a key of either table. Each R tuple matches about N<sub>S</sub> / V(A,S) tuples of S, giving N<sub>R</sub> × N<sub>S</sub> / V(A,S); counting from S's side gives N<sub>R</sub> × N<sub>S</sub> / V(A,R). The slide takes the smaller of the two:</p>
+  <p><strong>estSize ≈ N<sub>R</sub> × N<sub>S</sub> / max(V(A,R), V(A,S))</strong></p>
+  <p>When the join goes from a foreign key to the primary key it references, the result is simpler: every tuple of the referencing table matches exactly one tuple of the referenced table, so the join has as many rows as the referencing table. The general formula agrees, because the primary key's V equals its table's size and is the larger V.</p>
+
+  <p>Estimates feed into each other. In a plan joining A, B and C, the size of A ⋈ B is estimated from the base tables, and (A ⋈ B) ⋈ C is then estimated from that estimate, so an error at the bottom grows on the way up. The notes say errors "may cascade and amplify in subsequent operations", and slide 44 sums up the whole process as "fraught with errors". That is why HW4 Q2(g), in Lesson 7, refuses to promise that the cheapest estimated plan is the fastest one.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=azTHRpzl10o&amp;t=2283s">#16 Query Planning &amp; Optimization II, "Estimating cardinality" (38:03)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/16-optimization2.pdf#page=46">slides 19–43</a>: one 43-minute chapter that runs to the end of the lecture. It covers histograms, sketches and sampling first (slides 19–28), then the selectivity formulas, the three assumptions and join size (slides 29–43).</p>
+
+  <h2>BusTub has none of this</h2>
+
+  <p>BusTub's optimizer keeps no histograms, sketches or samples. Its <code>EstimatedCardinality</code> reads a table's size from a suffix in its name, such as <code>_1m</code> or <code>_100k</code>, with the comment that this is the only way to get the table size because BusTub doesn't support statistics yet. Project 3's rules are heuristics, as Lesson 7 described. Unit 6 builds them.</p>
+
+  <h2>Work it out: HW4 Question 3(b)</h2>
+
+  <p>HW4 Question 3(b) gives four tables, assumes uniformity, and assumes perfect overlap: the distinct B values in R1 are the same as in R2, and likewise for C and the other shared attributes.</p>
+
+  <table>
+    <tr><th>Table</th><th>Tuples</th><th>Distinct values</th></tr>
+    <tr><td>R1(A, B)</td><td>N1 = 4,000</td><td>V(A,R1) = 250, V(B,R1) = 500</td></tr>
+    <tr><td>R2(B, C)</td><td>N2 = 8,000</td><td>V(B,R2) = 500, V(C,R2) = 800</td></tr>
+    <tr><td>R3(C, D), with D a foreign key to R4(D)</td><td>N3 = 16,000</td><td>V(C,R3) = 800, V(D,R3) = 900</td></tr>
+    <tr><td>R4(D, E), with D the primary key</td><td>N4 = 4,000</td><td>V(D,R4) = 4,000, V(E,R4) = 1,200</td></tr>
+  </table>
+
+  <p>Work each estimate out before opening the hints. The first item uses the slides' histogram instead.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u5l8-histograms">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u5l8-histograms-cb">
+        <label for="u5l8-histograms-cb">Estimate how many tuples have age = 2, first from the equi-depth histogram, then from the end-biased histogram. Compare both with the true count.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which bucket holds 2 in each histogram, and what does each assume about the values inside that bucket?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Equi-depth: 2 is in [1,5], so divide its count evenly over 5 values. End-biased: 2 isn't among the five exact keys, so it gets the R bucket's average.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>Equi-depth: 12 / 5 = <strong>2.4</strong>. End-biased: <strong>1.7</strong>. The true count is 3. Both histograms smooth value 2 toward its neighbours; the end-biased one is exact only for the heavy hitters 8, 15, 3, 9 and 14.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u5l8-hw4-b1">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u5l8-hw4-b1-cb">
+        <label for="u5l8-hw4-b1-cb">HW4 Q3(b)i: estimate the number of tuples in σ<sub>D=100</sub>(R4).</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>What does it mean that D is R4's primary key?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>An equality on a unique key matches at most one tuple. The uniformity formula SC(D,R4) = N4 / V(D,R4) agrees.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p><strong>1</strong>. Official: R4.D is a primary key, so the optimizer estimates 1 tuple; 4,000 / 4,000 = 1 as well. The distractors 900 and 1,200 are V(D,R3) and V(E,R4).</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u5l8-hw4-b3">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u5l8-hw4-b3-cb">
+        <label for="u5l8-hw4-b3-cb">HW4 Q3(b)iii: estimate the number of tuples in σ<sub>A=5</sub>(R1).</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>A isn't a key, so under uniformity every value of A appears equally often.</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Use the selection cardinality SC(A,R1) = N1 / V(A,R1), with the distinct count of A, not of B.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>4,000 / 250 = <strong>16</strong>, as in the official solution. Dividing by V(B,R1) = 500 instead gives the distractor 8.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u5l8-hw4-b4">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u5l8-hw4-b4-cb">
+        <label for="u5l8-hw4-b4-cb">HW4 Q3(b)iv: estimate the number of tuples in σ<sub>C≠99</sub>(R3).</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>It is easier to estimate C = 99 first and take the complement.</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>sel(C = 99) = 1 / V(C,R3), and sel(not P) = 1 − sel(P). Multiply by R3's size, N3.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>16,000 − 16,000 / 800 = 16,000 − 20 = <strong>15,980</strong>. The official solution prints the formula with N2, but the numbers are R3's, N3 = 16,000. The distractor 20 is the estimate for C = 99 itself.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u5l8-hw4-b5">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u5l8-hw4-b5-cb">
+        <label for="u5l8-hw4-b5-cb">HW4 Q3(b)v: estimate the number of tuples in σ<sub>B=2 ∧ C=2</sub>(R2).</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Two equality predicates on different columns of one table, combined with AND.</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Independence multiplies the selectivities: N2 × (1 / V(B,R2)) × (1 / V(C,R2)).</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>8,000 / 500 / 800 = <strong>0.02</strong>, as in the official solution. An estimate is an expected value, so it can be a fraction. Applying only one of the predicates gives the distractors 16 and 10.</p></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="callout"><!-- homework-box -->
+    <p class="callout-label">The homework behind these questions</p>
+    <p>The questions marked HW4 come from CMU's Homework #4: <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw4-clean.pdf#page=6">Question 2</a> and <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw4-clean.pdf#page=7">Question 3</a>, with the original figures. Work each one out on paper first, then click the option you got. The quiz tells you at once whether it matches CMU's official answer, and explains why. To compare your working step by step, open the official solutions for <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw4-sols.pdf#page=6">Question 2</a> and <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw4-sols.pdf#page=8">Question 3</a>.</p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">HW4 Q2(j): which description fits an equi-depth histogram?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is the plain per-value histogram on slide 20.">It keeps an exact count for every distinct value.</li>
+      <li data-option="b" data-explain="Equal range widths define the equi-width histogram. HW4's statement gave the equi-depth histogram this property, and the official answer is False.">It groups values into buckets that all span the same range of values.</li>
+      <li data-option="c" data-explain="Official solution: an equi-depth histogram varies the range size of its buckets so that each holds roughly the same number of occurrences. In the slides' example the buckets [1,5], [6,8], [9,13] and [14,15] hold 12, 12, 9 and 12.">It varies the bucket widths so that each bucket holds roughly the same number of occurrences.</li>
+      <li data-option="d" data-explain="That is the end-biased histogram on slide 23.">It stores exact counts for the most frequent keys and one average for the rest.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">HW4 Q2(i) and Q2(k): a selection predicate's selectivity can be estimated from a histogram on its column or from a sample of the table. Which statement matches CMU's official solutions?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Q2(i) is True: sampling only looks at a subset of the table. For Q2(k), the only true option is that sampling adapts better to arbitrary predicates, because it doesn't rely on predefined bins; the solution adds that sampling is slower than histograms.">Sampling evaluates the predicate on a subset of the table's tuples and adapts better to arbitrary predicates than a histogram, but it is slower.</li>
+      <li data-option="b" data-explain="The official solution says histograms often struggle with skewed data, because the bin boundaries are hard to get right.">Histograms are more accurate than sampling for skewed data, because their buckets follow the skew.</li>
+      <li data-option="c" data-explain="The official solution says sampling is slower than histograms.">Sampling always gives faster estimates than histograms, because it reads fewer tuples.</li>
+      <li data-option="d" data-explain="The official solution says all of this holds regardless of the column's data type.">Histograms work better for floating-point columns than for integer columns.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">HW4 Q3(a): University(id, name, state, city) has 10,000 rows; 10% have state = 'PA' and 0.5% have city = 'Pittsburgh'. Under the uniformity and independence assumptions, what is the estimated cardinality of <code>SELECT * FROM University WHERE state = 'PA' AND city = 'Pittsburgh'</code> (rounded up), and is it likely an overestimate or an underestimate?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The arithmetic is right, but the direction isn't: independence ignores that Pittsburgh rows are also PA rows, which makes the estimate too low.">5, an overestimate</li>
+      <li data-option="b" data-explain="Official: ⌈10,000 × 0.1 × 0.005⌉ = 5, and it is likely an underestimate because state and city are highly correlated. If every Pittsburgh row is in PA, the true count is about 10,000 × 0.005 = 50, like the Honda Accord example.">5, an underestimate</li>
+      <li data-option="c" data-explain="10,000 × 0.005 = 50 applies only the city predicate; under independence the state predicate multiplies in as well.">50, an underestimate</li>
+      <li data-option="d" data-explain="10,000 × 0.1 × 0.5 reads 0.5% as 0.5.">500, an overestimate</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">HW4 Q3(b)ii, with the tables above: estimate the number of tuples in the natural join R3 ⋈ R4.</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="V(D,R3) = 900 is a count of distinct values, not a join size.">900</li>
+      <li data-option="b" data-explain="N4 counts R4's tuples, but many R3 tuples can reference the same R4 tuple.">4,000</li>
+      <li data-option="c" data-explain="16,000 × 4,000 / 900 divides by the smaller V. Slide 42 divides by the larger, here V(D,R4) = 4,000.">71,111</li>
+      <li data-option="d" data-explain="R3.D is a foreign key to R4's primary key, so each R3 tuple joins with exactly one R4 tuple: N3 = 16,000. The formula agrees: 16,000 × 4,000 / max(900, 4,000) = 16,000. HW4 offered no such number, so its official box is 'None of the above'.">16,000</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">HW4 Q3(b)vi and vii, with the tables above: estimate R1 ⋈ R2, and then R1 ⋈ R2 ⋈ R3, assuming the number of distinct C values is always 800.</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="128,000 = 4,000 × 8,000 / 250 divides by V(A,R1), but the join is on B. The second number then inherits the error.">128,000, then 2,560,000</li>
+      <li data-option="b" data-explain="40,000 = 4,000 × 8,000 / 800 divides by V(C,R2), which isn't the join attribute.">40,000, then 800,000</li>
+      <li data-option="c" data-explain="On B: 4,000 × 8,000 / max(500, 500) = 64,000. Then on C, using that estimate as the left input: 64,000 × 16,000 / 800 = 1,280,000. Both match the official solution.">64,000, then 1,280,000</li>
+      <li data-option="d" data-explain="The first number is right, but 64,000 × 16,000 / 500 divides the second join by V(B), the first join's attribute. The second join is on C.">64,000, then 2,048,000</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why the count-min sketch takes the minimum, why a range estimate splits a bucket, why correlated predicates are underestimated, or why the join formula divides by the larger distinct count. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 Lecture #16 <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/16-optimization2.pdf">slides</a> 12–44 and <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/16-optimization2.pdf">notes</a> (sections 2–3); Lecture #15 notes §6; Homework #4 Question 2(i), (j) and (k) and Question 3, with the <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw4-sols.pdf">official solutions</a>; BusTub <code>src/optimizer/</code> at commit d49b823; Lectures #09, #13 and #14 (warm-up).</p>
+
+  <div class="lesson-nav">
+    <a href="./u5-07-query-optimization-rules-and-search.html">← Query Optimization I: Rewrite Rules and Plan Search</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u6-01-p3-sql-pipeline.html">P3.0 The SQL Pipeline: Postgres Parser, Binder, Planner, EXPLAIN →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

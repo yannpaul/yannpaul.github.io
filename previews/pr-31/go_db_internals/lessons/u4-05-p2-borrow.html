@@ -1,0 +1,356 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 4 · Lesson 5 · P2.5 Deletion: Borrowing from Siblings</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 4 · Lesson 5</p>
+  <h1>P2.5 Deletion: Borrowing from Siblings</h1>
+  <p class="subtitle">Implement Remove for every case that needs no merge: find the leaf, delete the entry, let the root leaf shrink, and repair an underflowing leaf by borrowing one entry from the sibling the tests expect and moving the parent's separator.</p>
+
+  <p class="lede">Your tree can grow; this stage makes it shrink. A deletion that leaves a leaf at least half full is a one-page change. One that leaves it too empty must take an entry from a neighbor, and the parent's separator moves with it. Unit 3 traced both on paper, under two different rules. This lesson says which rule the Go tests check, and builds the borrowing half of it; merging follows in the next lesson.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 3, Lesson 8: under latch crabbing, when is a node "safe" for a delete, so that a writer can release the latches above it?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is the safety test for an insert: one more entry fits. A delete removes an entry, so what matters is whether the node can lose one.">When it isn't full, so one more entry would fit.</li>
+      <li data-option="b" data-explain="Being a leaf doesn't help: a leaf can underflow and trigger a borrow or a merge that changes its parent.">When it is a leaf, because only leaves lose entries in a delete.</li>
+      <li data-option="c" data-explain="A node that is more than half full can lose one entry and still meet the minimum, so no merge or borrow below can reach its parent.">When it is more than half full, so losing one entry can't make it underflow.</li>
+      <li data-option="d" data-explain="Exactly half full is the unsafe case: one more removal takes the node below the minimum.">When it is exactly half full, the size the tree aims for.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 2, Lesson 7: a goroutine holds a write guard on a B+tree parent page and calls <code>WritePage</code> for a child. Why can't the lock order between frame latches and <code>bpmLatch</code> deadlock here?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The order is frame latch first, pool latch second. Fetching while holding a guard follows it, and the buffer pool never waits for a frame latch while it holds bpmLatch, so no cycle can form.">Holding a frame latch and then taking the pool latch follows the order, and the pool never waits for a frame latch while holding bpmLatch.</li>
+      <li data-option="b" data-explain="WritePage takes bpmLatch to look up and pin the frame. Order, not the absence of the pool latch, is what rules out the cycle.">WritePage never takes bpmLatch, because the child's frame latch is enough.</li>
+      <li data-option="c" data-explain="Write guards on different pages hold different frame latches; nothing makes them share one. The question is about the order between the two kinds of latch.">Write guards on the parent and the child share one latch, so there is nothing to order.</li>
+      <li data-option="d" data-explain="Go's sync.Mutex has no deadlock detection. The lock order is what makes a cycle impossible.">The Go runtime detects the cycle and wakes one of the goroutines.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 4, Lesson 2: an internal page has <code>Size()</code> = 4, keys 30, 60 and 90 at indexes 1 to 3, and children P0 to P3. Which children do searches for 90 and for 89 follow?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="P2 covers 60 ≤ K &lt; 90, so 90 itself goes to the child after it.">P2 for both.</li>
+      <li data-option="b" data-explain="A key equal to a separator goes right, so 90 doesn't stay with P2. And 89 is below 90.">P2 for 90, and P3 for 89.</li>
+      <li data-option="c" data-explain="89 is below 90, so it belongs to the child before the separator 90.">P3 for both.</li>
+      <li data-option="d" data-explain="Child i covers KeyAt(i) ≤ K &lt; KeyAt(i+1). Three valid keys are ≤ 90, so 90 goes to P3; two are ≤ 89, so 89 goes to P2.">P3 for 90, and P2 for 89.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>What stage 5 covers</h2>
+
+  <p>Everything happens in <code>BPlusTree.Remove</code> in <code>btree/b_plus_tree.go</code>, plus helpers on the leaf page. Its doc comment states the rules, and the stage-5 tests in <code>b_plus_tree_delete_extra_test.go</code> check them in the cases where no merge is needed:</p>
+  <ul>
+    <li>Removing from an empty tree, or removing a key that isn't in the tree, does nothing. <code>Remove</code> returns nothing, so there is no result to report.</li>
+    <li>A page other than the root underflows when its size drops below <code>MinSize</code>, which for a leaf is <code>MaxSize / 2</code> rounded down (Lesson 1). A leaf that is still at <code>MinSize</code> or above needs no repair.</li>
+    <li>The root leaf has no minimum: it may shrink to a single entry. What happens when it becomes empty is stage 6.</li>
+    <li>An underflowing page is repaired with one sibling, and the comment fixes which one: "its right sibling under the same parent if it has one, otherwise its left sibling". A sibling is an adjacent child of the same parent. The next leaf in the leaf chain doesn't count when it hangs under another parent.</li>
+    <li>Redistribute first: "if the sibling holds more than <code>MinSize</code> entries, borrow one entry from it and update the separator in the parent." Only a sibling at exactly <code>MinSize</code> leads to a merge, which is stage 6.</li>
+  </ul>
+
+  <h2>Which rule the Go tests expect</h2>
+
+  <p>Unit 3, Lesson 4 met two rules for an underflowing node. The lecture's algorithm (Lecture #08, slide 32) tries to redistribute first and merges only when no sibling can lend. HW3's official answer to Q3(c) is consistent with the opposite order: merge if the two nodes fit in one, and redistribute only if they don't. The writeup leaves the choice to you, and CMU's own tests mostly check that the tree stays valid. This course's tests check exact shapes, so they pin one rule, and it is the lecture's order with a fixed sibling choice:</p>
+
+  <table>
+    <tr><th></th><th>Lecture #08, slide 32</th><th>HW3 Q3(c) official answer</th><th>This course's tests</th></tr>
+    <tr><td>First choice</td><td>borrow from a sibling with an entry to spare</td><td>merge if the two nodes fit in one</td><td>borrow, if the sibling holds more than <code>MinSize</code></td></tr>
+    <tr><td>Second choice</td><td>merge</td><td>borrow</td><td>merge (stage 6)</td></tr>
+    <tr><td>Which sibling</td><td>either</td><td>either</td><td>the right one under the same parent, else the left one</td></tr>
+  </table>
+
+  <p><code>TestBPlusTreeBorrowBeforeMerge</code> is the test that tells the two orders apart. With a leaf max size of 5 (min size 2), the tree <code>(3) / (|1,2) (|3,4,5)</code> loses 1. The leaf <code>[2]</code> underflows, and it and its sibling would fit together in one leaf. HW3's rule merges them and the root collapses into <code>(|2,3,4,5)</code>. The tests expect the borrow: the sibling holds 3 entries, more than its minimum of 2, so it lends 3, and the tree becomes <code>(4) / (|2,3) (|4,5)</code>. With even leaf max sizes the two orders give the same trees, which is why most shape tests use them; this test uses 5 on purpose. Use the HW3 rule only for the homework.</p>
+
+  <p>Trees are written as in the test messages, level by level: <code>(3)</code> is an internal page with the single key 3, and <code>(|1,2)</code> is a leaf holding 1 and 2. The part before the <code>|</code> lists tombstones, which stay empty until stage 7.</p>
+
+  <h2>Borrowing one entry</h2>
+
+  <p>A borrow moves the sibling's entry that sits next to the underflowing leaf, so the keys stay in order across the two leaves, and then fixes the one separator between them. Call the underflowing leaf's position in its parent <code>index</code> (you get it from <code>parent.ValueIndex(leafPageID)</code>) and the sibling's <code>sibIndex</code>.</p>
+  <ul>
+    <li>From the right sibling (<code>sibIndex = index + 1</code>), the sibling's first entry moves to the end of the leaf. The separator between them is <code>parent.KeyAt(sibIndex)</code>, the lower bound of the sibling's range, and it becomes the sibling's new first key.</li>
+    <li>From the left sibling (<code>sibIndex = index − 1</code>), the sibling's last entry moves to the front of the leaf. The separator is <code>parent.KeyAt(index)</code>, the lower bound of the leaf's own range, and it becomes the moved key, now the leaf's first key.</li>
+  </ul>
+
+  <p>The tests trace all three positions a leaf can have. With a leaf max size of 4 (min size 2):</p>
+  <ul>
+    <li>First child, right sibling: <code>(3) / (|1,2) (|3,4,5)</code>, remove 1. <code>[2]</code> borrows 3; the sibling now starts at 4, so the separator 3 becomes 4: <code>(4) / (|2,3) (|4,5)</code>.</li>
+    <li>Last child, left sibling: <code>(4) / (|1,2,3) (|4,5)</code>, remove 5. <code>[4]</code> has no right sibling, so <code>[1,2,3]</code> lends 3, and the separator 4 becomes 3: <code>(3) / (|1,2) (|3,4)</code>.</li>
+    <li>A middle child: <code>(30,40) / (|10,15,20) (|30,35) (|40,45,50)</code>, remove 30. Both neighbors could lend; the right one is used, so 40 moves over and the separator 40 becomes 45: <code>(30,45) / (|10,15,20) (|35,40) (|45,50)</code>. The separator 30 stays, although 30 is gone. It still separates the two ranges correctly, and Lesson 2 showed that a separator doesn't have to be a key of the tree.</li>
+  </ul>
+
+  <figure class="slide">
+    <img src="../assets/slides/L08-delete-borrow-p101.png" alt="Delete 6. The parent holds 4 and 12, with 12 in red, and a pointer labelled at least 12. Its leaves hold 1 and 3; 5 and 9, with 9 in red; and 12 and 14. A note in red reads Need to update parent node!" loading="lazy">
+    <figcaption>The lecture's borrow from the right: 9 moved into the underflowing leaf, and the parent's separator for the sibling became 12, the sibling's new first key. That is <code>parent.SetKeyAt(sibIndex, ...)</code> in the Go tree (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/08-indexes1.pdf#page=101">Lecture #08, slide 35</a>).</figcaption>
+  </figure>
+
+  <p>A borrow changes two siblings and one key of their parent. The parent's size stays the same, so a borrow can never make the parent underflow, and the repair ends there. That is what keeps this stage self-contained: merges remove an entry from the parent and can cascade upwards, and they wait for the next lesson.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=u7ii_Lvm9rM&amp;t=2735s">#08 B+Trees, "B+ tree deletion operations" (45:35)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/08-indexes1.pdf#page=93">slides 32–35</a>: the delete algorithm and the Delete 6 borrow above. Watch the first few minutes of the chapter; the merges after slide 35 belong to the next lesson.</p>
+
+  <h2>Latches in stages 5 to 8</h2>
+
+  <p>The package documentation allows stages 2 to 8 to use "a simpler, correct latching scheme"; stage 9 replaces it with optimistic crabbing. For <code>Remove</code>, take the same pessimistic path your <code>Insert</code> takes when it may split: a write guard on the header page, then write guards from the root down to the leaf, kept in a <code>Context</code>. The context's comment gives the useful facts. The parent of the page at the back of <code>WriteSet</code> is the entry before it, and <code>ctx.Release()</code> drops the header page first and then the rest from the top down. A <code>defer ctx.Release()</code> right after <code>NewContext()</code> releases everything on every return path.</p>
+
+  <p>The sibling isn't on the path, so take its write guard separately with <code>t.bpm.WritePage</code>, while you hold the parent's write guard. Drop it as soon as the borrow is done. Holding the parent matters: no other operation can reach either child through it while you change both children and the separator between them. Always go through <code>t.bpm</code>, the tracing wrapper; the stage-9 tests count guards there.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>BusTub's page classes shift array entries with <code>std::move</code> or <code>memmove</code>. Go's built-in <code>copy(dst, src)</code> does the same job on byte slices, and it is defined to work when the two slices overlap, in either direction. Removing entry <code>i</code> from a leaf is two overlapping copies, one over the key array and one over the RID array, each moving the bytes of entries <code>i+1</code> to <code>Size()−1</code> one slot to the left, followed by <code>ChangeSizeBy(-1)</code>. The pre-built <code>keyOffset</code> and <code>valueOffset</code> give the byte ranges; a key's width is the tree's key size, never a hard-coded 8.</p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">Leaf max size 4. The tree is <code>(30,40) / (|10,15,20) (|30,35) (|40,45,50)</code>, and 30 is removed. What does the tree look like afterwards?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Both neighbors could lend, but the doc comment picks the right sibling whenever there is one. The left one is used only for a last child.">(20,40) / (|10,15) (|20,35) (|40,45,50): the left sibling lends 20.</li>
+      <li data-option="b" data-explain="[35] underflows and the middle leaf has a right sibling holding 3 entries, more than its min size 2. Its first entry, 40, moves over, and the separator before the sibling becomes 45. The separator 30 still bounds the ranges correctly, so it stays.">(30,45) / (|10,15,20) (|35,40) (|45,50): the right sibling lends 40.</li>
+      <li data-option="c" data-explain="The right sibling has an entry to spare, and the tests redistribute before they merge.">(30) / (|10,15,20) (|35,40,45,50): the leaf merges with its right sibling.</li>
+      <li data-option="d" data-explain="One entry is below a non-root leaf's min size of 2, so the leaf must be repaired.">(30,40) / (|10,15,20) (|35) (|40,45,50): nothing else changes.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Leaf max size 5, internal max size 5. The tree is <code>(3) / (|1,2) (|3,4,5)</code>, and 1 is removed. Which result does <code>TestBPlusTreeBorrowBeforeMerge</code> expect?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That is HW3's Q3(c) rule: the two leaves fit in one, so they merge and the root collapses. The tests borrow first because the sibling holds more than its min size.">(|2,3,4,5)</li>
+      <li data-option="b" data-explain="The borrow moved 3, but the separator must change too: the right leaf now starts at 4, and a search for 3 following the separator 3 would go to the wrong leaf.">(3) / (|2,3) (|4,5)</li>
+      <li data-option="c" data-explain="[2] holds 1 entry, below the min size of 2. Its right sibling holds 3, more than 2, so it lends its first entry, 3. The separator becomes the sibling's new first key, 4.">(4) / (|2,3) (|4,5)</li>
+      <li data-option="d" data-explain="A non-root leaf with one entry is below MinSize = 5 / 2 = 2, so it must be repaired.">(3) / (|2) (|3,4,5)</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">An underflowing leaf is child 2 of its parent and has no right sibling, so it borrows from child 1. Which key of the parent changes, and to what?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="KeyAt(2) is the lower bound of child 2's range. The sibling's last entry moved to the front of child 2, so the bound must drop to that key.">KeyAt(2), which becomes the key that moved, now the leaf's first key.</li>
+      <li data-option="b" data-explain="KeyAt(1) is the lower bound of the sibling's range. The sibling lost its last entry, not its first, so its lower bound is still right.">KeyAt(1), which becomes the sibling's new last key.</li>
+      <li data-option="c" data-explain="Index 3 is past the last child here. The separator between children 1 and 2 is KeyAt(2).">KeyAt(3), which becomes the leaf's old first key.</li>
+      <li data-option="d" data-explain="The moved key is below the old separator, so leaving the separator unchanged would send searches for that key to the sibling, where it no longer is.">None: borrowing from the left keeps every separator valid.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Leaf max size 6. A leaf that is not the root holds 3 entries, and one of them is removed. What happens?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="MinSize is 6 / 2 = 3, and 2 entries are below it, so the leaf does need repair.">Nothing more: 2 entries is enough for a leaf of max size 6.</li>
+      <li data-option="b" data-explain="Only an empty root leaf is deleted. A non-root leaf with 2 entries is repaired by borrowing or merging with a sibling.">The leaf is deleted, and its entries move to the parent.</li>
+      <li data-option="c" data-explain="The sibling choice doesn't depend on which sibling is fuller: it is the right one under the same parent if there is one.">The leaf borrows from whichever sibling holds more entries.</li>
+      <li data-option="d" data-explain="Leaf MinSize rounds down: 6 / 2 = 3. With 2 entries the leaf underflows; it borrows if its sibling holds more than 3 entries, otherwise the two merge (stage 6).">The leaf underflows, because 2 is below its MinSize of 3, and it is repaired with its sibling.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Build it: deletion with borrowing (stage P2.5)</h2>
+
+  <p>You edit <code>btree/b_plus_tree.go</code> and add helpers to <code>btree/b_plus_tree_leaf_page.go</code>. Run commands from <code>go_db_internals/intro_to_db</code>. The rules, in plain words:</p>
+  <ul>
+    <li>Call <code>t.checkKey("Remove", key)</code> first. An empty tree or an absent key: return without changing anything.</li>
+    <li>Descend with write guards from the header page down, as your pessimistic <code>Insert</code> does, and release them all on every path.</li>
+    <li>A non-root leaf below <code>MinSize</code> underflows. The root leaf may keep a single entry.</li>
+    <li>Repair with the right sibling under the same parent, or the left one for a last child. If that sibling holds more than <code>MinSize</code> entries, move the one adjacent entry over and set the separator between the two leaves to the right-hand leaf's new first key.</li>
+    <li>A sibling at exactly <code>MinSize</code> means a merge, which is the next stage.</li>
+  </ul>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u4-05-descend">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-05-descend-cb">
+        <label for="u4-05-descend-cb">Start Remove: check the key, write-guard the header page, return for an empty tree, and write-guard the path from the root to the key's leaf in a Context.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Your <code>Insert</code> already walks this path with write guards. Can the walk be one helper that both methods call? Which guard must the empty-tree return drop, and what drops the others when the function returns early later on?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Create a <code>Context</code> and defer its <code>Release</code>. Put the header page's write guard in <code>ctx.HeaderPage</code> and read the root ID through <code>AsBPlusTreeHeaderPage</code>; if it is <code>common.InvalidPageID</code>, return. Otherwise store it in <code>ctx.RootPageID</code> and walk down: write-guard the page, append the guard to <code>ctx.WriteSet</code>, and if it is internal, find the child with your stage-2 search and continue. The leaf's guard ends up at the back of <code>WriteSet</code>, and its parent just before it.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>ctx := NewContext()
+defer ctx.Release() // header first, then the path, top down
+ctx.HeaderPage = t.bpm.WritePage(t.headerPageID, bufferpool.AccessUnknown)</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-05-remove-entry">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-05-remove-entry-cb">
+        <label for="u4-05-remove-entry-cb">Add a leaf helper that removes the entry at an index, and use it to delete the key from its leaf when the key is present.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Which entries move when entry <code>i</code> leaves, and in which direction? Your stage-2 lower-bound search returns an index and whether the key matched: what should <code>Remove</code> do when it didn't match?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>The helper shifts the keys and the RIDs of entries <code>index+1</code> to <code>Size()−1</code> one slot to the left with <code>copy</code>, then lowers the size by one. It is the mirror of the stage-3 helper that inserts at an index. In <code>Remove</code>, build a leaf view over the leaf guard's <code>DataMut()</code>, search for the key, return if it isn't there, and otherwise remove the entry. Stage 7 will make this helper move tombstone indexes too, so keep it the only place that removes leaf entries.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>// keys index+1 .. Size()-1 move one slot left; copy handles the overlap
+copy(p.data[p.keyOffset(index):p.keyOffset(p.Size()-1)], p.data[p.keyOffset(index+1):p.keyOffset(p.Size())])</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: removal without underflow</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreeBorrow(SimpleDelete|RootLeafShrinks)$' ./btree/</code>. The first test removes from an empty tree, then removes 4 from <code>(3) / (|1,2) (|3,4,5)</code> (the leaf keeps its minimum of 2) and four absent keys; the second shrinks a root leaf to one entry and checks that the root page is unchanged. Success prints <code>ok  	intro_to_db/btree</code>. A removal that forgets the RID array keeps the keys right but returns the wrong values, which <code>GetValue</code> reports as <code>GetValue(5) = (page_id: 0 slot_num: 4, true), want (page_id: 0 slot_num: 5, true)</code> or similar.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-05-underflow">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-05-underflow-cb">
+        <label for="u4-05-underflow-cb">After removing, detect an underflowing non-root leaf, find its position in the parent, and pick the sibling: the right one if it exists, otherwise the left one.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>How do you know whether the leaf is the root? Where in the context is its parent? Which page method turns the leaf's page ID into its position among the parent's children, and when is that position the last one?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>If <code>ctx.IsRootPage(leafID)</code>, stop: the root leaf has no minimum. If the leaf's size is at least <code>MinSize()</code>, stop. Otherwise build an internal view over the parent's guard, the entry before the leaf in <code>WriteSet</code>, and get <code>index := parent.ValueIndex(leafID)</code>. The sibling is <code>index + 1</code> unless that equals <code>parent.Size()</code>, in which case it is <code>index − 1</code>. Write-guard the sibling's page through <code>t.bpm</code>. Stage 6 will reuse this code for internal pages, so a function that takes a level of the write set instead of "the leaf" saves rewriting it.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>sibIndex := index + 1
+if sibIndex == parent.Size() { // the last child has no right sibling
+	sibIndex = index - 1
+}</code></pre></div>
+        </details>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-05-borrow-right">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-05-borrow-right-cb">
+        <label for="u4-05-borrow-right-cb">Borrow from the right sibling: move its first entry to the end of the leaf and set the separator before the sibling to the sibling's new first key.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>When is borrowing allowed: what must the sibling's size be compared with? After the move, which key is the lower bound of the sibling's range, and at which index of the parent is it stored?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>If the sibling's size is greater than its <code>MinSize()</code>: read its key and RID at index 0, insert them at the end of the leaf with your stage-3 insert helper, remove index 0 from the sibling with the helper from the second task, and call <code>parent.SetKeyAt(sibIndex, ...)</code> with the sibling's new <code>KeyAt(0)</code>. Then drop the sibling's guard. If the sibling is at its minimum, the leaves must merge; until stage 6, panic with a message that says so, rather than leaving an underflowing leaf behind silently. If you wrote the leaf helper that Lesson 3 suggested, which moves a range of entries into another leaf, a borrow is one call to it. Stage 7 moves tombstones together with their entries, so it helps if every move between leaves goes through that one helper.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>// after the sibling's first entry has moved to the end of node:
+parent.SetKeyAt(sibIndex, sib.KeyAt(0))</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: borrowing from the right</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreeBorrowLeafFromRight$' ./btree/</code>. It removes 1 from <code>(3) / (|1,2) (|3,4,5)</code> and expects <code>(4) / (|2,3) (|4,5)</code>, a valid tree, and every remaining key found. Success prints <code>ok  	intro_to_db/btree</code>. Forgetting the separator prints the tree you built under the shapes:</p>
+<pre><code>--- FAIL: TestBPlusTreeBorrowLeafFromRight (0.01s)
+    b_plus_tree_delete_extra_test.go:77: tree shape:
+         got: (3) / (|2,3) (|4,5)
+        want: (4) / (|2,3) (|4,5)</code></pre>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-05-borrow-left">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-05-borrow-left-cb">
+        <label for="u4-05-borrow-left-cb">Borrow from the left sibling: move its last entry to the front of the leaf and set the leaf's own separator to that key.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>This time the sibling's lower bound doesn't change. Whose lower bound does, and which index of the parent stores it?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>Read the sibling's last entry, at <code>Size()−1</code>, insert it at index 0 of the leaf, and remove it from the sibling. The separator to change is <code>parent.KeyAt(index)</code>, the leaf's own lower bound; set it to the leaf's new first key. With the range-moving helper, each borrow direction is one move plus one <code>SetKeyAt</code>.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>// after the sibling's last entry has moved to the front of node:
+parent.SetKeyAt(index, node.KeyAt(0))</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: borrowing from either side</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreeBorrow(LeafFromLeft|BeforeMerge|ManyLeaves)$' ./btree/</code>. <code>LeafFromLeft</code> removes 5 from <code>(4) / (|1,2,3) (|4,5)</code>. <code>BeforeMerge</code> is the leaf-max-5 case above, where a merge would also fit. <code>ManyLeaves</code> builds 48 keys in leaves of 3, then under every parent of leaves removes two keys from the first child; it checks that no leaf was merged and that every key is where it should be, for internal max sizes 3 and 4. Success prints <code>ok  	intro_to_db/btree</code>. A "merge if it fits" rule fails <code>BeforeMerge</code> with <code>got: (|2,3,4,5)</code>.</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="todo-item" data-todo-id="u4-05-release">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u4-05-release-cb">
+        <label for="u4-05-release-cb">Check that every guard Remove takes, including the sibling's, is dropped on every path.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>List the paths through <code>Remove</code>: empty tree, absent key, removal without underflow, borrow. Which guards does each one hold when it returns, and which of them are in the context?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The approach</summary>
+          <div class="reveal-body"><p>The deferred <code>ctx.Release()</code> covers the header page and the path. The sibling's guard isn't in the context: drop it explicitly right after the borrow. If you prefer, append it to <code>WriteSet</code>, but then remember it sits after the leaf, so "the back of <code>WriteSet</code>" is no longer the leaf.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>One key fragment</summary>
+          <div class="reveal-body"><pre><code>sibGuard := t.bpm.WritePage(parent.ValueAt(sibIndex), bufferpool.AccessUnknown)
+// ... borrow ...
+sibGuard.Drop() // not in ctx: nobody else will drop it</code></pre></div>
+        </details>
+        <div class="checkpoint">
+          <span class="checkpoint-label">Checkpoint: guards released</span>
+          <p>Run <code>go test -race -run '^TestBPlusTreeBorrowReleasesLatches$' ./btree/</code>. After a borrow and an absent-key removal it expects every pin count to be 0 and a write guard on the header page to be available. A leaked sibling guard fails with <code>page 3 has pin count 1 after the operations returned, want 0: a page guard was not dropped</code> (the page number varies).</p>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <div class="checkpoint">
+    <span class="checkpoint-label">Checkpoint: stage P2.5</span>
+    <p>From <code>go_db_internals/intro_to_db</code>, run:</p>
+<pre><code>go test -race -run '^TestBPlusTreeBorrow' ./btree/</code></pre>
+    <p>It runs the seven stage-5 tests, all extra tests standing in for CMU's hidden ones: <code>TestBPlusTreeBorrowSimpleDelete</code>, <code>TestBPlusTreeBorrowRootLeafShrinks</code>, <code>TestBPlusTreeBorrowLeafFromRight</code>, <code>TestBPlusTreeBorrowLeafFromLeft</code>, <code>TestBPlusTreeBorrowBeforeMerge</code>, <code>TestBPlusTreeBorrowManyLeaves</code> and <code>TestBPlusTreeBorrowReleasesLatches</code>. Success prints <code>ok  	intro_to_db/btree</code> and the time, about a second. BusTub's own deletion test, <code>DeleteTestNoIterator</code>, needs merges and runs in the next stage.</p>
+    <p>Typical failures: the stub still in place (<code>panic: TODO(P2): BPlusTree.Remove not implemented</code>); a shape mismatch, printed as <code>got:</code> and <code>want:</code> lines followed by a drawing of your tree; and an invalid tree, for example after a borrow that left the separator behind:</p>
+<pre><code>    b_plus_tree_delete_extra_test.go:78: invalid tree: keys out of order, out of their separators' bounds, or an empty page (BusTub's IsTreeValid)</code></pre>
+    <p>If a run sits silent, stop it and rerun with a time limit after the regex, which names the stuck test and prints every goroutine's stack when it fires:</p>
+<pre><code>go test -race -run '^TestBPlusTreeBorrow' -timeout 120s ./btree/</code></pre>
+    <p>Run the earlier stages too (<code>'^TestBPlusTree(Page|Search|Insert|Grow)'</code>): <code>Remove</code> shares the descent with <code>Insert</code>, and a change to it can break them.</p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why the tests borrow from a sibling that could also be merged with, why borrowing from the left changes the leaf's own separator rather than the sibling's, or why a borrow can never make the parent underflow. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: the CMU 15-445/645 Fall 2025 <a href="https://15445.courses.cs.cmu.edu/fall2025/project2/">Project #2 writeup</a> (Task #2, Development Roadmap); BusTub <code>src/include/storage/index/b_plus_tree.h</code> (Context) and <code>src/include/storage/page/b_plus_tree_page.h</code> at commit d49b823; Lecture #08 slides 32–35; Homework #3 Question 3(c) and its official solution; this course's <code>btree/b_plus_tree.go</code> (the doc comment of <code>Remove</code>) and <code>btree/b_plus_tree_delete_extra_test.go</code>; the Go specification for <a href="https://go.dev/ref/spec#Appending_and_copying_slices"><code>copy</code></a>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u4-04-p2-internal-splits.html">← P2.4 Internal Splits and New Roots</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u4-06-p2-merge.html">Next: P2.6 Deletion: Merging and Root Collapse →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cheat Sheet · Operator Precedence</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+<p class="eyebrow">Python Fundamentals · Cheat sheet</p>
+<h1>Operator Precedence</h1>
+<p class="subtitle">Highest first. Print it, and tick off the rung as you work out a line.</p>
+
+<p class="ladder-end">▲ Happens first</p>
+<ol class="ladder">
+  <li><span>Parentheses</span> <span class="ops">( )</span></li>
+  <li><span>Power</span> <span class="ops">**</span> <small>tied ones go right to left</small></li>
+  <li><span>Sign</span> <span class="ops">-x</span></li>
+  <li><span>Multiply, divide, floor-divide, remainder</span> <span class="ops">* / // %</span></li>
+  <li><span>Add, subtract</span> <span class="ops">+ -</span></li>
+  <li><span>Containment, comparison, identity</span> <span class="ops">in, not in, &lt; &lt;= &gt; &gt;= == !=, is, is not</span> <small>one rung in real Python; they chain</small></li>
+  <li><span>Logical not</span> <span class="ops">not</span></li>
+  <li><span>Logical and</span> <span class="ops">and</span></li>
+  <li><span>Logical or</span> <span class="ops">or</span></li>
+  <li><span>Assignment</span> <span class="ops">= += -= *= /= //= %=</span> <small>always last</small></li>
+</ol>
+<p class="ladder-end">▼ Happens last</p>
+
+<h2>The three-step habit</h2>
+<ol>
+  <li>Circle the operators.</li>
+  <li>Rank them with the ladder.</li>
+  <li>Do the highest first. Ties go left to right (except <code>**</code>). Assignment is last.</li>
+</ol>
+
+<h2>Shorthand assignment</h2>
+<table>
+<tr><th>Write</th><th>Means</th></tr>
+<tr><td><code>a += b</code></td><td><code>a = a + b</code></td></tr>
+<tr><td><code>a -= b</code></td><td><code>a = a - b</code></td></tr>
+<tr><td><code>a *= b</code></td><td><code>a = a * b</code></td></tr>
+<tr><td><code>a //= b</code></td><td><code>a = a // b</code></td></tr>
+</table>
+<p>Whatever is to the right of the operator is worked out <em>first</em>: <code>a *= b + 3</code> is <code>a = a * (b + 3)</code>.</p>
+
+<h2>Division family</h2>
+<table>
+<tr><th>Expression</th><th>Result</th></tr>
+<tr><td><code>17 / 5</code></td><td><code>3.4</code> (always a float)</td></tr>
+<tr><td><code>17 // 5</code></td><td><code>3</code> (round down)</td></tr>
+<tr><td><code>17 % 5</code></td><td><code>2</code> (remainder)</td></tr>
+<tr><td><code>-7 // 2</code></td><td><code>-4</code> (down, not toward zero)</td></tr>
+<tr><td><code>7.0 // 2</code></td><td><code>3.0</code> (float in, float out)</td></tr>
+</table>
+
+<h2>Traps</h2>
+<ul>
+  <li><code>2 + 3 * 4</code> is 14. <code>(2 + 3) * 4</code> is 20.</li>
+  <li><code>10 - 4 - 3</code> is 3 (left to right).</li>
+  <li><code>2 ** 3 ** 2</code> is 512 (right to left). <code>-2 ** 2</code> is -4.</li>
+  <li><code>True or False and False</code> is True, because <code>and</code> goes first.</li>
+  <li><code>5 in [1, 5] == True</code> is False: they chain. Add parentheses.</li>
+</ul>
+
+<div class="lesson-nav">
+<a href="../index.html">Course contents</a>
+<a href="../lessons/0001-operator-precedence.html">Lesson 1</a>
+<a href="./problem-bank.html#precedence">Practice problems</a>
+</div>
+</main>
+</body>
+</html>

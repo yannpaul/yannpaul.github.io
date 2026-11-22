@@ -1,0 +1,280 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 3 · Lesson 6 · Filters and Other Indexes: Bloom Filters, Skip Lists, Tries, and More</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 3 · Lesson 6</p>
+  <h1>Filters and Other Indexes: Bloom Filters, Skip Lists, Tries, and More</h1>
+  <p class="subtitle">Trace Bloom filter inserts and lookups, search a skip list, build and compress a trie into a radix tree, and pick the structure that fits a query, from inverted indexes for keywords to vector indexes for similarity, including HW3's Q4 and Q5.</p>
+
+  <p class="lede">The B+tree is the default index, and Lecture #09 ends by saying so again. It answers one kind of question: where are the tuples with this key, or with keys in this range? Other structures answer other questions, or the same one more cheaply. A filter tells you, from a few bits, whether a key could be in a set at all, and a skip list keeps keys in order without ever rebalancing. A trie can report a missing key before it reaches a leaf. Inverted and vector indexes find the records that contain a word or that resemble a query, which a B+tree can't do.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Lesson 2: what does a lookup in a chained hash table do, and when does it get slow?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That describes linear probing from Lesson 1. A chained table keeps its entries in buckets linked from each slot.">It scans forward from the key's slot to the next empty slot, and it slows down when long runs of full slots form.</li>
+      <li data-option="b" data-explain="That is cuckoo hashing's lookup, which checks one slot per hash function.">It checks one slot per hash function, and it slows down when the evictions cycle.</li>
+      <li data-option="c" data-explain="A lookup hashes to a slot and scans that slot's chain. Chains can grow without limit, and a long chain makes every lookup on that slot slow, which is why extendible and linear hashing split buckets instead.">It hashes to a slot and scans that slot's chain of buckets, and it slows down when a chain grows long.</li>
+      <li data-option="d" data-explain="Directories and doubling belong to extendible hashing. A plain chained table has no directory.">It reads the directory and then one bucket, and it slows down while the directory doubles.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 1, Lesson 3: in a log-structured store, <code>GET(key101)</code> doesn't find the key in the MemTable. What does the in-memory SummaryTable let the DBMS do next?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The SummaryTable keeps each SSTable's minimum and maximum key and a key filter per level, for example a Bloom filter, so the DBMS can skip SSTables that can't contain the key.">Skip the SSTables that can't contain the key, using each SSTable's key range and a key filter per level.</li>
+      <li data-option="b" data-explain="SSTables are sorted by key, but the DBMS still has to know which ones to search; the SummaryTable doesn't store record locations.">Jump straight to the key's record, because the SummaryTable stores every key's location on disk.</li>
+      <li data-option="c" data-explain="Compaction merges SSTables in the background; a GET doesn't trigger it.">Compact all SSTables into one, then binary-search the result.</li>
+      <li data-option="d" data-explain="The newest record for a key wins, so the search goes from the newest SSTable to the oldest, not the other way round.">Search the SSTables from oldest to newest, so that the first match is the key's original value.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 0, Lesson 2: in a SQL <code>LIKE</code> pattern, what do <code>%</code> and <code>_</code> match?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="That swaps the two: % is the one that matches any run of characters.">% matches exactly one character, and _ matches any substring.</li>
+      <li data-option="b" data-explain="% also matches the empty string: 'abc' LIKE 'abc%' is true.">% matches one or more characters, and _ matches exactly one.</li>
+      <li data-option="c" data-explain="LIKE patterns aren't regular expressions, and % and _ aren't anchors: they are wildcards that match characters.">Both are regular-expression anchors, for the start and end of the string.</li>
+      <li data-option="d" data-explain="In a LIKE pattern, % matches any substring, including the empty one, and _ matches exactly one character, so login LIKE '%@c_' matches all three students in that lesson.">% matches any substring, including the empty one, and _ matches exactly one character.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Indexes and filters</h2>
+
+  <p>Lecture #09 separates two kinds of structure. An index, like the B+tree, answers <em>where</em>: it is organized so that the DBMS can find the location of the tuples with a given key. A <strong>filter</strong> answers <em>whether</em>: it tells you if a key is (probably) in a set, but not where it is. The point of a filter is the negative answer. If the filter says a key isn't there, the DBMS skips the work of looking for it.</p>
+
+  <p>You have met two uses already. In Lesson 2, each bucket pointer of a chained hash table carried a filter, so that <code>Get G</code> could stop without scanning the chain. In Unit 1, Lesson 3, an LSM's SummaryTable kept a key filter per level, so that a <code>GET</code> could skip SSTables. The notes conclude that a DBMS needs both indexes and filters, and that a filter in front of an index can speed it up.</p>
+
+  <h2>Bloom filters</h2>
+
+  <p>A <strong>Bloom filter</strong> is a bitmap plus k hash functions. It supports only two operations:</p>
+  <ul>
+    <li>Insert(x): compute each hash function on x, take the result modulo the bitmap's size, and set that bit to 1.</li>
+    <li>Lookup(x): compute the same bit positions and check them. If any of them is 0, return false. If all are 1, return true.</li>
+  </ul>
+  <p>A false answer is always right: if x had been inserted, all its bits would be 1. So a Bloom filter never gives a <strong>false negative</strong>. A true answer can be wrong, because other keys may have set every one of x's bits between them. That is a <strong>false positive</strong>, and after a true answer the DBMS still has to look in the real data. The notes say a Bloom filter is defined by two parameters, the size of the bitmap and the number of hash functions, and slide 5 links a Bloom Filter Calculator for the false-positive rate they give. A key also can't be deleted. Clearing its bits could clear bits that other keys also set, and those keys would then turn into false negatives.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L09-bloom-false-positive-p10.png" alt="Left, a list of operations: Insert RZA, Insert GZA, Lookup RZA returns TRUE, Lookup Raekwon returns FALSE, Lookup ODB returns TRUE. Right, an 8-bit Bloom filter with bits 0 to 7 holding 0 1 0 1 1 0 1 0. Below it, hash1 of ODB equals 6699 mod 8 equals 3, and hash2 of ODB equals 9966 mod 8 equals 6, with arrows to bits 3 and 6." loading="lazy">
+    <figcaption>The slide's 8-bit filter after inserting RZA (bits 6 and 4) and GZA (bits 3 and 1). Raekwon hashes to bits 5 and 3; bit 5 is 0, so it is definitely absent. ODB was never inserted, but its bits 3 and 6 were set by GZA and RZA, so the lookup returns a false positive (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/09-indexes2.pdf#page=10">Lecture #09, slide 6</a>).</figcaption>
+  </figure>
+
+  <p>Two consequences come up in HW3. More hash functions don't always help: each one sets another bit per key, so the bitmap fills up faster, and the official solution notes that more hash functions can raise the false-positive rate through overlapping bits. And a filter doesn't replace an index for exact-match lookups. Even a perfect "maybe" still needs a look in the data, and the solution says a hash index is the better tool for that.</p>
+
+  <p>Slide 7 lists three other filters. A <strong>counting Bloom filter</strong> keeps an integer per position instead of a bit, counting how many keys set it, so keys can be removed by decrementing. A <strong>cuckoo filter</strong> is a cuckoo hash table, as in Lesson 1, that stores a short <strong>fingerprint</strong> of each key instead of the key, and it also supports removal. A <strong>succinct range filter</strong> (SuRF), from CMU, is an immutable compact trie that answers approximate exact-match queries and range queries.</p>
+
+  <div class="idiom">
+    <span class="idiom-label">Idiom</span>
+    <p>A Bloom filter in Go is a <code>[]uint64</code>: bit i lives in word <code>i/64</code>, so an insert does <code>bits[i/64] |= 1 &lt;&lt; (i % 64)</code> and a lookup tests the same bit with <code>&amp;</code>. The k hash functions can be one function with k seeds, the way Lesson 1 described cuckoo hashing. Lesson 1's caveat about <code>hash/maphash</code> applies too: its seeds are random per process, which is fine for a filter that lives in memory, but a filter saved next to an SSTable has to give the same bits after a restart, so it needs a hash with a fixed seed.</p>
+  </div>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=PjST2n7abAY&amp;t=219s">#09 Indexes &amp; Filters II, "Bloom filters" (3:39)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/09-indexes2.pdf#page=5">slides 5–6</a>: the Bloom filter's operations and the RZA, GZA and ODB example, step by step.</p>
+
+  <h2>Skip lists</h2>
+
+  <p>The simplest ordered structure that grows and shrinks is a sorted linked list, but every operation on it is a linear search, O(n). A <strong>skip list</strong> adds more linked lists on top of it. The bottom level holds every key in sorted order, the level above links about every second key, the next about every fourth, and so on: each level has about half the keys of the one below. A search starts at the top level, moves right while the next key is smaller than the target, and drops down a level when it would overshoot. That gives approximately O(log n) searches, and the keys stay sorted without any global rebalancing.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L09-skiplist-search-p32.png" alt="Find K3 in a three-level skip list. The bottom level, P equals N, links K1 to K6 with their values V1 to V6, then an End node holding infinity. The middle level, P equals N over 2, links K2, K4 and K5. The top level, P equals N over 4, links K5 only. Red annotations read K3 less than K5 on the top level, K3 greater than K2 and K3 less than K4 on the middle level. K3 on the bottom level is outlined in red with a red arrow pointing at it." loading="lazy">
+    <figcaption>Find K3: on the top level K3 &lt; K5, so drop down; on the middle level K3 &gt; K2, so move right, then K3 &lt; K4, so drop down from K2; one step right on the bottom level finds K3 (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/09-indexes2.pdf#page=32">Lecture #09, slide 11</a>).</figcaption>
+  </figure>
+
+  <p>To insert a key, the skip list flips a coin to decide how many levels the new node joins: it always joins the bottom level, and each successful flip adds it to one more level above. The notes give the order: link the node in from the bottom level up, so that a reader on another thread never finds a node on a high level with nothing below it. If each level is a singly linked list, linking in at one level is one atomic swap of a next pointer, and the notes say no latch is needed. Lesson 7 covers that instruction, compare-and-swap.</p>
+
+  <p>A delete happens in two steps. First the key is removed <em>logically</em>: a flag on the node tells other threads to ignore it. Then it is removed <em>physically</em>, unlinked from every level, once no other thread can still be holding a reference to it. The notes say a background thread usually does the physical removal at intervals, unlinking the top level before the bottom one so the structure stays intact.</p>
+
+  <p>Slide 14 weighs the result. A skip list may use less memory than a B+tree, if it has no reverse pointers, and inserts and deletes never rebalance anything. But it is not disk or cache friendly, because consecutive keys sit in nodes scattered in memory, and searching in reverse is hard. Skip lists are therefore mostly used in memory. The LSM MemTable from Unit 1, Lesson 3 is the slide's example, in systems such as RocksDB and WiredTiger.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=PjST2n7abAY&amp;t=1060s">#09 Indexes &amp; Filters II, "Skip list operations" (17:40)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/09-indexes2.pdf#page=18">slides 10–14</a>: inserting with coin flips, the search above, the two-step delete and the trade-offs.</p>
+
+  <h2>Tries</h2>
+
+  <p>A B+tree's inner keys can't tell you whether a key exists, because separators are only guide posts. Every lookup goes down to a leaf, at the cost of at least one buffer pool page access per level, just to learn that a key isn't there. A <strong>trie</strong>, also called a digital search tree or prefix tree, can stop earlier. It breaks each key into digits, such as characters or bits, and examines them one at a time: each level of the tree handles one digit, and the path from the root to a leaf spells out a key.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L09-trie-p45.png" alt="Left, text: Use a digital representation of keys to examine prefixes one-by-one, aka Digital Search Tree, Prefix Tree. Shape depends on keys and lengths; does not depend on existing keys or insertion order; does not require rebalancing operations. All operations have O(k) complexity where k is the length of the key; path to a leaf node represents a key; keys are stored implicitly and can be reconstructed from paths. Right: Keys HELLO, HAT, HAVE. A trie with root H, then a node holding A and E. Under A, a node with T and V; T leads to an end marker, V leads to E and then an end marker. Under E, the chain L, L, O, then an end marker. The path H, E, L, L, O is outlined in red." loading="lazy">
+    <figcaption>A trie over HELLO, HAT and HAVE. The prefix H is stored once for all three keys, and HA once for HAT and HAVE. Finding HELLO examines one character per level (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/09-indexes2.pdf#page=45">Lecture #09, slide 16</a>).</figcaption>
+  </figure>
+
+  <p>The slide lists the properties. A trie's shape depends only on the keys and their lengths, not on the order in which they were inserted or on which other keys exist, so it never needs rebalancing. Every operation costs O(k), where k is the length of the key, however many keys the trie holds. And the keys are stored implicitly: you can rebuild each one from its path.</p>
+
+  <p>The <strong>span</strong> of a trie level is the number of bits each digit represents. It sets the fanout and the tree's height: an n-way trie has a fanout of n. If a digit exists among the stored keys, its slot holds a pointer to the next level; otherwise it holds null. The lecture's 1-bit span trie for three 16-bit keys starts with a long chain of nodes that each have one child, drawn as "Repeat 10x", because all three keys begin with the same run of zero bits. The notes describe two compressions. Horizontal compression stores a node as an array instead of a map when the span is known. Vertical compression removes the chains of single-child nodes.</p>
+
+  <h2>Radix trees</h2>
+
+  <p>A trie with vertical compression is a <strong>radix tree</strong>; slide 19 also gives the name Patricia tree. Every chain of nodes with a single child is merged into one node holding the whole substring. The cost is that the full key is no longer embedded along the path, so a lookup can match a key that isn't really there. The slide says the DBMS therefore always checks the original tuple to confirm a match. Radix trees are common in practice; DuckDB, which you used in Unit 0, is one of the systems on the slide.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L09-radix-tree-p57.png" alt="A radix tree. The root H points to a node holding ELLO and A. ELLO leads to an end marker. A points to a node holding VE and T, each leading to an end marker." loading="lazy">
+    <figcaption>The same three keys as a radix tree: the single-child chain L, L, O after E collapses into one entry, ELLO, and V, E into VE (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/09-indexes2.pdf#page=57">Lecture #09, slide 20</a>).</figcaption>
+  </figure>
+
+  <p>Three properties of radix trees come up in HW3. They are efficient for prefix queries: all keys with a given prefix sit in one subtree. Unlike a B+tree, whose nodes must stay at least half full, a radix tree has no requirement on how many entries a node or level holds, and it needs no rebalancing; its shape follows from the keys. And when many keys share prefixes, it can take less space than a B+tree, because a shared prefix is stored once. What it can't do efficiently is a substring search such as <code>LIKE '%xyz%'</code>: a match can start anywhere in a key, so no single subtree holds the answers.</p>
+
+  <p>Slide 21 lists radix-tree variants: Judy arrays from HP, a 256-way radix tree and the first with an adaptive node representation; ART, from the HyPer system; Masstree, a B+tree with a trie inside each node; and SuRF.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=PjST2n7abAY&amp;t=1725s">#09 Indexes &amp; Filters II, "Radix trees" (28:45)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/09-indexes2.pdf#page=46">slides 17–21</a>: key span, compressing a trie into a radix tree, inserts and deletes, and the variants.</p>
+
+  <h2>Inverted indexes</h2>
+
+  <p>Every index so far serves point and range queries on a key. None helps with keyword search, such as finding every Wikipedia article that contains the word "Pavlo", which in SQL is <code>WHERE content LIKE '%Pavlo%'</code>. The leading <code>%</code> means the word can start anywhere, so there is no key prefix to search on.</p>
+
+  <p>An <strong>inverted index</strong> stores a mapping from terms to the records that contain them in the indexed attribute. It is also called a full-text search index; the slide says it was originally called a concordance, in the 1200s. Its two parts are a dictionary of terms and, for each term, a <strong>posting list</strong> of record IDs, the same name Lesson 5 used for deduplicated leaf entries.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L09-inverted-index-p67.png" alt="Left, text: An inverted index stores a mapping of terms to records that contain those terms in the target attribute; sometimes called a full-text search index; originally called a concordance (1200s). Many major DBMSs support these natively, but there are also specialized DBMSs and libraries. Right, a table revisions(id, content) with rows 11, 22, 33 and 44, each holding a paragraph of text. Below, a Dictionary with entries Wu-Tang 2, Carnegie 3 and Database 2, labelled Term / Frequency, each pointing to a Posting List: 11 and 44; 22, 33 and 44; 33 and 44." loading="lazy">
+    <figcaption>Each dictionary entry holds a term and the number of records containing it, and points to its posting list. "Carnegie" appears in records 22, 33 and 44, so a search for it reads one posting list instead of every row (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/09-indexes2.pdf#page=67">Lecture #09, slide 23</a>).</figcaption>
+  </figure>
+
+  <p>The lecture looks at two implementations:</p>
+  <ul>
+    <li>Lucene, a specialized inverted index engine, finds a term's offset in the dictionary with a <strong>finite state transducer</strong>: a trie-like structure with a weight on each edge, where the weights summed along a term's path give its position. The transducer is immutable, so new terms go into new segments that a background job merges, and the immutable dictionary can use Unit 1, Lesson 5's delta encoding and bit-packing.</li>
+    <li>PostgreSQL's Generalized Inverted Index (GIN) keeps the term dictionary in a B+tree. A term with few records has a sorted list of record IDs as its value; a term with many gets a second B+tree, a posting tree. A separate pending list collects updates and applies them in bulk, much like the mod logs in Lesson 5.</li>
+  </ul>
+  <p>Search engines add rankings and tokenizers on top. Rankings order the results by how often a term appears in a record compared with other records; the slide names TF-IDF and BM25. Tokenizers split terms into n-grams, so that "Wu-Tang" becomes the trigrams WuT, uTa, Tan and ang, which supports fuzzy search and autocomplete.</p>
+
+  <h2>Vector indexes</h2>
+
+  <p>An inverted index matches words, not meaning. An application that wants "hip-hop groups with songs about slinging" needs <strong>semantic similarity</strong>. A machine-learning model, such as a transformer, turns each record into an <strong>embedding</strong>, an array of floating-point numbers, so that records with similar meanings get embeddings that are close together. A <strong>vector index</strong> is a structure for nearest-neighbor search over embeddings. The lecture gives two kinds:</p>
+  <ul>
+    <li>Inverted (IVF): cluster the vectors, for example with k-means, and build an inverted index from each cluster's centroid to the records in that cluster. A search finds the nearest centroid and scans its list, and can also check nearby clusters to improve accuracy. The slide's examples are IVFFlat and pgvector.</li>
+    <li>Graph: each vector is a node with edges to its nearest neighbors. A search enters the graph and greedily follows the edge that moves closest to the query. HNSW stacks several such graphs in levels, with the same idea as a skip list's levels.</li>
+  </ul>
+  <p>Two things set these apart from every other index in the unit. Queries often need a filter as well, such as <code>year &gt; 2005</code>, applied before or after the vector search. And there is no exact right answer: slide 29 says correctness depends on whether the result "feels right".</p>
+
+  <h2>Work it out</h2>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u3l6-bloom-insert">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u3l6-bloom-insert-cb">
+        <label for="u3l6-bloom-insert-cb">HW3 Q4(a): an 8-bit Bloom filter starts with every bit 0 and uses two hash functions, taken modulo 8. h1 and h2 give 4721 and 8395 for "Pikachu", and 1568 and 4207 for "Bulbasaur". Which bits are 1 after both are inserted?</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Each insert sets one bit per hash function. Which bit does each hash value pick in an 8-bit filter?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>Take each of the four hash values modulo 8 and set those bits. A shortcut: x mod 8 is the value of x's last three bits.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>Pikachu: 4721 mod 8 = 1 and 8395 mod 8 = 3. Bulbasaur: 1568 mod 8 = 0 and 4207 mod 8 = 7. Bits <strong>0, 1, 3 and 7</strong> are 1, which matches the official solution.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u3l6-radix-edit">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u3l6-radix-edit-cb">
+        <label for="u3l6-radix-edit-cb">Start from the radix tree in the figure above (H, then ELLO and A, then VE and T under A). Insert HAIR, delete HAT, then delete HAVE, and draw the tree after each step.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Where does the path for HAIR leave the existing tree? And after the deletes, is any node left with a single child that a radix tree would merge?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>HAIR follows H and A, then needs a new entry for the rest of the key. Each delete removes its key's entry under A. Once A has only one child left, merge them into one entry.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p>Insert HAIR: A's node becomes VE, T and IR. Delete HAT: VE and IR remain. Delete HAVE: only IR remains under A, so A and IR merge, and the root H points to one node holding ELLO and AIR. These are the builds of slide 20.</p></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="callout"><!-- homework-box -->
+    <p class="callout-label">The homework behind these questions</p>
+    <p>The questions marked HW3 come from CMU's Homework #3: <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw3-clean.pdf#page=11">Question 4</a> and <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw3-clean.pdf#page=12">Question 5</a>, with the original figures. Work each one out on paper first, then click the option you got. The quiz tells you at once whether it matches CMU's official answer, and explains why. To compare your working step by step, open the official solutions for <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw3-sols.pdf#page=12">Question 4</a> and <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw3-sols.pdf#page=14">Question 5</a>.</p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <p>The first two questions use HW3's Bloom filter: 8 bits, two hash functions taken modulo 8. Its words hash as follows: "Charmander" to 9034 and 2876, and "Squirtle" to 6412 and 7559.</p>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">HW3 Q4(b): the filter's bits 0 to 7 hold 0 0 1 1 1 1 0 0. What do lookups of "Charmander" and of "Squirtle" tell you?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A Bloom filter can never confirm that a key was inserted, because other keys may have set its bits. And Squirtle's bit 7 is 0, which rules it out.">Charmander has been inserted; Squirtle may have been inserted.</li>
+      <li data-option="b" data-explain="Charmander's bits 2 and 4 are both 1, so the filter says true, which can't rule it out.">Charmander has not been inserted; Squirtle has not been inserted.</li>
+      <li data-option="c" data-explain="Charmander: 9034 mod 8 = 2 and 2876 mod 8 = 4, both 1, so the filter returns true: it may have been inserted. Squirtle: 6412 mod 8 = 4 and 7559 mod 8 = 7; bit 7 is 0, and Bloom filters have no false negatives, so it has not been inserted. This matches the official solution.">Charmander may have been inserted; Squirtle has not been inserted.</li>
+      <li data-option="d" data-explain="A 0 bit gives a definite answer. Squirtle's bit 7 is 0.">Charmander may have been inserted; Squirtle may have been inserted.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">HW3 Q4(c): which set contains exactly the statements about Bloom filters that CMU's official solution marks true?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Both are selected in the official solution. A negative answer saves the I/O of looking for a key that isn't there, as with the LSM's per-level filters, and the k bits of an add or a lookup are independent of each other.">Bloom filters can reduce disk I/Os; add and lookup operations on them are parallelizable.</li>
+      <li data-option="b" data-explain="The official solution also marks the parallelizable statement true.">Bloom filters can reduce disk I/Os, and none of the other statements holds.</li>
+      <li data-option="c" data-explain="Official: for exact-match queries, query execution is better off using a hash index.">Bloom filters are more effective than hash indexes for exact-match lookups; they can reduce disk I/Os.</li>
+      <li data-option="d" data-explain="Official: using more hash functions can increase the likelihood of false positives, due to overlapping bits.">Using more hash functions always lowers the false-positive rate; add and lookup operations are parallelizable.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">HW3 Q5(a): which set contains exactly the statements about radix trees that CMU's official solution marks true?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Official: radix trees do not support efficient substring searches; they are optimized for prefix matching.">They are efficient for prefix queries; they support efficient substring searches such as LIKE '%?%'; they can use less space than B+trees when keys share prefixes.</li>
+      <li data-option="b" data-explain="Two more statements are true: levels have no node requirements, and shared prefixes can save space.">They are efficient for prefix queries, and none of the other statements holds.</li>
+      <li data-option="c" data-explain="Official: radix trees do not require rebalancing like balanced trees do. A trie's shape depends only on its keys.">They are efficient for prefix queries; they need rebalancing after every insert or delete; their levels have no node requirements.</li>
+      <li data-option="d" data-explain="All three are selected officially: efficient prefix queries, no requirement on the size of each level, and less space than a B+tree for datasets whose keys share many prefixes.">They are efficient for prefix queries; their levels have no node requirements; they can use less space than B+trees when keys share many prefixes.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">HW3 Q5(b): comparing B+trees, skip lists, radix trees and inverted indexes, which statement does CMU's official solution mark true?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Official: B+trees generally do better than skip lists on range queries, thanks to their sequential access patterns. Slide 14 calls skip lists not disk or cache friendly.">Skip lists perform better than B+trees for range queries.</li>
+      <li data-option="b" data-explain="Official: B+trees are generally more expensive to update than skip lists, because of node splits and merges. A skip list never rebalances (slide 14).">It is, on average, cheaper to update a skip list than a B+tree.</li>
+      <li data-option="c" data-explain="A skip list's search time is only approximately O(log n), because its levels come from coin flips. Official: not guaranteed.">B+trees and skip lists both guarantee logarithmic lookup cost.</li>
+      <li data-option="d" data-explain="Official: B+trees are not efficient for substring queries, so the pair is false.">B+trees and inverted indexes are both efficient at substring queries such as LIKE '%?%'.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">HW3 Q5(c): <code>SELECT * FROM PRODUCTS WHERE description LIKE '%laptop%';</code> runs slowly, although there is a non-clustering B+tree index on <code>description</code>. Which change would make it substantially faster?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="A Bloom filter answers whether one exact key is in a set. It can't answer which descriptions contain a word.">Drop the index and build a Bloom filter on description.</li>
+      <li data-option="b" data-explain="A hash index needs the whole key to compute the hash, so it can't match part of a description.">Replace the index with a hash index on description.</li>
+      <li data-option="c" data-explain="The leading % leaves no key prefix to search on, so a B+tree of either kind still reads every entry, and a radix tree is optimized for prefix matching, not substrings.">Replace it with a clustering B+tree, or with a radix tree, on description.</li>
+      <li data-option="d" data-explain="Official: none of the options would substantially speed the query up. If such queries dominate the workload, the best approach is an inverted index, which is designed for text searches like this one.">None of these would make it substantially faster.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why a Bloom filter can't delete a key, why a skip list inserts from the bottom level up, or why a radix tree has to check the tuple after a match. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 Lecture #09 <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/09-indexes2.pdf">slides</a> 3–33 and <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/09-indexes2.pdf">notes</a> (sections 1–6); Lecture #07 slide 24 and Lecture #05 slide 22 (warm-up and filter uses); Homework #3 Questions 4 and 5 and their <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw3-sols.pdf">official solutions</a>; the Go documentation for <code>hash/maphash</code>.</p>
+
+  <div class="lesson-nav">
+    <a href="./u3-05-bplustree-design.html">← B+Tree Design Choices</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u3-07-latches.html">Next: Latches: Locks vs. Latches and Hash Table Latching →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
