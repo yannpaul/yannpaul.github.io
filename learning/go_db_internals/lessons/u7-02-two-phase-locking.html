@@ -1,0 +1,317 @@
+<!-- Mirrored to yannpaul.github.io/learning/go_db_internals/ by .github/workflows/publish-lessons.yml on every push to main. This file is the source of truth — edit here, not in the destination repo. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit 7 · Lesson 2 · Two-Phase Locking and Deadlocks</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">Database Internals in Go · Unit 7 · Lesson 2</p>
+  <h1>Two-Phase Locking and Deadlocks</h1>
+  <p class="subtitle">Run transactions under two-phase locking and strong strict two-phase locking, explain why the first guarantees conflict serializability but allows cascading aborts, and detect or prevent the deadlocks both can cause.</p>
+
+  <p class="lede">Lesson 1's dependency graph checks a schedule after the fact, and it needs the whole schedule to do so. A running DBMS never has that: transactions arrive one statement at a time. Slide 3 of Lecture #18 states the goal: guarantee that every execution schedule is serializable without knowing the entire schedule ahead of time. The solution is to protect database objects with locks and to follow a protocol about when locks may be taken and released. This lesson covers that protocol, two-phase locking, its stricter variant, and the deadlocks that any locking scheme has to handle.</p>
+
+  <div class="repeat-banner">Warm-up: retrieval from earlier lessons</div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">Unit 3, Lesson 8: under latch crabbing, when is a B+tree node safe for an insert?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="More than half full is the rule for a delete: losing one entry can't make the node underflow.">When it is more than half full</li>
+      <li data-option="b" data-explain="Every node is safe for a search, because a search never changes a node. An insert can change a node even if no other thread has latched it.">When no other thread holds a latch on it</li>
+      <li data-option="c" data-explain="If the node isn't full, one more entry fits, even one pushed up by a split below, so the split can't reach the parent and the parent's latch can be released.">When it isn't full, so one more entry, even one pushed up from below, fits</li>
+      <li data-option="d" data-explain="Safety depends on whether the node can split, which depends on how full it is, not on its level in the tree.">When it is a leaf node</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">Unit 5, Lesson 5: what goes wrong in the Halloween problem?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The update changes a tuple's physical location, the scan below meets it again, and the tuple is updated twice. One query running alone does this; the fix is to track the record IDs the query has already modified.">An update moves a tuple to where the scan below it will see it again, so the same query updates the tuple twice.</li>
+      <li data-option="b" data-explain="Unit 5, Lesson 5 pointed out that the Halloween problem isn't a concurrency bug: it happens with one query running alone.">Two concurrent updates of the same tuple overwrite each other, so one of the updates is lost.</li>
+      <li data-option="c" data-explain="That describes a dirty read. The Halloween problem involves one query and no rollback: the scan visits a tuple a second time after the update moved it.">A scan reads a tuple that an uncommitted update has written and later rolls back.</li>
+      <li data-option="d" data-explain="The problem concerns tuples that are visited twice, not tuples that are skipped.">An index scan skips tuples whose keys changed during the update, so some tuples are never updated.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">Unit 1, Lesson 3: CMU's HW2 solution names one problem with log-structured storage, write amplification. Where does it come from?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="The MemTable lives in memory. Flushing it writes each record once, as a new SSTable.">Every write goes to both the MemTable and an SSTable at the same time.</li>
+      <li data-option="b" data-explain="A delete writes one tombstone record. The extra writes come later, when records are merged.">Each delete rewrites the whole SSTable that holds the key.</li>
+      <li data-option="c" data-explain="Log-structured storage appends; it doesn't keep a slot array to update in place.">The slot array of each page is rewritten on every insert.</li>
+      <li data-option="d" data-explain="Compaction merges SSTables and rewrites the records it keeps, so a record written once is written again at every compaction that includes it.">Compaction rewrites records whenever it merges SSTables, so one logical write becomes several physical writes.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <h2>Locks are not latches</h2>
+
+  <p>Unit 3, Lesson 7 compared locks and latches using Goetz Graefe's table, which Lecture #18 repeats on slide 4. Latches separate workers, protect in-memory data structures for a critical section, and avoid deadlock by coding discipline. <strong>Locks</strong> separate transactions and protect database contents for the entire transaction. They live in a lock manager, and deadlocks between them are detected and resolved, with waits-for graphs, timeouts and aborts, rather than avoided.</p>
+
+  <p>The notes give an example of the difference. In a B+tree leaf scan, a thread holds latches on individual leaves only, one at a time, because that is all the tree's structure needs. Now suppose a transaction scans the leaves while another transaction writes two values somewhere in the table. To avoid seeing only one of the two writes, the scanning transaction has to lock the whole table, although at any moment it latches only the current leaf.</p>
+
+  <h2>Lock modes and the lock manager</h2>
+
+  <p>Slide 7 starts with two lock types. A <strong>shared lock</strong> (S-LOCK) is taken for reads, and an <strong>exclusive lock</strong> (X-LOCK) for writes. Their compatibility matrix has one compatible pair: several transactions can hold S locks on the same object at once, and an X lock is compatible with nothing.</p>
+  <table>
+    <tr><th>Held \ Requested</th><th>S</th><th>X</th></tr>
+    <tr><td>S</td><td>✓</td><td>×</td></tr>
+    <tr><td>X</td><td>×</td><td>×</td></tr>
+  </table>
+  <p>The notes add that real DBMSs have many more lock types built on these two; Lesson 4 adds the intention modes.</p>
+
+  <p>Transactions request locks, or upgrades from S to X, from the <strong>lock manager</strong>, which grants or blocks each request (slide 8). Transactions release locks, and the lock manager updates its internal <strong>lock table</strong>, which records which transactions hold which locks and which transactions are waiting for them. The notes point out that the lock table doesn't need to be durable: any transaction still running when the DBMS crashes is aborted anyway.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L18-locks-not-enough-p14.png" alt="Left: a schedule with time running downward. T1 begins, takes X-LOCK(A), reads and writes A, and unlocks A. T2 begins, takes X-LOCK(A), writes A and unlocks A. Then T1 takes S-LOCK(A), reads A, unlocks A and commits; T2 commits. Black arrows link T1's W(A) to its second R(A) and T2's W(A) to that same read, under a skull and crossbones. Right: the lock manager's log: Granted (T1→A), Released (T1→A), Granted (T2→A), Released (T2→A), Granted (T1→A), Released (T1→A)." loading="lazy">
+    <figcaption>Every access is locked and every request is granted, yet T1 reads A twice and sees T2's write in between: an unrepeatable read (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/18-twophaselocking.pdf#page=14">Lecture #18, slide 9</a>).</figcaption>
+  </figure>
+
+  <p>Slide 9 shows that locks alone are not enough. In the notes' words, locks must be complemented by a concurrency control protocol that decides when they may be taken and released.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=drStlhNbfHI&amp;t=41s">#18 Two-Phase Locking, "Introduction to locking" (0:41)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/18-twophaselocking.pdf#page=3">slides 3–9</a>: why locks, locks versus latches, S and X locks, the lock manager, and the schedule that locking alone gets wrong.</p>
+
+  <h2>Two-phase locking</h2>
+
+  <p><strong>Two-phase locking</strong> (2PL) is a concurrency control protocol that decides at runtime whether a transaction may access an object. It doesn't need to know ahead of time all the queries a transaction will execute (slide 10). The notes classify it as pessimistic. Every transaction goes through two phases (slide 11):</p>
+  <ul>
+    <li>In the <strong>growing phase</strong>, the transaction requests the locks it needs from the lock manager, which grants or denies them.</li>
+    <li>In the <strong>shrinking phase</strong>, the transaction may only release or downgrade locks it acquired earlier. It can't acquire new ones.</li>
+  </ul>
+  <p>The notes say a transaction enters the shrinking phase immediately after it releases its first lock. From then on, acquiring a lock or upgrading one is a 2PL violation (slides 12–13). Nothing forces the shrinking phase to start at commit: a 2PL transaction may release locks while it is still running, as long as it acquires none afterwards.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L18-2pl-phases-p17.png" alt="Text: The txn is not allowed to acquire/upgrade locks after the growing phase finishes. Below, a chart titled Transaction Lifetime with # of Locks on the vertical axis and time running to the right. A grey area rises from zero to a peak, labelled Growing Phase; a dotted red line marks the peak; then a black area labelled Shrinking Phase steps down to zero in several drops." loading="lazy">
+    <figcaption>The number of locks a 2PL transaction holds only rises until the dotted line and only falls after it. The steps on the right are releases spread over the rest of the transaction (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/18-twophaselocking.pdf#page=17">Lecture #18, slide 12</a>).</figcaption>
+  </figure>
+
+  <p>Slide 15 states the main result: 2PL on its own is sufficient to guarantee conflict serializability, because it generates schedules whose precedence graph is acyclic. The HW5 solution points to the order in which locks are acquired. To see why, take an edge Ti → Tj on object A. The two operations conflict, so at least one of them needs an X lock, and Tj can't lock A until Ti has released it. Ti releases locks only in its shrinking phase, after its last acquisition, and Tj acquires A in its growing phase, before its own last acquisition. So every edge goes from a transaction whose growing phase ended earlier to one whose growing phase ended later. A cycle would need a transaction to end its growing phase before itself, which is impossible.</p>
+
+  <h3>The bank transfer, with and without 2PL</h3>
+
+  <p>Slides 20 to 22 use a new pair of transactions. With A = B = 1000, T1 moves $100 from DJ Cache's account A to his bookie's account B, and T2 returns A + B. Any serial order gives 2000.</p>
+  <ul>
+    <li>Without 2PL (slide 21), T1 takes X(A), debits A and releases A before it locks B. T2 then reads A = 900, and it reads B = 1000 before T1 gets its X lock on B. T2 returns 1900.</li>
+    <li>With 2PL (slide 22), T1 takes X(B) before it releases A, because it may not acquire anything after its first release.</li>
+  </ul>
+
+  <figure class="slide">
+    <img src="../assets/slides/L18-2pl-example-p33.png" alt="Schedule with time running downward. T1: BEGIN, X-LOCK(A), R(A), A=A-100, W(A), X-LOCK(B), UNLOCK(A), R(B), B=B+100, W(B), UNLOCK(B), COMMIT. T2: BEGIN, S-LOCK(A) followed by an hourglass and a dotted arrow down to R(A), then S-LOCK(B) followed by another hourglass and arrow down to R(B), then UNLOCK(A), UNLOCK(B), COMMIT and ret(A+B). Right: Initial Database State A=1000, B=1000, and T2 Output A+B=2000." loading="lazy">
+    <figcaption>T2 waits for A until T1 releases it, and then waits for B, which T1 locked before releasing A. T2 therefore sees both of T1's writes and returns 2000 (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/18-twophaselocking.pdf#page=33">Lecture #18, slide 22</a>).</figcaption>
+  </figure>
+
+  <h3>What 2PL costs</h3>
+
+  <p>Slide 17 lists three observations about 2PL:</p>
+  <ul>
+    <li>Some schedules are serializable but not allowed by 2PL, because locking limits concurrency. The slide adds that most DBMSs prefer correctness before performance. Lesson 1's Example #2 is such a schedule; the exercises below ask why.</li>
+    <li>2PL may still have dirty reads. The solution is strong strict 2PL, next.</li>
+    <li>2PL may lead to deadlocks. The solution is detection or prevention, at the end of this lesson.</li>
+  </ul>
+
+  <h2>Cascading aborts and strong strict 2PL</h2>
+
+  <figure class="slide">
+    <img src="../assets/slides/L18-cascading-abort-p26.png" alt="Schedule with time running downward. T1: BEGIN, X-LOCK(A), X-LOCK(B), R(A), W(A), UNLOCK(A). T2: BEGIN, X-LOCK(A), R(A), W(A), then a vertical ellipsis and a skull and crossbones. T1 continues: R(B), W(B), ellipsis, ROLLBACK. An arrow links T1's W(A) to T2's X-LOCK(A). Text on the right: This is a permissible schedule in 2PL, but the DBMS has to also abort T2 when T1 aborts. Any information about T1 cannot be leaked to the outside world. Any computation performed must be rolled back." loading="lazy">
+    <figcaption>T1 follows 2PL: it holds both locks before it releases A. T2 then reads the A that T1 wrote. When T1 rolls back, T2 has computed with a value that never existed, so it must be aborted too (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/18-twophaselocking.pdf#page=26">Lecture #18, slide 16</a>).</figcaption>
+  </figure>
+
+  <p>Slide 16 names the problem. A <strong>cascading abort</strong> happens when aborting one transaction forces the DBMS to abort others that read its writes. The schedule above is permissible under 2PL, yet the DBMS has to abort T2 when T1 aborts, and the next build of the slide labels the result "Wasted work!". T2's read of A is a dirty read, which is why 2PL "may still have dirty reads".</p>
+
+  <p>Slide 19 defines the property that rules this out. A schedule is <strong>strict</strong> if a value written by a transaction is not read or overwritten by other transactions until that transaction finishes. A strict schedule has two advantages: it doesn't incur cascading aborts, and the DBMS can reverse an aborted transaction's changes by restoring the original values of the tuples it modified.</p>
+
+  <p><strong>Strong strict two-phase locking</strong> (SS2PL), also called <strong>rigorous 2PL</strong>, gets there by moving every release to the end (slide 18): a transaction may release its locks only after it has ended, by committing or aborting. It allows only conflict-serializable schedules, but the slide warns that it is often stronger than some applications need. In its lifetime chart, the shrinking phase is a single vertical drop at the end of the transaction. In the bank example (slide 23), T1 holds X(A) and X(B) until it commits, T2 waits, and T2 returns 2000.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L18-universe-of-schedules-p35.png" alt="Nested rectangles: All Schedules contains View Serializable, which contains Conflict Serializable, which contains Strong Strict 2PL, which contains Serial. A red horizontal band labelled No Cascading Aborts crosses them: it contains Strong Strict 2PL and Serial and extends to the left outside View Serializable and to the right beyond Conflict Serializable." loading="lazy">
+    <figcaption>Strong strict 2PL sits inside conflict serializable and inside "no cascading aborts". The band also reaches outside the serializable sets: avoiding cascading aborts says nothing about serializability (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/18-twophaselocking.pdf#page=35">Lecture #18, slide 24</a>).</figcaption>
+  </figure>
+
+  <div class="callout">
+    <p class="callout-label">Strict 2PL in other sources</p>
+    <p>The Lecture #18 notes also describe a "strict 2PL" that releases only shared locks during the shrinking phase, and say it reintroduces dirty reads and cascading aborts. That contradicts slide 19's definition of a strict schedule. This course uses only the slides' strong strict (rigorous) 2PL. HW5's official solution says "strict 2PL" in Q1(a)ii; there it means strong strict 2PL.</p>
+  </div>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=drStlhNbfHI&amp;t=542s">#18 Two-Phase Locking, "Two-phase locking protocol" (9:02)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/18-twophaselocking.pdf#page=15">slides 10–24</a>: the two phases, cascading aborts, strong strict 2PL, the 1900 and 2000 examples and the universe of schedules.</p>
+
+  <h2>Deadlocks</h2>
+
+  <p>Slide 26 shows a deadlock between two transactions. T1 takes X(A) and T2 takes S(B); both are granted. Then T2 requests S(A), which is denied because T1 holds X(A), and T1 requests X(B), which is denied because T2 holds S(B). Each waits for the other forever. A <strong>deadlock</strong> is a cycle of transactions waiting for locks to be released by each other (slide 27). Strong strict 2PL doesn't help: both transactions are still in their growing phases. There are two ways to deal with deadlocks: detect them, or prevent them.</p>
+
+  <h3>Detection</h3>
+
+  <p>For detection (slide 28), the DBMS builds a <strong>waits-for graph</strong>. Its nodes are transactions, and it has an edge from Ti to Tj if Ti is waiting for Tj to release a lock. The system periodically checks the graph for cycles and decides how to break them. The trade-off is between breaking deadlocks fast and spending resources looking for them. The notes add that a background thread usually does the check, and it needs no latches while building the graph: a deadlock it misses in one pass is still there in the next.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L18-waits-for-graph-p45.png" alt="Left: a three-column schedule. T1 takes S-LOCK(A), T2 takes X-LOCK(B), T3 takes S-LOCK(C). Then T1 requests S-LOCK(B), T2 requests X-LOCK(C), and T3 requests X-LOCK(A). Arrows point from each new request to the lock that blocks it. Right: a waits-for graph with edges T1 to T2, T2 to T3 and T3 to T1, each marked with a padlock, and a skull and crossbones in the middle." loading="lazy">
+    <figcaption>T1 waits for T2's X lock on B, T2 for T3's S lock on C, and T3 for T1's S lock on A. The edges point from the waiter to the holder, and they close the cycle T1 → T2 → T3 → T1 (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/18-twophaselocking.pdf#page=45">Lecture #18, slide 29</a>).</figcaption>
+  </figure>
+
+  <p>Don't confuse this graph with Lesson 1's dependency graph. A dependency graph's edge means "comes before in any equivalent serial order"; a waits-for graph's edge means "is blocked by, right now".</p>
+
+  <p>When it finds a deadlock, the DBMS picks a <strong>victim</strong> transaction and rolls it back to break the cycle (slide 30). The victim either restarts or aborts, depending on how the application invoked it; aborting is more common. There is a trade-off between how often the DBMS checks and how long transactions wait before a deadlock is broken. Slide 31 lists what victim selection can consider: age (lowest timestamp), progress (least or most queries executed), the number of items already locked, and the number of transactions that would have to be rolled back with it. It should also consider how many times a transaction has been restarted, to prevent starvation. The rollback can be complete, telling the application the transaction aborted, or partial, back to a savepoint, after which the DBMS re-executes the undone queries (slide 32).</p>
+
+  <h3>Prevention</h3>
+
+  <p>Prevention avoids building the graph (slide 33). When a transaction requests a lock that another transaction holds, the DBMS kills one of the two on the spot, so a cycle never forms. Each transaction gets a timestamp when it starts, and the timestamps give priorities; for example, an older timestamp means higher priority, so T1 &gt; T2 (slide 34). There are two schemes:</p>
+  <ul>
+    <li><strong>Wait-die</strong> ("old waits for young"): if the requester has higher priority than the holder, the requester waits. Otherwise the requester aborts.</li>
+    <li><strong>Wound-wait</strong> ("young waits for old"): if the requester has higher priority than the holder, the holder aborts and releases the lock. Otherwise the requester waits.</li>
+  </ul>
+  <p>The notes give a way to remember them: in scheme "X-Y", a higher-priority requester does X, and a lower-priority requester does Y.</p>
+
+  <figure class="slide">
+    <img src="../assets/slides/L18-wait-die-wound-wait-p51.png" alt="Two cases. Top: T1 begins first, T2 begins and takes X-LOCK(A), then T1 requests X-LOCK(A), with an arrow from T1's request to T2's lock. Outcomes: Wait-Die, T1 waits; Wound-Wait, T2 aborts. Bottom: T1 begins and takes X-LOCK(A), then T2 begins and requests X-LOCK(A), with an arrow from T2's request to T1's lock. Outcomes: Wait-Die, T2 aborts; Wound-Wait, T2 waits." loading="lazy">
+    <figcaption>T1 is older in both cases. When the old transaction asks, wait-die lets it wait and wound-wait aborts the young holder. When the young one asks, wait-die aborts it and wound-wait makes it wait (<a href="https://15445.courses.cs.cmu.edu/fall2025/slides/18-twophaselocking.pdf#page=51">Lecture #18, slide 35</a>).</figcaption>
+  </figure>
+
+  <p>Slide 36 answers why these schemes guarantee no deadlocks: transactions only wait for locks in one direction. Under wait-die only older transactions wait for younger ones, and under wound-wait only younger ones wait for older ones, so a waiting chain can't loop back to where it started. A restarted transaction keeps its original timestamp. Otherwise it would be young again after every restart and could be killed over and over, starved of the resources it needs.</p>
+
+  <p class="lecture-clip"><a href="https://www.youtube.com/watch?v=drStlhNbfHI&amp;t=2089s">#18 Two-Phase Locking, "Lock management and deadlocks" (34:49)</a>, <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/18-twophaselocking.pdf#page=37">slides 26–36</a>: the two-transaction deadlock, waits-for graphs, victim selection and rollback, then wait-die and wound-wait.</p>
+
+  <h2>Where 2PL lives in BusTub and the Go port</h2>
+
+  <p>Slide 52 says 2PL is used in almost every DBMS, but you won't implement it in this course. BusTub at d49b823 still contains a lock manager from an older version of the project (<code>src/include/concurrency/lock_manager.h</code>, with comments from Spring 2023). It is disabled: <code>src/include/common/config.h</code> defines <code>DISABLE_LOCK_MANAGER</code>, and the build doesn't compile <code>lock_manager.cpp</code>. It is also out of date: it refers to isolation levels and transaction states, such as <code>GROWING</code> and <code>SHRINKING</code>, that no longer exist in <code>transaction.h</code>. Read it only as a picture of what a 2PL lock manager looks like: lock modes, a FIFO request queue per object, and a waits-for graph with <code>AddEdge</code>, <code>HasCycle</code> and <code>RunCycleDetection</code>.</p>
+
+  <p>The Go port has no lock manager at all. Project 4 builds optimistic multi-version concurrency control instead. There, a transaction that tries to modify a tuple that another uncommitted transaction has modified is aborted rather than made to wait. Lesson 3 covers the optimistic side, and Lessons 5 and 6 the multi-version side.</p>
+
+  <h2>Work it out</h2>
+
+  <p>Decide each one on paper before opening the result.</p>
+
+  <ul class="todo">
+    <li class="todo-item" data-todo-id="u7l2-example2-2pl">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u7l2-example2-2pl-cb">
+        <label for="u7l2-example2-2pl-cb">Lesson 1's Example #2 is T1:R(A) T1:W(A) T3:R(A) T3:W(A) T2:R(B) T2:W(B) T1:R(B) T1:W(B), conflict serializable as T2, T1, T3. Explain why 2PL can't produce it.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>T3 needs A while T1 is still running. What must T1 have done with its lock on A by then, and what does that rule out for T1 afterwards?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>T1 must release A before T3 reads it, which starts T1's shrinking phase. So T1 must already hold its lock on B at that moment. Then check what T2 does with B before T1 uses it.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p><strong>2PL can't produce it.</strong> T1 must release A before T3:R(A), so it must lock B before that release. But T2 reads and writes B after T3's operations and before T1's, and T2 can't get B while T1 holds it. This is slide 17's point: a serializable schedule that locking rules out.</p></div>
+        </details>
+      </div>
+    </li>
+    <li class="todo-item" data-todo-id="u7l2-deadlock-prevention">
+      <div class="todo-item-head">
+        <input type="checkbox" id="u7l2-deadlock-prevention-cb">
+        <label for="u7l2-deadlock-prevention-cb">Replay slide 26's deadlock (T1 holds X(A), T2 holds S(B), then T2 requests S(A) and T1 requests X(B)) with T1 the older transaction. Say what happens under wait-die and under wound-wait.</label>
+      </div>
+      <div class="todo-item-body">
+        <details class="reveal hint-1">
+          <summary>What to think about</summary>
+          <div class="reveal-body"><p>Each scheme acts at the moment a request is blocked. Which request is blocked first, and who is older, the requester or the holder?</p></div>
+        </details>
+        <details class="reveal hint-2">
+          <summary>The method</summary>
+          <div class="reveal-body"><p>The first blocked request is T2's, for A held by T1: a younger requester. If T2 is still around afterwards, the second is T1's, for B held by T2: an older requester.</p></div>
+        </details>
+        <details class="reveal hint-3">
+          <summary>The result</summary>
+          <div class="reveal-body"><p><strong>Wait-die:</strong> T2 is younger than the holder, so it dies at its first request. T2's locks are released and T1 gets X(B). <strong>Wound-wait:</strong> T2 is younger, so it waits for A. Then T1, the older one, requests B and wounds T2, which aborts and releases B. Both schemes abort T2, at different moments. If T2 restarts, it keeps its original timestamp.</p></div>
+        </details>
+      </div>
+    </li>
+  </ul>
+
+  <div class="callout"><!-- homework-box -->
+    <p class="callout-label">The homework behind these questions</p>
+    <p>The questions marked HW5 come from CMU's Homework #5: <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw5-clean.pdf#page=2">Question 1</a>, with the original figures. Work each one out on paper first, then click the option you got. The quiz tells you at once whether it matches CMU's official answer, and explains why. To compare your working step by step, open the official solutions for <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw5-sols.pdf#page=2">Question 1</a>.</p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">HW5 Q1(a)i, true or false: "2PL is an optimistic concurrency control protocol." Which statement matches the official answer?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Running freely and resolving conflicts afterwards is the optimistic approach of Lesson 3.">True: transactions run freely, and conflicts are resolved when they commit.</li>
+      <li data-option="b" data-explain="Lecture #19, slide 4 calls 2PL pessimistic: it requires transactions to acquire locks on objects before they may access them. The official answer is False for the same reason.">False: transactions must acquire locks before they access objects, so conflicts are prevented before they happen.</li>
+      <li data-option="c" data-explain="Assigning a timestamp at validation is what OCC does. 2PL has no validation phase.">True: each transaction receives a timestamp at the start of its validation phase.</li>
+      <li data-option="d" data-explain="2PL takes S locks for reads as well as X locks for writes (slide 7).">False: 2PL is neither optimistic nor pessimistic, because it locks only the objects a transaction writes.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="quiz-question">HW5 Q1(a)ii, true or false: "Strong strict 2PL prevents the occurrence of cascading aborts and inherently avoids deadlocks without the need for additional prevention or detection techniques." Which statement matches the official answer?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="This is the HW statement, and the official answer is False. Holding locks to the end doesn't stop two transactions from each waiting for a lock the other holds.">True: holding every lock until the end prevents both cascading aborts and deadlocks.</li>
+      <li data-option="b" data-explain="It is the other way round: strong strict 2PL removes cascading aborts and leaves deadlocks.">False: it prevents deadlocks, but cascading aborts can still happen.</li>
+      <li data-option="c" data-explain="Slide 19: a strict schedule doesn't incur cascading aborts, and strong strict 2PL produces strict schedules.">False: it prevents neither cascading aborts nor deadlocks.</li>
+      <li data-option="d" data-explain="No transaction reads or overwrites an uncommitted write, so nothing cascades. Slide 26's deadlock happens while both transactions are still acquiring locks, which strong strict 2PL doesn't restrict, so detection or prevention is still needed.">False: it prevents cascading aborts, but deadlocks can still happen and still need detection or prevention.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="quiz-question">HW5 Q1(a)iii: does regular (not strong strict) 2PL guarantee conflict-serializable schedules?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="Strong strict 2PL schedules are a subset of 2PL schedules (slide 24); the guarantee already holds for plain 2PL.">No; only strong strict 2PL does, and regular 2PL can produce a cyclic precedence graph.</li>
+      <li data-option="b" data-explain="Conflict-serializable schedules are a subset of view-serializable ones, and 2PL guarantees the stronger property.">No; regular 2PL guarantees view serializability but not conflict serializability.</li>
+      <li data-option="c" data-explain="Slide 15: 2PL on its own is sufficient to guarantee conflict serializability, because its schedules have acyclic precedence graphs. The official answer is True.">Yes; the extra rule of strong strict 2PL is needed only to also avoid cascading aborts.</li>
+      <li data-option="d" data-explain="Aborts cause cascading aborts (slide 16), not cycles in the precedence graph.">Yes, but only as long as no transaction ever aborts.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <p>The next question uses HW5 Question 1(b)'s schedule from Lesson 1, with time increasing from left to right. Its dependency graph has the cycle T1 → T2 → T3 → T1.</p>
+  <table>
+    <tr><th></th><th>t1</th><th>t2</th><th>t3</th><th>t4</th><th>t5</th><th>t6</th><th>t7</th><th>t8</th><th>t9</th><th>t10</th></tr>
+    <tr><td>T1</td><td></td><td></td><td>W(B)</td><td>W(A)</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>T2</td><td>R(C)</td><td></td><td></td><td></td><td></td><td>R(A)</td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>T3</td><td></td><td>W(B)</td><td></td><td></td><td>W(C)</td><td></td><td></td><td></td><td>R(D)</td><td></td></tr>
+    <tr><td>T4</td><td></td><td></td><td></td><td></td><td></td><td></td><td>R(D)</td><td>W(B)</td><td></td><td>W(A)</td></tr>
+  </table>
+
+  <div class="quiz" data-answer="a">
+    <p class="quiz-question">HW5 Q1(b)v: is this schedule possible under regular 2PL?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="2PL produces only conflict-serializable schedules (slide 15), and this one has a cycle. The official answer is No for this reason.">No, because 2PL produces only conflict-serializable schedules, and this one is not conflict serializable.</li>
+      <li data-option="b" data-explain="Releasing B early doesn't remove the cycle T1 → T2 → T3 → T1, which runs through A and C as well as B.">Yes, as long as T1 releases its lock on B before T4 writes B.</li>
+      <li data-option="c" data-explain="Locks do constrain the order: an operation that conflicts with a held lock must wait until it is released.">Yes, because 2PL restricts only when locks are released, not the order of operations.</li>
+      <li data-option="d" data-explain="T3 and T4 only read D, and S locks are compatible with each other (slide 7).">No, because T3 and T4 both read D, and 2PL forbids two concurrent readers.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="quiz-question">T1 holds an X lock on A, and T2 and T3 each hold an S lock on B. Then T1 requests X(B), and T2 requests S(A). What does the waits-for graph contain?</p>
+    <ul class="quiz-options">
+      <li data-option="a" data-explain="These edges point from holder to waiter. A waits-for edge goes from the transaction that waits to the one it waits for.">T2→T1, T3→T1 and T1→T2; all three transactions are deadlocked.</li>
+      <li data-option="b" data-explain="T1's X(B) is incompatible with both S locks on B, so T1 waits for T2 and for T3. T2's S(A) is incompatible with T1's X(A), so T2 waits for T1. T1 → T2 → T1 is a cycle; T3 waits for nobody, so it is not part of the deadlock.">T1→T2, T1→T3 and T2→T1; T1 and T2 are deadlocked, and T3 is not.</li>
+      <li data-option="c" data-explain="Both S locks block an X request, so T1 waits for T3 as well as for T2.">T1→T2 and T2→T1 only; T1 and T2 are deadlocked.</li>
+      <li data-option="d" data-explain="S(A) is incompatible with the X lock T1 holds, so T2 does wait for T1.">T1→T2 and T1→T3 only; there is no deadlock.</li>
+    </ul>
+    <p class="quiz-feedback"></p>
+  </div>
+
+  <div class="ask-your-teacher">
+    Something unclear? For example, why releasing a lock early is allowed under 2PL but acquiring one late is not, why strong strict 2PL stops cascading aborts but not deadlocks, or which way the edges of a waits-for graph point. Ask your teacher (me) before moving on.
+  </div>
+
+  <p class="cite">Primary sources: CMU 15-445/645 Fall 2025 Lecture #18 <a href="https://15445.courses.cs.cmu.edu/fall2025/slides/18-twophaselocking.pdf">slides</a> 2–36 and 52 and <a href="https://15445.courses.cs.cmu.edu/fall2025/notes/18-twophaselocking.pdf">notes</a> (sections 1–3); Lecture #19 slide 4; Homework #5 Question 1, parts (a)i to (a)iii and (b)v, and its <a href="https://15445.courses.cs.cmu.edu/fall2025/files/hw5-sols.pdf">official solutions</a>; BusTub <code>src/include/concurrency/lock_manager.h</code>, <code>src/include/common/config.h</code> and <code>src/concurrency/CMakeLists.txt</code> at commit d49b823; the Project #4 writeup (Task 3.4).</p>
+
+  <div class="lesson-nav">
+    <a href="./u7-01-transactions-acid-serializability.html">← Transactions, ACID, and Serializability</a>
+    <a href="../index.html">Course contents</a>
+    <a href="./u7-03-optimistic-concurrency-control.html">Next: Timestamps and Optimistic Concurrency Control →</a>
+  </div>
+</main>
+<script src="../assets/checklist.js"></script>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
